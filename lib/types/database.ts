@@ -1,5 +1,5 @@
-export type SessionStatus = 'waiting' | 'active' | 'revision' | 'transfer' | 'complete'
-export type QuestionType = 'main' | 'transfer'
+export type SessionStatus = 'draft' | 'live' | 'revision' | 'closed'
+export type QuestionType = 'main' | 'revision' | 'transfer'
 export type ConfidenceValue = 1 | 2 | 3 | 4 | 5
 
 export interface Session {

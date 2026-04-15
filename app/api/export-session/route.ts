@@ -4,10 +4,16 @@ import {
   getSessionResponses,
   getSessionAIOutputs,
 } from '@/lib/supabase/queries'
+import { getTeacherSession } from '@/lib/teacher-auth'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function GET(request: NextRequest) {
   try {
+    const teacherSession = await getTeacherSession()
+    if (!teacherSession) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
     const sessionId = request.nextUrl.searchParams.get('sessionId')
     const format = request.nextUrl.searchParams.get('format') || 'csv'
 

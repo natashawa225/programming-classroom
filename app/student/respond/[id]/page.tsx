@@ -5,8 +5,9 @@ import { useParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { getSession, submitResponse } from '@/lib/supabase/queries'
+import { getSession, getSessionParticipantForStudent, getStudentResponse, submitStudentResponse } from '@/lib/supabase/queries'
 import type { Session } from '@/lib/types/database'
+import { usePostgresChanges } from '@/hooks/use-postgres-changes'
 
 export default function StudentRespond() {
   const params = useParams()
@@ -14,7 +15,7 @@ export default function StudentRespond() {
   const sessionId = params.id as string
 
   const [session, setSession] = useState<Session | null>(null)
-  const [sessionParticipantId, setSessionParticipantId] = useState<string | null>(null)
+  const [anonymizedLabel, setAnonymizedLabel] = useState<string | null>(null)
   const [answer, setAnswer] = useState('')
   const [confidence, setConfidence] = useState(3)
   const [loading, setLoading] = useState(true)
@@ -26,15 +27,24 @@ export default function StudentRespond() {
   useEffect(() => {
     const loadSession = async () => {
       try {
-        const spId = sessionStorage.getItem('sessionParticipantId')
-        if (!spId) {
+        const [sessionData, participation] = await Promise.all([
+          getSession(sessionId),
+          getSessionParticipantForStudent(sessionId),
+        ])
+        setSession(sessionData)
+        if (!participation) {
           router.push('/student/join')
           return
         }
+        setAnonymizedLabel(participation.anonymized_label)
 
-        setSessionParticipantId(spId)
-        const sessionData = await getSession(sessionId)
-        setSession(sessionData)
+        const existing = await getStudentResponse(sessionId, { questionType: 'main', roundNumber: 1 })
+        if (existing) {
+          setSubmitted(true)
+          setAnswer(existing.answer)
+          setConfidence(existing.confidence)
+          setFeedback('You have already submitted a response for this session.')
+        }
       } catch (err) {
         console.error('Error loading session:', err)
         setError('Failed to load session')
@@ -46,21 +56,30 @@ export default function StudentRespond() {
     loadSession()
   }, [sessionId, router])
 
+  usePostgresChanges({
+    tables: [{ table: 'sessions', event: 'UPDATE', filter: `id=eq.${sessionId}` }],
+    onChange: async () => {
+      try {
+        const updated = await getSession(sessionId)
+        setSession(updated)
+      } catch (err) {
+        console.error('Error refreshing session status:', err)
+      }
+    },
+    pollMs: 8000,
+    debugLabel: `student-session-${sessionId}`,
+  })
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!sessionParticipantId || !session) return
+    if (!session) return
 
     try {
       setSubmitting(true)
       setError(null)
 
       // Submit response
-      const response = await submitResponse(
-        sessionId,
-        sessionParticipantId,
-        answer,
-        confidence
-      )
+      await submitStudentResponse(sessionId, { answerText: answer, confidence, questionType: 'main', roundNumber: 1 })
 
       setSubmitted(true)
 
@@ -75,7 +94,7 @@ export default function StudentRespond() {
       }
     } catch (err) {
       console.error('Error submitting response:', err)
-      setError('Failed to submit response. Please try again.')
+      setError(err instanceof Error ? err.message : 'Failed to submit response. Please try again.')
       setSubmitting(false)
     }
   }
@@ -108,7 +127,13 @@ export default function StudentRespond() {
       {/* Header */}
       <header className="border-b border-border/40 sticky top-0 bg-background/95 backdrop-blur-sm z-10">
           <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
-          <h1 className="text-2xl font-bold text-foreground">{session.session_code}</h1>
+          <div>
+            <h1 className="text-2xl font-bold text-foreground">{session.session_code}</h1>
+            <p className="text-sm text-foreground/60 mt-1">
+              Status: <span className="capitalize">{session.status}</span>
+              {anonymizedLabel ? ` • You are: ${anonymizedLabel}` : ''}
+            </p>
+          </div>
           <Link href="/student/sessions">
             <Button variant="outline">Back</Button>
           </Link>
@@ -119,6 +144,18 @@ export default function StudentRespond() {
         {error && (
           <Card className="mb-6 p-4 border-destructive/30 bg-destructive/5">
             <p className="text-destructive text-sm">{error}</p>
+          </Card>
+        )}
+
+        {session.status !== 'live' && !submitted && (
+          <Card className="mb-6 p-4 border-border/40 bg-secondary/20">
+            <p className="text-sm text-foreground/70">
+              {session.status === 'draft'
+                ? 'Waiting for your instructor to start the session.'
+                : session.status === 'revision'
+                  ? 'The session is in revision. Main submissions are currently closed.'
+                  : 'This session is closed.'}
+            </p>
           </Card>
         )}
 
@@ -178,7 +215,7 @@ export default function StudentRespond() {
               type="submit"
               size="lg"
               className="w-full"
-              disabled={submitting || !answer.trim()}
+              disabled={submitting || !answer.trim() || session.status !== 'live'}
             >
               {submitting ? 'Submitting...' : 'Submit Answer'}
             </Button>

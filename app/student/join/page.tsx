@@ -27,7 +27,6 @@ export default function StudentJoin() {
         studentId,
       })
 
-      sessionStorage.setItem('sessionParticipantId', participation.session_participant_id)
       sessionStorage.setItem('anonymizedLabel', participation.anonymized_label)
       sessionStorage.setItem('sessionId', session.id)
       sessionStorage.setItem('sessionCode', session.session_code)
@@ -70,7 +69,7 @@ export default function StudentJoin() {
                 id="sessionCode"
                 type="text"
                 value={sessionCode}
-                onChange={(e) => setSessionCode(e.target.value.toUpperCase())}
+                onChange={(e) => setSessionCode(e.target.value.toUpperCase().replace(/\s+/g, ''))}
                 placeholder="e.g., DATA-STRUCTURES-01"
                 className="w-full text-center text-lg tracking-widest"
                 disabled={loading}

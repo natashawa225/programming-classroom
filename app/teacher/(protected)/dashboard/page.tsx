@@ -7,6 +7,7 @@ import { Card } from '@/components/ui/card'
 import { getSessionsByTeacher } from '@/lib/supabase/queries'
 import type { Session } from '@/lib/types/database'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
+import { teacherLogout } from '@/app/teacher/auth-actions'
 
 export default function TeacherDashboard() {
   const [sessions, setSessions] = useState<Session[]>([])
@@ -39,17 +40,18 @@ export default function TeacherDashboard() {
   usePostgresChanges({
     tables: realtimeTables,
     onChange: loadSessions,
+    pollMs: 8000,
+    debugLabel: 'teacher-dashboard',
   })
 
   const getStatusBadge = (status: string) => {
     const colors = {
-      waiting: 'bg-muted text-muted-foreground',
-      active: 'bg-primary/20 text-primary',
+      draft: 'bg-muted text-muted-foreground',
+      live: 'bg-primary/20 text-primary',
       revision: 'bg-accent/20 text-accent',
-      transfer: 'bg-accent/20 text-accent',
-      complete: 'bg-destructive/20 text-destructive',
+      closed: 'bg-destructive/20 text-destructive',
     }
-    return colors[status as keyof typeof colors] || colors.waiting
+    return colors[status as keyof typeof colors] || colors.draft
   }
 
   return (
@@ -61,9 +63,9 @@ export default function TeacherDashboard() {
             <h1 className="text-2xl font-bold text-foreground">Teacher Dashboard</h1>
             <p className="text-sm text-foreground/60 mt-1">Manage your classroom sessions</p>
           </div>
-          <Link href="/role-select">
-            <Button variant="outline">Sign Out</Button>
-          </Link>
+          <form action={teacherLogout}>
+            <Button variant="outline" type="submit">Log Out</Button>
+          </form>
         </div>
       </header>
 

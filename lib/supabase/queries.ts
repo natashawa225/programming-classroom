@@ -1,5 +1,7 @@
 'use server'
 
+import { cookies } from 'next/headers'
+import { createHash, randomBytes } from 'crypto'
 import { createClient } from './server'
 import type {
   AIOutput,
@@ -11,6 +13,23 @@ import type {
   TeacherAction,
 } from '@/lib/types/database'
 import { formatAnonymizedLabel, generateSessionCode } from '@/lib/utils/codes'
+import { assertTeacherAuthenticated } from '@/lib/teacher-auth'
+
+function sessionParticipantCookieName(sessionId: string) {
+  return `sd_sp_${sessionId}`
+}
+
+function normalizeSessionCode(sessionCode: string) {
+  return sessionCode.trim().toUpperCase().replace(/\s+/g, '')
+}
+
+function createJoinToken() {
+  return randomBytes(32).toString('base64url')
+}
+
+function hashJoinToken(token: string) {
+  return createHash('sha256').update(token).digest('hex')
+}
 
 function normalizeConfidence(confidence: number): ConfidenceValue {
   const rounded = Math.round(confidence)
@@ -47,6 +66,7 @@ export async function createSession(
     transferCorrectAnswer?: string
   }
 ) {
+  await assertTeacherAuthenticated()
   const supabase = await createClient()
 
   const desired = data.sessionCode?.trim() || ''
@@ -65,7 +85,7 @@ export async function createSession(
         transfer_question: data.transferQuestion?.trim() || null,
         transfer_options: data.transferOptions ? normalizeArrayValue(data.transferOptions) : null,
         transfer_correct_answer: data.transferCorrectAnswer?.trim() || null,
-        status: 'waiting',
+        status: 'draft',
       })
       .select()
       .single()
@@ -84,6 +104,7 @@ export async function createSession(
 }
 
 export async function getSessionsByTeacher(_teacherId: string) {
+  await assertTeacherAuthenticated()
   const supabase = await createClient()
   const { data, error } = await supabase
     .from('sessions')
@@ -99,7 +120,7 @@ export async function getActiveSessions() {
   const { data, error } = await supabase
     .from('sessions')
     .select('*')
-    .in('status', ['active', 'transfer'])
+    .in('status', ['live', 'revision'])
     .order('created_at', { ascending: false })
 
   if (error) throw error
@@ -121,10 +142,11 @@ export async function getSession(sessionId: string) {
 
 export async function getSessionByCode(sessionCode: string) {
   const supabase = await createClient()
+  const normalized = normalizeSessionCode(sessionCode)
   const { data, error } = await supabase
     .from('sessions')
     .select('*')
-    .eq('session_code', sessionCode.trim())
+    .eq('session_code', normalized)
     .maybeSingle()
 
   if (error) throw error
@@ -136,7 +158,21 @@ export async function updateSessionStatus(
   sessionId: string,
   status: SessionStatus
 ) {
+  await assertTeacherAuthenticated()
   const supabase = await createClient()
+
+  const current = await getSession(sessionId)
+  const allowedNext: Record<SessionStatus, SessionStatus[]> = {
+    draft: ['live'],
+    live: ['revision', 'closed'],
+    revision: ['closed'],
+    closed: [],
+  }
+
+  if (!allowedNext[current.status].includes(status)) {
+    throw new Error(`Invalid status transition: ${current.status} -> ${status}`)
+  }
+
   const { data, error } = await supabase
     .from('sessions')
     .update({ status })
@@ -154,7 +190,35 @@ export async function joinSessionByCode(
   data: { studentName?: string | null; studentId?: string | null }
 ) {
   const supabase = await createClient()
-  const session = await getSessionByCode(sessionCode)
+  const session = await getSessionByCode(normalizeSessionCode(sessionCode))
+  if (session.status === 'closed') {
+    throw new Error('This session is closed.')
+  }
+
+  // 1) If cookie exists and is valid, reuse that session_participant (stable across refresh).
+  const cookieStore = await cookies()
+  const cookieName = sessionParticipantCookieName(session.id)
+  const existingToken = cookieStore.get(cookieName)?.value
+  if (existingToken) {
+    const { data: existingByToken, error } = await supabase
+      .from('session_participants')
+      .select('session_participant_id, session_id, student_name, student_id, anonymized_label, joined_at')
+      .eq('session_id', session.id)
+      .eq('join_token_hash', hashJoinToken(existingToken))
+      .maybeSingle()
+
+    if (error) throw error
+    if (existingByToken) {
+      cookieStore.set(cookieName, existingToken, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/student',
+        maxAge: 60 * 60 * 24 * 7, // 7 days
+      })
+      return { session, participation: existingByToken as SessionParticipant }
+    }
+  }
 
   const studentName = data.studentName?.trim() || null
   const studentId = data.studentId?.trim() || null
@@ -165,6 +229,9 @@ export async function joinSessionByCode(
   // Duplicate prevention (best-effort):
   // - If student_id is present: enforce single join per session by student_id.
   // - Else: fall back to (session_id + student_name) match.
+  const joinToken = createJoinToken()
+  const joinTokenHash = hashJoinToken(joinToken)
+
   if (studentId) {
     const { data: existingById, error } = await supabase
       .from('session_participants')
@@ -175,6 +242,22 @@ export async function joinSessionByCode(
 
     if (error) throw error
     if (existingById && existingById.length > 0) {
+      const existing = existingById[0] as SessionParticipant
+      const { error: updateError } = await supabase
+        .from('session_participants')
+        .update({ join_token_hash: joinTokenHash })
+        .eq('session_participant_id', existing.session_participant_id)
+
+      if (updateError) throw updateError
+
+      cookieStore.set(sessionParticipantCookieName(session.id), joinToken, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/student',
+        maxAge: 60 * 60 * 24 * 7,
+      })
+
       return { session, participation: existingById[0] as SessionParticipant }
     }
   } else if (studentName) {
@@ -187,31 +270,68 @@ export async function joinSessionByCode(
 
     if (error) throw error
     if (existingByName && existingByName.length > 0) {
+      const existing = existingByName[0] as SessionParticipant
+      const { error: updateError } = await supabase
+        .from('session_participants')
+        .update({ join_token_hash: joinTokenHash })
+        .eq('session_participant_id', existing.session_participant_id)
+
+      if (updateError) throw updateError
+
+      cookieStore.set(sessionParticipantCookieName(session.id), joinToken, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/student',
+        maxAge: 60 * 60 * 24 * 7,
+      })
+
       return { session, participation: existingByName[0] as SessionParticipant }
     }
   }
 
   // Allocate anonymized label P01, P02, ... in join order.
-  const { count, error: countError } = await supabase
-    .from('session_participants')
-    .select('*', { count: 'exact', head: true })
-    .eq('session_id', session.id)
+  let participation: any = null
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const { count, error: countError } = await supabase
+      .from('session_participants')
+      .select('*', { count: 'exact', head: true })
+      .eq('session_id', session.id)
 
-  if (countError) throw countError
-  const anonymizedLabel = formatAnonymizedLabel((count ?? 0) + 1)
+    if (countError) throw countError
+    const anonymizedLabel = formatAnonymizedLabel((count ?? 0) + 1 + attempt)
 
-  const { data: participation, error: insertError } = await supabase
-    .from('session_participants')
-    .insert({
-      session_id: session.id,
-      student_name: studentName,
-      student_id: studentId,
-      anonymized_label: anonymizedLabel,
-    })
-    .select()
-    .single()
+    const { data: inserted, error: insertError } = await supabase
+      .from('session_participants')
+      .insert({
+        session_id: session.id,
+        student_name: studentName,
+        student_id: studentId,
+        anonymized_label: anonymizedLabel,
+        join_token_hash: joinTokenHash,
+      })
+      .select()
+      .single()
 
-  if (insertError) throw insertError
+    if (!insertError) {
+      participation = inserted
+      break
+    }
+
+    // Label collision under concurrent joins: retry.
+    if (insertError.code === '23505') continue
+    throw insertError
+  }
+
+  if (!participation) throw new Error('Unable to join session. Please try again.')
+
+  cookieStore.set(sessionParticipantCookieName(session.id), joinToken, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/student',
+    maxAge: 60 * 60 * 24 * 7,
+  })
 
   return {
     session,
@@ -219,7 +339,25 @@ export async function joinSessionByCode(
   }
 }
 
+export async function getSessionParticipantForStudent(sessionId: string) {
+  const supabase = await createClient()
+  const cookieStore = await cookies()
+  const token = cookieStore.get(sessionParticipantCookieName(sessionId))?.value
+  if (!token) return null
+
+  const { data, error } = await supabase
+    .from('session_participants')
+    .select('session_participant_id, session_id, student_name, student_id, anonymized_label, joined_at')
+    .eq('session_id', sessionId)
+    .eq('join_token_hash', hashJoinToken(token))
+    .maybeSingle()
+
+  if (error) throw error
+  return (data as SessionParticipant) || null
+}
+
 export async function getSessionParticipants(sessionId: string) {
+  await assertTeacherAuthenticated()
   const supabase = await createClient()
   const { data, error } = await supabase
     .from('session_participants')
@@ -245,19 +383,30 @@ export async function submitResponse(
   sessionId: string,
   sessionParticipantId: string,
   answerText: string,
-  confidence: number
+  confidence: number,
+  questionType: 'main' | 'revision' | 'transfer' = 'main',
+  roundNumber = 1
 ) {
   const supabase = await createClient()
 
   const session = await getSession(sessionId)
+  if (questionType === 'main' && session.status !== 'live') {
+    throw new Error('This session is not live yet.')
+  }
+  if (questionType === 'revision' && session.status !== 'revision') {
+    throw new Error('This session is not in revision yet.')
+  }
+  if (session.status === 'closed') {
+    throw new Error('This session is closed.')
+  }
 
   const { data: existingResponse, error: responseLookupError } = await supabase
     .from('responses')
     .select('response_id')
     .eq('session_id', session.id)
     .eq('session_participant_id', sessionParticipantId)
-    .eq('question_type', 'main')
-    .eq('round_number', 1)
+    .eq('question_type', questionType)
+    .eq('round_number', roundNumber)
     .limit(1)
 
   if (responseLookupError) throw responseLookupError
@@ -282,8 +431,8 @@ export async function submitResponse(
     .insert({
       session_id: sessionId,
       session_participant_id: sessionParticipantId,
-      question_type: 'main',
-      round_number: 1,
+      question_type: questionType,
+      round_number: roundNumber,
       answer: answerText,
       confidence: normalizeConfidence(confidence),
       explanation: null,
@@ -296,7 +445,61 @@ export async function submitResponse(
   return data as Response
 }
 
+export async function submitStudentResponse(
+  sessionId: string,
+  data: { answerText: string; confidence: number; questionType?: 'main' | 'revision' | 'transfer'; roundNumber?: number }
+) {
+  const participation = await getSessionParticipantForStudent(sessionId)
+  if (!participation) {
+    throw new Error('Not joined for this session. Please join using the session code.')
+  }
+
+  return submitResponse(
+    sessionId,
+    participation.session_participant_id,
+    data.answerText,
+    data.confidence,
+    data.questionType ?? 'main',
+    data.roundNumber ?? 1
+  )
+}
+
+export async function getStudentResponse(
+  sessionId: string,
+  data: { questionType?: 'main' | 'revision' | 'transfer'; roundNumber?: number } = {}
+) {
+  const supabase = await createClient()
+  const participation = await getSessionParticipantForStudent(sessionId)
+  if (!participation) return null
+
+  const { data: response, error } = await supabase
+    .from('responses')
+    .select(
+      `
+      response_id,
+      session_id,
+      session_participant_id,
+      question_type,
+      round_number,
+      answer,
+      confidence,
+      explanation,
+      is_correct,
+      created_at
+    `
+    )
+    .eq('session_id', sessionId)
+    .eq('session_participant_id', participation.session_participant_id)
+    .eq('question_type', data.questionType ?? 'main')
+    .eq('round_number', data.roundNumber ?? 1)
+    .maybeSingle()
+
+  if (error) throw error
+  return response as Response | null
+}
+
 export async function getSessionResponses(sessionId: string) {
+  await assertTeacherAuthenticated()
   const supabase = await createClient()
   const { data, error } = await supabase
     .from('responses')
@@ -333,6 +536,7 @@ export async function createAIOutput(
   content: Record<string, unknown>,
   roundNumber = 1
 ) {
+  await assertTeacherAuthenticated()
   const supabase = await createClient()
   const { data, error } = await supabase
     .from('ai_outputs')
@@ -354,6 +558,7 @@ export async function createAIOutput(
 }
 
 export async function getSessionAIOutputs(sessionId: string) {
+  await assertTeacherAuthenticated()
   const supabase = await createClient()
   const { data, error } = await supabase
     .from('ai_outputs')
@@ -371,6 +576,7 @@ export async function logTeacherAction(
   actionType: TeacherAction['action_type'],
   metadata: Record<string, unknown> = {}
 ) {
+  await assertTeacherAuthenticated()
   const supabase = await createClient()
   const { data, error } = await supabase
     .from('teacher_actions')

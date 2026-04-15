@@ -7,6 +7,8 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { getSession, getSessionResponses } from '@/lib/supabase/queries'
 import type { Session } from '@/lib/types/database'
+import { teacherLogout } from '@/app/teacher/auth-actions'
+import { usePostgresChanges } from '@/hooks/use-postgres-changes'
 
 export default function SessionExport() {
   const params = useParams()
@@ -38,6 +40,20 @@ export default function SessionExport() {
 
     loadData()
   }, [sessionId])
+
+  usePostgresChanges({
+    tables: [{ table: 'responses', event: 'INSERT', filter: `session_id=eq.${sessionId}` }],
+    onChange: async () => {
+      try {
+        const responsesData = await getSessionResponses(sessionId)
+        setResponseCount(responsesData?.length || 0)
+      } catch (err) {
+        console.error('Error refreshing response count:', err)
+      }
+    },
+    pollMs: 10000,
+    debugLabel: `teacher-export-${sessionId}`,
+  })
 
   const handleExport = async () => {
     try {
@@ -113,9 +129,14 @@ export default function SessionExport() {
             <h1 className="text-2xl font-bold text-foreground">Export Data</h1>
             <p className="text-sm text-foreground/60 mt-1">{session.session_code}</p>
           </div>
-          <Link href={`/teacher/session/${sessionId}`}>
-            <Button variant="outline">Back</Button>
-          </Link>
+          <div className="flex items-center gap-3">
+            <Link href={`/teacher/session/${sessionId}`}>
+              <Button variant="outline">Back</Button>
+            </Link>
+            <form action={teacherLogout}>
+              <Button variant="outline" type="submit">Log Out</Button>
+            </form>
+          </div>
         </div>
       </header>
 

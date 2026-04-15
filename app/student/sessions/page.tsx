@@ -13,18 +13,13 @@ export default function StudentSessions() {
     id: string
     session_code: string
     question: string
+    status?: string
   }>>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    // Get participant info from session storage
     const label = sessionStorage.getItem('anonymizedLabel')
-    const sessionParticipantId = sessionStorage.getItem('sessionParticipantId')
-    if (!label || !sessionParticipantId) {
-      router.push('/student/join')
-      return
-    }
-    setAnonymizedLabel(label)
+    if (label) setAnonymizedLabel(label)
 
     const loadSessions = async () => {
       try {
@@ -33,6 +28,7 @@ export default function StudentSessions() {
           id: session.id,
           session_code: session.session_code,
           question: session.question,
+          status: session.status,
         })))
       } catch (error) {
         console.error('Error loading active sessions:', error)
@@ -49,7 +45,6 @@ export default function StudentSessions() {
   }
 
   const handleLogout = () => {
-    sessionStorage.removeItem('sessionParticipantId')
     sessionStorage.removeItem('anonymizedLabel')
     sessionStorage.removeItem('studentName')
     sessionStorage.removeItem('studentId')
@@ -105,7 +100,7 @@ export default function StudentSessions() {
                     <p className="text-foreground/70 mt-2">{session.question}</p>
                   </div>
                   <span className="px-3 py-1 rounded-full text-sm font-medium bg-primary/20 text-primary">
-                    Active
+                    {session.status ? session.status.charAt(0).toUpperCase() + session.status.slice(1) : 'Live'}
                   </span>
                 </div>
 

@@ -6,6 +6,7 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { createSession } from '@/lib/supabase/queries'
+import { teacherLogout } from '@/app/teacher/auth-actions'
 
 export default function CreateSession() {
   const router = useRouter()
@@ -60,9 +61,14 @@ export default function CreateSession() {
       <header className="border-b border-border/40 sticky top-0 bg-background/95 backdrop-blur-sm z-10">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
           <h1 className="text-2xl font-bold text-foreground">Create New Session</h1>
-          <Link href="/teacher/dashboard">
-            <Button variant="outline">Back</Button>
-          </Link>
+          <div className="flex items-center gap-3">
+            <Link href="/teacher/dashboard">
+              <Button variant="outline">Back</Button>
+            </Link>
+            <form action={teacherLogout}>
+              <Button variant="outline" type="submit">Log Out</Button>
+            </form>
+          </div>
         </div>
       </header>
 

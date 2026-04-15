@@ -8,6 +8,7 @@ import { Card } from '@/components/ui/card'
 import { getSession, getSessionParticipants, getSessionResponses, updateSessionStatus } from '@/lib/supabase/queries'
 import type { Session } from '@/lib/types/database'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
+import { teacherLogout } from '@/app/teacher/auth-actions'
 
 export default function SessionDetail() {
   const params = useParams()
@@ -54,9 +55,11 @@ export default function SessionDetail() {
   usePostgresChanges({
     tables: realtimeTables,
     onChange: loadData,
+    pollMs: 8000,
+    debugLabel: `teacher-session-${sessionId}`,
   })
 
-  const handleStatusChange = async (newStatus: 'active' | 'complete') => {
+  const handleStatusChange = async (newStatus: 'draft' | 'live' | 'revision' | 'closed') => {
     if (!session) return
 
     try {
@@ -97,9 +100,10 @@ export default function SessionDetail() {
   const respondingCount = responses.length
   const totalParticipants = participants.length
   const responseRate = totalParticipants > 0 ? Math.round((respondingCount / totalParticipants) * 100) : 0
-  const isWaiting = session.status === 'waiting'
-  const isActive = session.status === 'active'
-  const isComplete = session.status === 'complete'
+  const isDraft = session.status === 'draft'
+  const isLive = session.status === 'live'
+  const isRevision = session.status === 'revision'
+  const isClosed = session.status === 'closed'
 
   return (
     <main className="min-h-screen bg-background">
@@ -110,9 +114,14 @@ export default function SessionDetail() {
             <h1 className="text-2xl font-bold text-foreground">{session.session_code}</h1>
             <p className="text-sm text-foreground/60 mt-1">{session.question}</p>
           </div>
-          <Link href="/teacher/dashboard">
-            <Button variant="outline">Back</Button>
-          </Link>
+          <div className="flex items-center gap-3">
+            <Link href="/teacher/dashboard">
+              <Button variant="outline">Back</Button>
+            </Link>
+            <form action={teacherLogout}>
+              <Button variant="outline" type="submit">Log Out</Button>
+            </form>
+          </div>
         </div>
       </header>
 
@@ -146,11 +155,11 @@ export default function SessionDetail() {
         </div>
 
         {/* Session Controls */}
-        {isWaiting && (
+        {isDraft && (
           <Card className="p-6 mb-8">
             <h2 className="text-lg font-semibold text-foreground mb-4">Session Controls</h2>
             <Button
-              onClick={() => handleStatusChange('active')}
+              onClick={() => handleStatusChange('live')}
               disabled={actionLoading}
               className="w-full md:w-auto"
             >
@@ -159,20 +168,28 @@ export default function SessionDetail() {
           </Card>
         )}
 
-        {isActive && (
+        {isLive && (
           <Card className="p-6 mb-8">
             <h2 className="text-lg font-semibold text-foreground mb-4">Session Controls</h2>
             <div className="flex flex-col md:flex-row gap-4">
               <Button disabled variant="secondary" className="flex-1">
-                Session Active
+                Session Live
               </Button>
               <Button
-                onClick={() => handleStatusChange('complete')}
+                onClick={() => handleStatusChange('revision')}
                 disabled={actionLoading}
                 variant="outline"
                 className="flex-1"
               >
-                {actionLoading ? 'Closing...' : 'Close Session'}
+                {actionLoading ? 'Updating...' : 'Move to Revision'}
+              </Button>
+              <Button
+                onClick={() => handleStatusChange('closed')}
+                disabled={actionLoading}
+                variant="outline"
+                className="flex-1"
+              >
+                {actionLoading ? 'Closing...' : 'Close'}
               </Button>
               <Link href={`/teacher/session/${sessionId}/analysis`} className="flex-1">
                 <Button className="w-full">View AI Analysis</Button>
@@ -181,7 +198,29 @@ export default function SessionDetail() {
           </Card>
         )}
 
-        {isComplete && (
+        {isRevision && (
+          <Card className="p-6 mb-8">
+            <h2 className="text-lg font-semibold text-foreground mb-4">Session Controls</h2>
+            <div className="flex flex-col md:flex-row gap-4">
+              <Button disabled variant="secondary" className="flex-1">
+                Revision Mode
+              </Button>
+              <Button
+                onClick={() => handleStatusChange('closed')}
+                disabled={actionLoading}
+                variant="outline"
+                className="flex-1"
+              >
+                {actionLoading ? 'Closing...' : 'Close'}
+              </Button>
+              <Link href={`/teacher/session/${sessionId}/analysis`} className="flex-1">
+                <Button className="w-full">View AI Analysis</Button>
+              </Link>
+            </div>
+          </Card>
+        )}
+
+        {isClosed && (
           <Card className="p-6 mb-8">
             <h2 className="text-lg font-semibold text-foreground mb-4">Session Closed</h2>
             <div className="flex flex-col md:flex-row gap-4">
@@ -224,7 +263,7 @@ export default function SessionDetail() {
           {responses.length === 0 ? (
             <Card className="p-6 text-center">
               <p className="text-foreground/60">No responses yet</p>
-              {session.status === 'waiting' && (
+              {session.status === 'draft' && (
                 <p className="text-sm text-foreground/60 mt-2">Start the session to allow students to respond</p>
               )}
             </Card>

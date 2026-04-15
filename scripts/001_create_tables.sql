@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   transfer_question TEXT,
   transfer_options JSONB,
   transfer_correct_answer TEXT,
-  status TEXT DEFAULT 'waiting' CHECK (status IN ('waiting', 'active', 'revision', 'transfer', 'complete')),
+  status TEXT DEFAULT 'draft' CHECK (status IN ('draft', 'live', 'revision', 'closed')),
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -24,21 +24,29 @@ CREATE TABLE IF NOT EXISTS session_participants (
   student_name TEXT,
   student_id TEXT,
   anonymized_label TEXT NOT NULL,
+  join_token_hash TEXT,
   joined_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(session_id, anonymized_label)
 );
 
--- Prevent duplicate joins when student_id is provided (recommended)
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_session_participants_session_student_id
-ON session_participants(session_id, student_id)
-WHERE student_id IS NOT NULL AND student_id <> '';
+ALTER TABLE session_participants
+ADD COLUMN IF NOT EXISTS join_token_hash TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_session_participants_join_token_hash
+ON session_participants(join_token_hash)
+WHERE join_token_hash IS NOT NULL AND join_token_hash <> '';
+
+-- Token lookup (cookie token is hashed server-side before querying)
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_session_participants_join_token_hash
+ON session_participants(join_token_hash)
+WHERE join_token_hash IS NOT NULL AND join_token_hash <> '';
 
 -- Student responses (supports multiple rounds)
 CREATE TABLE IF NOT EXISTS responses (
   response_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_participant_id UUID REFERENCES session_participants(session_participant_id) ON DELETE CASCADE,
   session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
-  question_type TEXT NOT NULL CHECK (question_type IN ('main', 'transfer')),
+  question_type TEXT NOT NULL CHECK (question_type IN ('main', 'revision', 'transfer')),
   round_number INT NOT NULL DEFAULT 1,
   answer TEXT NOT NULL,
   confidence INT NOT NULL CHECK (confidence BETWEEN 1 AND 5),

@@ -1,9 +1,15 @@
 import { getSession, getSessionResponses, createAIOutput, logTeacherAction } from '@/lib/supabase/queries'
 import { analyzeMisconceptions, generateConfidenceMatrix } from '@/lib/ai/analysis'
+import { getTeacherSession } from '@/lib/teacher-auth'
 import { NextRequest, NextResponse } from 'next/server'
 
 export async function POST(request: NextRequest) {
   try {
+    const teacherSession = await getTeacherSession()
+    if (!teacherSession) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
     const { sessionId, teacherId } = await request.json()
 
     if (!sessionId) {
