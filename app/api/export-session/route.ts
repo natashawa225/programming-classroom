@@ -62,7 +62,7 @@ function generateCSV(
 ): string {
   const lines: string[] = []
 
-  lines.push('SMART-Draft Session Export')
+  lines.push('Session Export')
   lines.push('')
   lines.push('Session Information')
   lines.push(`Session Code,${escapeCSV(session.session_code)}`)
@@ -93,18 +93,22 @@ function generateCSV(
   lines.push('')
 
   lines.push('Student Responses')
-  lines.push('Session Participant ID,Anonymized Label,Question Type,Round,Answer,Confidence,Explanation,Correct,Submitted At')
+  lines.push('Session Participant ID,Anonymized Label,Question ID,Question Position,Question Type,Round,Answer,Confidence,Explanation,Correct,Time Taken (s),Original Response ID,Submitted At')
   responses.forEach((response: any) => {
     lines.push(
       [
         escapeCSV(response.session_participant_id),
         escapeCSV(response.session_participants?.anonymized_label || ''),
+        escapeCSV(response.question_id || ''),
+        escapeCSV(String(response.session_questions?.position ?? '')),
         response.question_type,
         response.round_number,
         escapeCSV(response.answer),
         response.confidence,
         escapeCSV(response.explanation || ''),
         response.is_correct === null ? '' : String(response.is_correct),
+        response.time_taken_seconds === null || response.time_taken_seconds === undefined ? '' : String(response.time_taken_seconds),
+        escapeCSV(response.original_response_id || ''),
         response.created_at ? new Date(response.created_at).toISOString() : '',
       ].join(',')
     )

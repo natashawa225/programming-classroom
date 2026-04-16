@@ -1,14 +1,141 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { getSession, getSessionResponses } from '@/lib/supabase/queries'
+import { Badge } from '@/components/ui/badge'
+import { getSession, getSessionResponses, getLatestCompletedAnalysisRun, getLatestInProgressAnalysisRun } from '@/lib/supabase/queries'
 import type { Session } from '@/lib/types/database'
+import type { SessionRoundAnalysis } from '@/lib/ai/experiment-analysis'
 import { teacherLogout } from '@/app/teacher/auth-actions'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
+import { AnalysisDashboard } from '@/components/analysis-dashboard'
+
+type MisconceptionComparison = NonNullable<SessionRoundAnalysis['misconception_comparison']>[number]
+type MisconceptionDelta = NonNullable<MisconceptionComparison['deltas']>[number]
+type MisconceptionGroupKey = 'resolved' | 'reduced' | 'persistent' | 'emerging'
+
+const MISCONCEPTION_GROUP_META: Record<
+  MisconceptionGroupKey,
+  {
+    label: string
+    badgeClassName: string
+    borderClassName: string
+    hint: string
+  }
+> = {
+  resolved: {
+    label: 'Resolved',
+    badgeClassName: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/20',
+    borderClassName: 'border-emerald-500/15',
+    hint: 'No longer showing up in round 2.',
+  },
+  reduced: {
+    label: 'Reduced',
+    badgeClassName: 'bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/20',
+    borderClassName: 'border-sky-500/15',
+    hint: 'Still present, but less common.',
+  },
+  persistent: {
+    label: 'Persistent',
+    badgeClassName: 'bg-amber-500/15 text-amber-800 dark:text-amber-300 border-amber-500/20',
+    borderClassName: 'border-amber-500/15',
+    hint: 'Still common after the revision.',
+  },
+  emerging: {
+    label: 'New / Emerging',
+    badgeClassName: 'bg-violet-500/15 text-violet-800 dark:text-violet-300 border-violet-500/20',
+    borderClassName: 'border-violet-500/15',
+    hint: 'Appears for the first time in round 2.',
+  },
+}
+
+function getDeltaClassification(delta: Pick<MisconceptionDelta, 'round1' | 'round2' | 'classification'>) {
+  if (delta.classification) return delta.classification
+  if (delta.round1 > 0 && delta.round2 === 0) return 'resolved'
+  if (delta.round1 === 0 && delta.round2 > 0) return 'emerging'
+  if (delta.round1 > 0 && delta.round2 > 0 && delta.round2 < delta.round1) return 'reduced'
+  return 'persistent'
+}
+
+function getComparisonGroups(mc: MisconceptionComparison) {
+  const raw = Array.isArray(mc.grouped_deltas)
+    ? mc.grouped_deltas
+    : null
+
+  const fallback = Array.isArray(mc.deltas) ? mc.deltas : []
+  const source = raw
+    ? {
+        resolved: Array.isArray(raw.resolved) ? raw.resolved : [],
+        reduced: Array.isArray(raw.reduced) ? raw.reduced : [],
+        persistent: Array.isArray(raw.persistent) ? raw.persistent : [],
+        emerging: Array.isArray(raw.emerging) ? raw.emerging : [],
+      }
+    : {
+        resolved: fallback.filter((d) => getDeltaClassification(d) === 'resolved'),
+        reduced: fallback.filter((d) => getDeltaClassification(d) === 'reduced'),
+        persistent: fallback.filter((d) => getDeltaClassification(d) === 'persistent'),
+        emerging: fallback.filter((d) => getDeltaClassification(d) === 'emerging'),
+      }
+
+  const groupEntries = (Object.keys(MISCONCEPTION_GROUP_META) as MisconceptionGroupKey[]).map((key) => {
+    const items = [...source[key]].sort((a, b) => {
+      const aPriority = typeof a.priority === 'number' ? a.priority : 0
+      const bPriority = typeof b.priority === 'number' ? b.priority : 0
+      return bPriority - aPriority
+    })
+
+    return {
+      key,
+      meta: MISCONCEPTION_GROUP_META[key],
+      items,
+    }
+  })
+
+  const hasAny = groupEntries.some((group) => group.items.length > 0)
+  return { groupEntries, hasAny }
+}
+
+function formatQuestionActionLine(mc: MisconceptionComparison) {
+  if (mc.suggested_action) return mc.suggested_action
+  if (mc.summary_line) return mc.summary_line
+  return 'No major misconception changes detected.'
+}
+
+function formatPercentValue(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) return 'N/A'
+  return `${Math.round(value)}%`
+}
+
+function getTransitionSummary(analysis: any, totalRound2Responses: number) {
+  const transitions = analysis?.transitions
+  if (!transitions) return null
+
+  const improved = transitions.incorrect_to_correct?.count ?? 0
+  const regressed = transitions.correct_to_incorrect?.count ?? 0
+  const stayedCorrect = transitions.stayed_correct?.count ?? 0
+  const stayedIncorrect = transitions.stayed_incorrect?.count ?? 0
+  const noChange = stayedCorrect + stayedIncorrect
+  const denominator = totalRound2Responses > 0 ? totalRound2Responses : analysis?.totals?.total_submissions ?? 0
+
+  return {
+    improved: {
+      count: improved,
+      percent: denominator > 0 ? (improved / denominator) * 100 : null,
+    },
+    regressed: {
+      count: regressed,
+      percent: denominator > 0 ? (regressed / denominator) * 100 : null,
+    },
+    noChange: {
+      count: noChange,
+      percent: denominator > 0 ? (noChange / denominator) * 100 : null,
+    },
+    totalPairs: transitions.total_pairs ?? 0,
+  }
+}
 
 export default function SessionAnalysis() {
   const params = useParams()
@@ -20,6 +147,17 @@ export default function SessionAnalysis() {
   const [analyzing, setAnalyzing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [responseCount, setResponseCount] = useState(0)
+  const [roundNumber, setRoundNumber] = useState<1 | 2>(1)
+  const [analysisStatus, setAnalysisStatus] = useState<'none' | 'in_progress' | 'completed'>('none')
+  const [analysisRunMeta, setAnalysisRunMeta] = useState<{ analysisRunId: string; status: string; createdAt: string } | null>(null)
+  const realtimeTables = useMemo(
+    () => [{ table: 'responses', event: 'INSERT' as const, filter: `session_id=eq.${sessionId}` }],
+    [sessionId]
+  )
+  const analysisRealtimeTables = useMemo(
+    () => [{ table: 'analysis_runs', event: '*' as const, filter: `session_id=eq.${sessionId}` }],
+    [sessionId]
+  )
 
   useEffect(() => {
     const loadData = async () => {
@@ -29,7 +167,11 @@ export default function SessionAnalysis() {
         setSession(sessionData)
 
         const responsesData = await getSessionResponses(sessionId)
-        setResponseCount(responsesData?.length || 0)
+        const hasRound2 = (responsesData || []).some(r => (r.round_number ?? 1) === 2)
+        const defaultRound: 1 | 2 =
+          sessionData.condition === 'baseline' ? 1 : hasRound2 && sessionData.status !== 'revision' ? 2 : 1
+        setRoundNumber(defaultRound)
+        setResponseCount((responsesData || []).filter(r => (r.round_number ?? 1) === defaultRound).length)
       } catch (err) {
         console.error('Error loading session:', err)
         setError('Failed to load session data')
@@ -41,43 +183,132 @@ export default function SessionAnalysis() {
     loadData()
   }, [sessionId])
 
+  const loadStoredAnalysis = async (rn: 1 | 2) => {
+    try {
+      setError(null)
+      const [completed, inProgress] = await Promise.all([
+        getLatestCompletedAnalysisRun(sessionId, rn),
+        getLatestInProgressAnalysisRun(sessionId, rn),
+      ])
+
+      if (completed?.summary_json) {
+        setAnalysis(completed.summary_json)
+        setAnalysisStatus('completed')
+        setAnalysisRunMeta({
+          analysisRunId: completed.analysis_run_id,
+          status: completed.status,
+          createdAt: completed.created_at,
+        })
+        return
+      }
+
+      if (inProgress) {
+        setAnalysis(null)
+        setAnalysisStatus('in_progress')
+        setAnalysisRunMeta({
+          analysisRunId: inProgress.analysis_run_id,
+          status: inProgress.status,
+          createdAt: inProgress.created_at,
+        })
+        return
+      }
+
+      setAnalysis(null)
+      setAnalysisStatus('none')
+      setAnalysisRunMeta(null)
+    } catch (err) {
+      console.error('Error loading stored analysis:', err)
+      // Don't hard-fail the whole page; keep "Generate" available.
+      setAnalysis(null)
+      setAnalysisStatus('none')
+      setAnalysisRunMeta(null)
+    }
+  }
+
+  useEffect(() => {
+    const refreshCount = async () => {
+      try {
+        const responsesData = await getSessionResponses(sessionId)
+        setResponseCount((responsesData || []).filter(r => (r.round_number ?? 1) === roundNumber).length)
+      } catch {}
+    }
+    void refreshCount()
+  }, [sessionId, roundNumber])
+
+  useEffect(() => {
+    if (!session) return
+    void loadStoredAnalysis(roundNumber)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, session?.id, roundNumber])
+
   usePostgresChanges({
-    tables: [{ table: 'responses', event: 'INSERT', filter: `session_id=eq.${sessionId}` }],
+    tables: realtimeTables,
     onChange: async () => {
       try {
         const responsesData = await getSessionResponses(sessionId)
-        setResponseCount(responsesData?.length || 0)
+        setResponseCount((responsesData || []).filter(r => (r.round_number ?? 1) === roundNumber).length)
       } catch (err) {
         console.error('Error refreshing response count:', err)
       }
     },
     pollMs: 10000,
-    debugLabel: `teacher-analysis-${sessionId}`,
+    debugLabel: `teacher-analysis-${sessionId}-r${roundNumber}`,
   })
 
-  const handleAnalyze = async () => {
+  usePostgresChanges({
+    tables: analysisRealtimeTables,
+    onChange: async () => {
+      if (analysisStatus !== 'in_progress') return
+      await loadStoredAnalysis(roundNumber)
+    },
+    pollMs: 3000,
+    debugLabel: `teacher-analysis-run-${sessionId}-r${roundNumber}`,
+  })
+
+  const handleAnalyze = async (opts?: { forceRegenerate?: boolean }) => {
     try {
       setAnalyzing(true)
       setError(null)
 
-      const response = await fetch('/api/analyze-session', {
+      const response = await fetch('/teacher/api/analyze-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sessionId,
-          teacherId: 'demo-teacher-001',
+          roundNumber,
+          forceRegenerate: Boolean(opts?.forceRegenerate),
         }),
       })
 
       if (!response.ok) {
-        throw new Error('Analysis failed')
+        let message = 'Analysis failed'
+        try {
+          const body = await response.json()
+          if (typeof body?.error === 'string') message = body.error
+        } catch {}
+        throw new Error(message)
+      }
+
+      if (response.status === 202) {
+        const body = await response.json().catch(() => null)
+        setAnalysis(null)
+        setAnalysisStatus('in_progress')
+        if (body?.analysis_run_id) {
+          setAnalysisRunMeta({
+            analysisRunId: String(body.analysis_run_id),
+            status: String(body.status || 'running'),
+            createdAt: String(body.created_at || ''),
+          })
+        }
+        return
       }
 
       const data = await response.json()
       setAnalysis(data)
+      setAnalysisStatus('completed')
     } catch (err) {
       console.error('Error analyzing session:', err)
-      setError('Failed to analyze responses')
+      setError(err instanceof Error ? err.message : 'Failed to analyze responses')
     } finally {
       setAnalyzing(false)
     }
@@ -154,21 +385,48 @@ export default function SessionAnalysis() {
         </Card>
 
         {/* Analysis Section */}
-        {!analysis ? (
+        {analysisStatus === 'in_progress' ? (
           <Card className="p-8 text-center">
-            <div className="text-5xl mb-4">🔍</div>
-            <h2 className="text-2xl font-bold text-foreground mb-4">Ready for AI Analysis</h2>
-            <p className="text-foreground/70 mb-8 max-w-md mx-auto">
-              {session.condition === 'baseline'
-                ? 'Review the personalized feedback that was generated for each student response.'
-                : 'Generate AI-powered misconception cards and teaching suggestions based on student responses.'}
+            <h2 className="text-2xl font-bold text-foreground mb-3">Analysis in progress…</h2>
+            <p className="text-foreground/70 mb-6 max-w-md mx-auto">
+              This can take a little while. The page will update automatically when it finishes.
             </p>
+            {analysisRunMeta && (
+              <p className="text-xs text-foreground/60">
+                Run {analysisRunMeta.analysisRunId} • {analysisRunMeta.status}
+              </p>
+            )}
+          </Card>
+        ) : !analysis ? (
+          <Card className="p-8 text-center">
+            <h2 className="text-2xl font-bold text-foreground mb-4">Ready for Analysis</h2>
+            <p className="text-foreground/70 mb-6 max-w-md mx-auto">
+              {session.condition === 'baseline'
+                ? 'Generate round 1 analysis (baseline ends after round 1).'
+                : 'Generate round 1 analysis, then open revision for round 2.'}
+            </p>
+
+            {session.condition === 'treatment' && (
+              <div className="flex items-center justify-center gap-3 mb-6">
+                <Button
+                  type="button"
+                  variant={roundNumber === 1 ? 'default' : 'outline'}
+                  onClick={() => { setRoundNumber(1) }}
+                >
+                  Round 1
+                </Button>
+                <Button
+                  type="button"
+                  variant={roundNumber === 2 ? 'default' : 'outline'}
+                  onClick={() => { setRoundNumber(2) }}
+                >
+                  Round 2 (Final)
+                </Button>
+              </div>
+            )}
+
             {responseCount > 0 && (
-              <Button
-                onClick={handleAnalyze}
-                disabled={analyzing}
-                size="lg"
-              >
+              <Button onClick={() => handleAnalyze()} disabled={analyzing} size="lg">
                 {analyzing ? 'Analyzing...' : 'Generate Analysis'}
               </Button>
             )}
@@ -178,113 +436,326 @@ export default function SessionAnalysis() {
           </Card>
         ) : (
           <div className="space-y-6">
-            {/* Baseline Analysis */}
-            {analysis.type === 'baseline' && (
-              <>
-                <Card className="p-6 border-primary/20">
-                  <div className="flex items-start gap-4">
-                    <div className="text-3xl">✓</div>
-                    <div>
-                      <h2 className="text-xl font-semibold text-foreground mb-2">Feedback Generated</h2>
-                      <p className="text-foreground/70">
-                        Individual AI-generated feedback has been provided to each student. The feedback addresses
-                        their specific answer, highlights strengths, identifies misconceptions, and provides guidance
-                        for improvement.
-                      </p>
-                    </div>
+            {session.condition === 'treatment' && (
+              <Card className="p-4">
+                <div className="flex items-center justify-between gap-4">
+                  <p className="text-sm text-foreground/70">Viewing round:</p>
+                  <div className="flex items-center gap-3">
+                    <Button
+                      type="button"
+                      variant={roundNumber === 1 ? 'default' : 'outline'}
+                      onClick={() => setRoundNumber(1)}
+                      size="sm"
+                    >
+                      Round 1
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={roundNumber === 2 ? 'default' : 'outline'}
+                      onClick={() => setRoundNumber(2)}
+                      size="sm"
+                    >
+                      Round 2 (Final)
+                    </Button>
                   </div>
-                </Card>
-
-                <Card className="p-6">
-                  <h3 className="text-lg font-semibold text-foreground mb-4">Next Steps</h3>
-                  <ul className="space-y-3">
-                    <li className="flex items-start gap-3">
-                      <span className="text-primary font-bold mt-1">1.</span>
-                      <span className="text-foreground/70">Review individual student responses in the session detail</span>
-                    </li>
-                    <li className="flex items-start gap-3">
-                      <span className="text-primary font-bold mt-1">2.</span>
-                      <span className="text-foreground/70">Note which misconceptions appear most frequently</span>
-                    </li>
-                    <li className="flex items-start gap-3">
-                      <span className="text-primary font-bold mt-1">3.</span>
-                      <span className="text-foreground/70">Use this information to adjust your instruction</span>
-                    </li>
-                  </ul>
-                </Card>
-              </>
+                </div>
+              </Card>
             )}
 
-            {/* Treatment Analysis */}
-            {analysis.type === 'treatment' && (
-              <>
-                {/* Common Misconceptions */}
-                <Card className="p-6">
-                  <h3 className="text-lg font-semibold text-foreground mb-4">Common Misconceptions</h3>
-                  {analysis.misconceptions && analysis.misconceptions.length > 0 ? (
-                    <ul className="space-y-3">
-                      {analysis.misconceptions.map((misconception: string, idx: number) => (
-                        <li key={idx} className="flex items-start gap-3 p-3 rounded-lg bg-secondary/30">
-                          <span className="text-accent font-bold mt-1">{idx + 1}.</span>
-                          <span className="text-foreground">{misconception}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-foreground/70">No major misconceptions detected</p>
-                  )}
-                </Card>
+            {session.condition === 'treatment' && roundNumber === 2 && (
+              <Card className="p-6">
+                <h3 className="text-lg font-semibold text-foreground mb-2">Transition Summary</h3>
+                <p className="text-sm text-foreground/60 mb-4">
+                  Round 1 to round 2 movement for the current treatment group, based on the backend transition counts.
+                </p>
+                {analysis.transitions ? (
+                  (() => {
+                    const summary = getTransitionSummary(analysis, responseCount)
+                    if (!summary) {
+                      return (
+                        <div className="rounded-lg border border-dashed border-border/60 bg-secondary/20 p-4">
+                          <p className="text-sm font-medium text-foreground mb-1">Transition Summary unavailable</p>
+                          <p className="text-sm text-foreground/60">
+                            No transition data available (ensure round 1 and round 2 are both present).
+                          </p>
+                        </div>
+                      )
+                    }
 
-                {/* Confidence Analysis */}
-                <Card className="p-6">
-                  <h3 className="text-lg font-semibold text-foreground mb-4">Confidence Analysis</h3>
-                  <p className="text-foreground/70 mb-4">{analysis.confidenceAnalysis}</p>
-                  <div className="p-4 rounded-lg bg-primary/10 border border-primary/20">
-                    <p className="text-sm text-foreground/70 whitespace-pre-wrap font-mono">
-                      {analysis.confidenceMatrix}
+                    return (
+                      <>
+                        <div className="grid gap-4 md:grid-cols-3">
+                          <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-4">
+                            <p className="text-sm text-emerald-700 dark:text-emerald-300 mb-1">Incorrect → Correct (Improved)</p>
+                            <p className="text-2xl font-bold text-foreground">{summary.improved.count}</p>
+                            <p className="text-xs text-foreground/60 mt-1">{formatPercentValue(summary.improved.percent)} of round 2 responses</p>
+                          </div>
+                          <div className="rounded-lg border border-rose-500/20 bg-rose-500/10 p-4">
+                            <p className="text-sm text-rose-700 dark:text-rose-300 mb-1">Correct → Incorrect (Regressed)</p>
+                            <p className="text-2xl font-bold text-foreground">{summary.regressed.count}</p>
+                            <p className="text-xs text-foreground/60 mt-1">{formatPercentValue(summary.regressed.percent)} of round 2 responses</p>
+                          </div>
+                          <div className="rounded-lg border border-border/60 bg-secondary/25 p-4">
+                            <p className="text-sm text-foreground/70 mb-1">No Change</p>
+                            <p className="text-2xl font-bold text-foreground">{summary.noChange.count}</p>
+                            <p className="text-xs text-foreground/60 mt-1">{formatPercentValue(summary.noChange.percent)} of round 2 responses</p>
+                          </div>
+                        </div>
+                        <p className="text-xs text-foreground/60 mt-3">Pairs analyzed: {summary.totalPairs}</p>
+                      </>
+                    )
+                  })()
+                ) : (
+                  <div className="rounded-lg border border-dashed border-border/60 bg-secondary/20 p-4">
+                    <p className="text-sm font-medium text-foreground mb-1">Transition Summary unavailable</p>
+                    <p className="text-sm text-foreground/60">
+                      No transition data available (ensure round 1 and round 2 are both present).
                     </p>
                   </div>
-                </Card>
-
-                {/* Teaching Suggestions */}
-                <Card className="p-6">
-                  <h3 className="text-lg font-semibold text-foreground mb-4">Teaching Suggestions</h3>
-                  {analysis.teachingSuggestions && analysis.teachingSuggestions.length > 0 ? (
-                    <ul className="space-y-3">
-                      {analysis.teachingSuggestions.map((suggestion: string, idx: number) => (
-                        <li key={idx} className="flex items-start gap-3 p-3 rounded-lg bg-accent/10">
-                          <span className="text-accent font-bold">💡</span>
-                          <span className="text-foreground">{suggestion}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <p className="text-foreground/70">No specific suggestions available</p>
-                  )}
-                </Card>
-
-                <Card className="p-6 bg-primary/5 border-primary/20">
-                  <h3 className="text-lg font-semibold text-foreground mb-3">Key Insight</h3>
-                  <p className="text-foreground/70">
-                    Use the misconceptions and teaching suggestions above to design targeted instruction that addresses
-                    your students&apos; specific learning needs. The confidence analysis shows which students may need
-                    additional support.
-                  </p>
-                </Card>
-              </>
+                )}
+              </Card>
             )}
 
-            {/* Export Button */}
+            <Card className="p-6">
+              <h3 className="text-lg font-semibold text-foreground mb-4">
+                Per-Question Summary (Round {analysis.round_number})
+              </h3>
+              <p className="text-sm text-foreground/70 mb-4">{analysis.summary_text}</p>
+              <div className="grid md:grid-cols-3 gap-4 mb-6">
+                <div className="p-4 rounded-lg bg-secondary/30">
+                  <p className="text-sm text-foreground/60 mb-1">Total submissions</p>
+                  <p className="text-2xl font-bold text-foreground">{analysis.totals?.total_submissions ?? 0}</p>
+                </div>
+                <div className="p-4 rounded-lg bg-secondary/30">
+                  <p className="text-sm text-foreground/60 mb-1">% correct (labeled)</p>
+                  <p className="text-2xl font-bold text-foreground">
+                    {analysis.totals?.percent_correct === null || analysis.totals?.percent_correct === undefined
+                      ? 'N/A'
+                      : `${analysis.totals.percent_correct}%`}
+                  </p>
+                </div>
+                <div className="p-4 rounded-lg bg-secondary/30">
+                  <p className="text-sm text-foreground/60 mb-1">Avg confidence</p>
+                  <p className="text-2xl font-bold text-foreground">
+                    {analysis.totals?.avg_confidence === null || analysis.totals?.avg_confidence === undefined
+                      ? 'N/A'
+                      : Number(analysis.totals.avg_confidence).toFixed(2)}
+                  </p>
+                </div>
+              </div>
+              <div className="grid gap-4">
+                {(analysis.per_question || []).map((q: any) => (
+                  <Card key={q.question_id} className="p-4">
+                    <p className="font-semibold text-foreground mb-2">Q{q.position}</p>
+                    <p className="text-sm text-foreground/70">Responses: {q.submission_count ?? 0}</p>
+                    <p className="text-sm text-foreground/70">
+                      % Correct: {q.percent_correct === null || q.percent_correct === undefined ? 'N/A' : `${q.percent_correct}%`}
+                    </p>
+                    <p className="text-sm text-foreground/70">
+                      Avg confidence: {q.avg_confidence === null || q.avg_confidence === undefined ? 'N/A' : Number(q.avg_confidence).toFixed(2)}
+                    </p>
+                    {q.top_misconceptions && q.top_misconceptions.length > 0 && (
+                      <div className="mt-3">
+                        <p className="text-sm font-medium text-foreground mb-2">Top misconceptions</p>
+                        <ul className="space-y-2">
+                          {q.top_misconceptions.map((w: any, idx: number) => (
+                            <li key={idx} className="text-sm text-foreground/70">
+                              <div className="flex items-baseline justify-between gap-3">
+                                <span>{w.label}</span>
+                                <span className="text-foreground/50">({w.count})</span>
+                              </div>
+                              {session.condition === 'treatment' && w.hint && (
+                                <p className="text-xs text-foreground/60 mt-1">Hint: {w.hint}</p>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </Card>
+                ))}
+              </div>
+            </Card>
+
+            {analysis.transitions && (
+              <Card className="p-6">
+                <h3 className="text-lg font-semibold text-foreground mb-4">Round 1 → Round 2 Transitions</h3>
+                <div className="grid md:grid-cols-4 gap-4">
+                  <div className="p-4 rounded-lg bg-secondary/30">
+                    <p className="text-sm text-foreground/60 mb-1">Incorrect → Correct</p>
+                    <p className="text-2xl font-bold text-foreground">{analysis.transitions.incorrect_to_correct?.count ?? 0}</p>
+                    <p className="text-xs text-foreground/60 mt-1">{analysis.transitions.incorrect_to_correct?.percent ?? 0}%</p>
+                  </div>
+                  <div className="p-4 rounded-lg bg-secondary/30">
+                    <p className="text-sm text-foreground/60 mb-1">Correct → Incorrect</p>
+                    <p className="text-2xl font-bold text-foreground">{analysis.transitions.correct_to_incorrect?.count ?? 0}</p>
+                    <p className="text-xs text-foreground/60 mt-1">{analysis.transitions.correct_to_incorrect?.percent ?? 0}%</p>
+                  </div>
+                  <div className="p-4 rounded-lg bg-secondary/30">
+                    <p className="text-sm text-foreground/60 mb-1">Stayed Correct</p>
+                    <p className="text-2xl font-bold text-foreground">{analysis.transitions.stayed_correct?.count ?? 0}</p>
+                    <p className="text-xs text-foreground/60 mt-1">{analysis.transitions.stayed_correct?.percent ?? 0}%</p>
+                  </div>
+                  <div className="p-4 rounded-lg bg-secondary/30">
+                    <p className="text-sm text-foreground/60 mb-1">Stayed Incorrect</p>
+                    <p className="text-2xl font-bold text-foreground">{analysis.transitions.stayed_incorrect?.count ?? 0}</p>
+                    <p className="text-xs text-foreground/60 mt-1">{analysis.transitions.stayed_incorrect?.percent ?? 0}%</p>
+                  </div>
+                </div>
+                <p className="text-xs text-foreground/60 mt-3">Pairs analyzed: {analysis.transitions.total_pairs ?? 0}</p>
+              </Card>
+            )}
+
+            {analysis.misconception_comparison && analysis.misconception_comparison.length > 0 && (
+              <Card className="p-6">
+                <h3 className="text-lg font-semibold text-foreground mb-4">Misconception Changes (Round 1 vs Round 2)</h3>
+                <p className="text-sm text-foreground/60 mb-4">
+                  Each question is grouped into teacher-facing categories so you can see what was resolved, what declined, and what still needs attention.
+                </p>
+                <div className="space-y-4">
+                  {analysis.misconception_comparison.map((mc: any) => {
+                    const { groupEntries, hasAny } = getComparisonGroups(mc)
+                    const summaryLine = mc.summary_line || 'No major misconception changes detected.'
+                    const actionLine = formatQuestionActionLine(mc)
+                    const counts = mc.counts || {
+                      resolved: groupEntries.find((g) => g.key === 'resolved')?.items.length || 0,
+                      reduced: groupEntries.find((g) => g.key === 'reduced')?.items.length || 0,
+                      persistent: groupEntries.find((g) => g.key === 'persistent')?.items.length || 0,
+                      emerging: groupEntries.find((g) => g.key === 'emerging')?.items.length || 0,
+                    }
+
+                    return (
+                      <div key={mc.question_id} className="rounded-xl border border-border/60 bg-secondary/20 p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="font-semibold text-foreground">Q{mc.position}</p>
+                            <p className="text-sm text-foreground/70 mt-1">{summaryLine}</p>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {Object.entries(counts).map(([key, value]) =>
+                              value > 0 ? (
+                                <Badge
+                                  key={key}
+                                  variant="outline"
+                                  className={MISCONCEPTION_GROUP_META[key as MisconceptionGroupKey].badgeClassName}
+                                >
+                                  {MISCONCEPTION_GROUP_META[key as MisconceptionGroupKey].label}: {value}
+                                </Badge>
+                              ) : null
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="mt-4 rounded-lg border border-border/40 bg-background/70 p-3">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-foreground/55">Suggested action</p>
+                          <p className="text-sm text-foreground/80 mt-1">{actionLine}</p>
+                        </div>
+
+                        {!hasAny ? (
+                          <p className="text-sm text-foreground/60 mt-4">No major misconception changes detected.</p>
+                        ) : (
+                          <div className="mt-4 space-y-3">
+                            {groupEntries.map((group) =>
+                              group.items.length > 0 ? (
+                                <section key={group.key} className={`rounded-lg border ${group.meta.borderClassName} bg-background/60 p-3`}>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <Badge variant="outline" className={group.meta.badgeClassName}>
+                                      {group.meta.label}
+                                    </Badge>
+                                    <span className="text-xs text-foreground/60">{group.meta.hint}</span>
+                                    <span className="ml-auto text-xs text-foreground/50">{group.items.length} item(s)</span>
+                                  </div>
+
+                                  <div className="mt-3 space-y-2">
+                                    {group.items.map((d: MisconceptionDelta, idx: number) => {
+                                      const delta = typeof d.delta === 'number' ? d.delta : d.round2 - d.round1
+                                      const deltaLabel = delta > 0 ? `+${delta}` : `${delta}`
+                                      const direction =
+                                        group.key === 'resolved'
+                                          ? 'Resolved'
+                                          : group.key === 'reduced'
+                                            ? 'Reduced'
+                                            : group.key === 'persistent'
+                                              ? 'Persistent'
+                                              : 'New'
+
+                                      return (
+                                        <div key={`${d.label}-${idx}`} className="rounded-md border border-border/40 bg-secondary/20 px-3 py-2">
+                                          <div className="flex items-start justify-between gap-3">
+                                            <div className="min-w-0">
+                                              <p className="text-sm font-medium text-foreground break-words">{d.label}</p>
+                                              <p className="text-xs text-foreground/60 mt-1">
+                                                Round 1 {d.round1} → Round 2 {d.round2}
+                                              </p>
+                                            </div>
+                                            <div className="flex shrink-0 flex-col items-end gap-1">
+                                              <Badge
+                                                variant={group.key === 'persistent' ? 'destructive' : group.key === 'emerging' ? 'secondary' : 'outline'}
+                                                className="text-[11px]"
+                                              >
+                                                {direction}
+                                              </Badge>
+                                              <span className="text-xs font-medium text-foreground/70 tabular-nums">{deltaLabel}</span>
+                                            </div>
+                                          </div>
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                </section>
+                              ) : null
+                            )}
+                          </div>
+                        )}
+
+                        <details className="mt-4">
+                          <summary className="cursor-pointer text-xs text-primary">Show raw deltas</summary>
+                          <pre className="mt-2 text-xs whitespace-pre-wrap bg-secondary/30 p-3 rounded-lg">
+                            {JSON.stringify(
+                              {
+                                question_id: mc.question_id,
+                                position: mc.position,
+                                summary_line: mc.summary_line,
+                                suggested_action: mc.suggested_action,
+                                counts: mc.counts,
+                                grouped_deltas: mc.grouped_deltas,
+                                deltas: mc.deltas,
+                              },
+                              null,
+                              2
+                            )}
+                          </pre>
+                        </details>
+                      </div>
+                    )
+                  })}
+                </div>
+              </Card>
+            )}
+
+            {analysis.compare_to_round_1 && (
+              <Card className="p-6">
+                <h3 className="text-lg font-semibold text-foreground mb-4">Round 1 Snapshot (for export)</h3>
+                <p className="text-sm text-foreground/70">
+                  Included under `compare_to_round_1` so you can later plot misconception graphs and compare patterns.
+                </p>
+                <details className="mt-4">
+                  <summary className="cursor-pointer text-sm text-primary">Show raw JSON</summary>
+                  <pre className="mt-3 text-xs whitespace-pre-wrap bg-secondary/30 p-3 rounded-lg">{JSON.stringify(analysis.compare_to_round_1, null, 2)}</pre>
+                </details>
+              </Card>
+            )}
+
             <div className="flex gap-4">
               <Link href={`/teacher/session/${sessionId}/export`} className="flex-1">
-                <Button variant="outline" className="w-full">
-                  Export Data
-                </Button>
+                <Button variant="outline" className="w-full">Export Data</Button>
               </Link>
-              <Button onClick={handleAnalyze} disabled={analyzing} className="flex-1">
-                Regenerate Analysis
+              <Button onClick={() => handleAnalyze({ forceRegenerate: true })} disabled={analyzing} className="flex-1">
+                {analyzing ? 'Analyzing...' : 'Regenerate Analysis'}
               </Button>
             </div>
+
+            <AnalysisDashboard analysis={analysis} />
           </div>
         )}
       </div>

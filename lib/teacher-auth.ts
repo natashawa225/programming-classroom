@@ -10,7 +10,9 @@ import { createHmac, timingSafeEqual } from 'crypto'
  */
 
 const TEACHER_COOKIE_NAME = 'sd_teacher_session'
-const TEACHER_COOKIE_PATH = '/teacher'
+// Must include `/api/*` so teacher-only API routes can validate the session cookie.
+// Teacher pages remain protected by server-side checks.
+const TEACHER_COOKIE_PATH = '/'
 
 type TeacherSessionPayload = {
   v: 1
@@ -97,6 +99,15 @@ export async function setTeacherSessionCookie(username?: string) {
   const now = Math.floor(Date.now() / 1000)
   const token = createSessionToken({ v: 1, exp: now + maxAgeSeconds, u: username || undefined }, signingKey)
   const store = await cookies()
+  // Clear any legacy cookie that may have been set with path "/teacher" so we don't end up with
+  // multiple cookies with the same name but different paths.
+  store.set(TEACHER_COOKIE_NAME, '', {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/teacher',
+    maxAge: 0,
+  })
   store.set(TEACHER_COOKIE_NAME, token, {
     httpOnly: true,
     sameSite: 'lax',
@@ -108,13 +119,16 @@ export async function setTeacherSessionCookie(username?: string) {
 
 export async function clearTeacherSessionCookie() {
   const store = await cookies()
-  store.set(TEACHER_COOKIE_NAME, '', {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
-    path: TEACHER_COOKIE_PATH,
-    maxAge: 0,
-  })
+  // Clear both current and legacy paths.
+  for (const path of ['/', '/teacher']) {
+    store.set(TEACHER_COOKIE_NAME, '', {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: process.env.NODE_ENV === 'production',
+      path,
+      maxAge: 0,
+    })
+  }
 }
 
 export async function getTeacherSession(): Promise<TeacherSessionPayload | null> {
@@ -142,4 +156,3 @@ export function verifyTeacherCredentials(input: { username?: string; password?: 
   }
   return true
 }
-

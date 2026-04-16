@@ -6,13 +6,13 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { joinSessionByCode } from '@/lib/supabase/queries'
+import { joinSessionWithParticipantCredentials } from '@/lib/supabase/queries'
 
 export default function StudentJoin() {
   const router = useRouter()
   const [sessionCode, setSessionCode] = useState('')
-  const [studentName, setStudentName] = useState('')
-  const [studentId, setStudentId] = useState('')
+  const [participantId, setParticipantId] = useState('')
+  const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -22,16 +22,11 @@ export default function StudentJoin() {
     setError(null)
 
     try {
-      const { session, participation } = await joinSessionByCode(sessionCode, {
-        studentName,
-        studentId,
+      const { session } = await joinSessionWithParticipantCredentials({
+        sessionCode,
+        participantId,
+        password,
       })
-
-      sessionStorage.setItem('anonymizedLabel', participation.anonymized_label)
-      sessionStorage.setItem('sessionId', session.id)
-      sessionStorage.setItem('sessionCode', session.session_code)
-      if (studentName.trim()) sessionStorage.setItem('studentName', studentName.trim())
-      if (studentId.trim()) sessionStorage.setItem('studentId', studentId.trim())
 
       router.push(`/student/respond/${session.id}`)
     } catch (err) {
@@ -47,14 +42,11 @@ export default function StudentJoin() {
       <div className="w-full max-w-md px-4">
         {/* Header */}
         <div className="mb-12 text-center">
-          <Link href="/" className="inline-block mb-8">
-            <span className="text-2xl font-bold text-primary">SMART-Draft</span>
-          </Link>
           <h1 className="text-4xl font-bold text-foreground mb-4">
             Join a Session
           </h1>
           <p className="text-lg text-foreground/70">
-            Enter the session code plus your name or student ID
+            Enter your participant ID, password, and session code
           </p>
         </div>
 
@@ -78,35 +70,34 @@ export default function StudentJoin() {
             </div>
 
             <div>
-              <label htmlFor="studentId" className="block text-sm font-medium text-foreground mb-3">
-                Student ID (recommended)
+              <label htmlFor="participantId" className="block text-sm font-medium text-foreground mb-3">
+                Participant ID
               </label>
               <Input
-                id="studentId"
+                id="participantId"
                 type="text"
-                value={studentId}
-                onChange={(e) => setStudentId(e.target.value)}
-                placeholder="e.g., 2026001234"
-                className="w-full"
+                value={participantId}
+                onChange={(e) => setParticipantId(e.target.value.toLowerCase().replace(/\s+/g, ''))}
+                placeholder="e.g., p001"
+                className="w-full text-center text-lg tracking-widest"
                 disabled={loading}
+                required
               />
-              <p className="text-xs text-foreground/60 mt-2">
-                Using a student ID prevents duplicates (e.g., two students named “John”).
-              </p>
             </div>
 
             <div>
-              <label htmlFor="studentName" className="block text-sm font-medium text-foreground mb-3">
-                Name (optional)
+              <label htmlFor="password" className="block text-sm font-medium text-foreground mb-3">
+                Password
               </label>
               <Input
-                id="studentName"
-                type="text"
-                value={studentName}
-                onChange={(e) => setStudentName(e.target.value)}
-                placeholder="e.g., John"
+                id="password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Your unique password"
                 className="w-full"
                 disabled={loading}
+                required
               />
             </div>
 
@@ -119,7 +110,7 @@ export default function StudentJoin() {
             <Button
               type="submit"
               className="w-full"
-              disabled={loading || !sessionCode || (!studentId.trim() && !studentName.trim())}
+              disabled={loading || !sessionCode.trim() || !participantId.trim() || !password}
               size="lg"
             >
               {loading ? 'Joining...' : 'Join Session'}

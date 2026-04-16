@@ -9,6 +9,12 @@ import type { Session } from '@/lib/types/database'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
 import { teacherLogout } from '@/app/teacher/auth-actions'
 
+function formatDateUtc(isoLike: string) {
+  const date = new Date(isoLike)
+  if (Number.isNaN(date.getTime())) return isoLike
+  return date.toISOString().slice(0, 10)
+}
+
 export default function TeacherDashboard() {
   const [sessions, setSessions] = useState<Session[]>([])
   const [loading, setLoading] = useState(true)
@@ -48,6 +54,7 @@ export default function TeacherDashboard() {
     const colors = {
       draft: 'bg-muted text-muted-foreground',
       live: 'bg-primary/20 text-primary',
+      analysis_ready: 'bg-secondary/50 text-foreground',
       revision: 'bg-accent/20 text-accent',
       closed: 'bg-destructive/20 text-destructive',
     }
@@ -134,7 +141,7 @@ export default function TeacherDashboard() {
 
                     <div className="flex items-center justify-between text-sm">
                       <p className="text-foreground/60">
-                        Created {new Date(session.created_at).toLocaleDateString()}
+                        Created {formatDateUtc(session.created_at)}
                       </p>
                       <span className="text-primary font-medium">View Details →</span>
                     </div>

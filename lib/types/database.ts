@@ -1,11 +1,22 @@
-export type SessionStatus = 'draft' | 'live' | 'revision' | 'closed'
+export type SessionStatus = 'draft' | 'live' | 'analysis_ready' | 'revision' | 'closed'
 export type QuestionType = 'main' | 'revision' | 'transfer'
 export type ConfidenceValue = 1 | 2 | 3 | 4 | 5
+
+export interface Participant {
+  id: string
+  participant_id: string
+  group_name: 'baseline' | 'treatment'
+  password_hash: string
+  hash_algo: 'bcrypt' | string
+  is_active: boolean
+  created_at: string
+}
 
 export interface Session {
   id: string
   session_code: string
   condition: 'baseline' | 'treatment'
+  title?: string | null
   question: string
   answer_options: string[]
   correct_answer: string
@@ -16,9 +27,20 @@ export interface Session {
   created_at: string
 }
 
+export interface SessionQuestion {
+  question_id: string
+  session_id: string
+  position: number
+  prompt: string
+  correct_answer: string | null
+  timer_seconds: number | null
+  created_at: string
+}
+
 export interface SessionParticipant {
   session_participant_id: string
   session_id: string
+  participant_id: string | null
   student_name: string | null
   student_id: string | null
   anonymized_label: string
@@ -29,12 +51,15 @@ export interface Response {
   response_id: string
   session_id: string
   session_participant_id: string
+  question_id: string | null
   question_type: QuestionType
   round_number: number
   answer: string
   confidence: ConfidenceValue
   explanation: string | null
   is_correct: boolean | null
+  time_taken_seconds: number | null
+  original_response_id: string | null
   created_at: string
   session_participants?: Pick<SessionParticipant, 'session_participant_id' | 'anonymized_label'> | null
 }
@@ -47,6 +72,35 @@ export interface AIOutput {
   teacher_summary: Record<string, unknown> | null
   student_summary: Record<string, unknown> | null
   raw_response: string | null
+  created_at: string
+}
+
+export interface AnalysisRun {
+  analysis_run_id: string
+  session_id: string
+  condition: 'baseline' | 'treatment' | null
+  session_status: SessionStatus | null
+  round_number: 1 | 2
+  model: string | null
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  error_message: string | null
+  prompt_json: Record<string, unknown> | null
+  raw_response_json: Record<string, unknown> | null
+  summary_json: Record<string, unknown> | null
+  created_at: string
+}
+
+export interface ResponseAiLabel {
+  response_ai_label_id: string
+  analysis_run_id: string
+  response_id: string
+  session_id: string
+  question_id: string
+  round_number: 1 | 2
+  is_correct: boolean | null
+  misconception_label: string | null
+  cluster_id: string | null
+  explanation: string | null
   created_at: string
 }
 

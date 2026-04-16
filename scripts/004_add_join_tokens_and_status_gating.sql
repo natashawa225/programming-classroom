@@ -48,11 +48,11 @@ BEGIN
     SET status = 'draft'
     WHERE status IS NULL
        OR status = ''
-       OR status NOT IN ('draft', 'live', 'revision', 'closed');
+       OR status NOT IN ('draft', 'live', 'analysis_ready', 'revision', 'closed');
 
     -- Set default and add new check
     EXECUTE 'ALTER TABLE public.sessions ALTER COLUMN status SET DEFAULT ''draft'';';
-    EXECUTE 'ALTER TABLE public.sessions ADD CONSTRAINT sessions_status_check CHECK (status IN (''draft'',''live'',''revision'',''closed''));';
+    EXECUTE 'ALTER TABLE public.sessions ADD CONSTRAINT sessions_status_check CHECK (status IN (''draft'',''live'',''analysis_ready'',''revision'',''closed''));';
   END IF;
 END $$;
 
@@ -60,8 +60,8 @@ END $$;
 ALTER TABLE public.session_participants
   ADD COLUMN IF NOT EXISTS join_token_hash TEXT;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_session_participants_join_token_hash
-ON public.session_participants(join_token_hash)
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_session_participants_session_join_token_hash
+ON public.session_participants(session_id, join_token_hash)
 WHERE join_token_hash IS NOT NULL AND join_token_hash <> '';
 
 -- 3) responses: revision question_type + unique constraint for dedupe

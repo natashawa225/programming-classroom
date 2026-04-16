@@ -20,9 +20,7 @@ export default function Home() {
       <div className="w-full max-w-4xl px-4 sm:px-6 lg:px-8 py-12">
         {/* Header */}
         <div className="mb-16 text-center">
-          <Link href="/" className="inline-block mb-8">
-            <span className="text-2xl font-bold text-primary">SMART-Draft</span>
-          </Link>
+
           <h1 className="text-4xl md:text-5xl font-bold text-foreground mb-4">
             Select Your Role
           </h1>
@@ -80,7 +78,7 @@ export default function Home() {
             </div>
 
             <p className="text-foreground/70 mb-8 leading-relaxed">
-              Join a session using the teacher’s session code, submit your response, and receive feedback based on your answer.
+              Join a session using the teacher&apos;s session code, submit your response, and receive feedback based on your answer.
             </p>
 
             <ul className="space-y-3 mb-8">

@@ -1,50 +1,50 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { useParams, useRouter } from 'next/navigation'
+import { useMemo, useRef, useState, useEffect } from 'react'
+import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { getSession, getSessionParticipantForStudent, getStudentResponse, submitStudentResponse } from '@/lib/supabase/queries'
-import type { Session } from '@/lib/types/database'
+import { getSession, getSessionParticipantForStudent, getSessionQuestions, getStudentResponse, submitStudentResponse } from '@/lib/supabase/queries'
+import type { Session, SessionQuestion } from '@/lib/types/database'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
 
 export default function StudentRespond() {
   const params = useParams()
   const router = useRouter()
+  const searchParams = useSearchParams()
   const sessionId = params.id as string
 
   const [session, setSession] = useState<Session | null>(null)
   const [anonymizedLabel, setAnonymizedLabel] = useState<string | null>(null)
+  const [questions, setQuestions] = useState<SessionQuestion[]>([])
+  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
   const [answer, setAnswer] = useState('')
   const [confidence, setConfidence] = useState(3)
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
-  const [submitted, setSubmitted] = useState(false)
+  const [submittedServer, setSubmittedServer] = useState(false)
+  const localSubmittedKeysRef = useRef<Set<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<string | null>(null)
+  const [startTimeMs, setStartTimeMs] = useState<number>(() => Date.now())
+  const [nowMs, setNowMs] = useState<number>(() => Date.now())
 
   useEffect(() => {
     const loadSession = async () => {
       try {
-        const [sessionData, participation] = await Promise.all([
+        const [sessionData, participation, sessionQuestions] = await Promise.all([
           getSession(sessionId),
           getSessionParticipantForStudent(sessionId),
+          getSessionQuestions(sessionId),
         ])
         setSession(sessionData)
+        setQuestions(sessionQuestions || [])
         if (!participation) {
           router.push('/student/join')
           return
         }
         setAnonymizedLabel(participation.anonymized_label)
-
-        const existing = await getStudentResponse(sessionId, { questionType: 'main', roundNumber: 1 })
-        if (existing) {
-          setSubmitted(true)
-          setAnswer(existing.answer)
-          setConfidence(existing.confidence)
-          setFeedback('You have already submitted a response for this session.')
-        }
       } catch (err) {
         console.error('Error loading session:', err)
         setError('Failed to load session')
@@ -56,8 +56,115 @@ export default function StudentRespond() {
     loadSession()
   }, [sessionId, router])
 
+  // Keep URL query param (?q=1..N) and internal index in sync.
+  useEffect(() => {
+    if (!questions || questions.length === 0) return
+    const q = searchParams.get('q')
+    const parsed = q ? Number(q) : NaN
+    if (!Number.isFinite(parsed) || parsed < 1) return
+    const idx = Math.max(0, Math.min(questions.length - 1, Math.floor(parsed) - 1))
+    setCurrentQuestionIndex(idx)
+  }, [searchParams, questions])
+
+  const roundNumber = session?.status === 'revision' ? 2 : 1
+  const canEdit =
+    session?.status === 'live' ||
+    session?.status === 'revision'
+
+  const currentQuestion = questions[currentQuestionIndex] || null
+  const submissionKey = currentQuestion ? `${currentQuestion.question_id}:${roundNumber}` : ''
+  const hasSubmittedLocal = submissionKey ? localSubmittedKeysRef.current.has(submissionKey) : false
+  const submitted = hasSubmittedLocal || submittedServer
+  const timerSeconds = currentQuestion?.timer_seconds ?? null
+  const elapsedSeconds = Math.max(0, Math.floor((nowMs - startTimeMs) / 1000))
+  const remainingSeconds = timerSeconds ? Math.max(0, timerSeconds - elapsedSeconds) : null
+  const timerExpired = timerSeconds ? remainingSeconds === 0 : false
+
+  useEffect(() => {
+    if (!timerSeconds || submitted || !canEdit) return
+    const t = setInterval(() => setNowMs(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [timerSeconds, submitted, canEdit, currentQuestion?.question_id])
+
+  // Load existing response state for the current question/round.
+  useEffect(() => {
+    let cancelled = false
+    const loadExisting = async () => {
+      if (!session || !currentQuestion) return
+
+      setError(null)
+      setFeedback(null)
+      setSubmitting(false)
+      if (submissionKey && !localSubmittedKeysRef.current.has(submissionKey)) {
+        setSubmittedServer(false)
+      }
+
+      // Reset timer for this question view.
+      setStartTimeMs(Date.now())
+      setNowMs(Date.now())
+
+      try {
+        // If we already submitted locally for this question/round, keep UI locked even if server
+        // reads are momentarily stale (prevents flicker after submit).
+        if (submissionKey && localSubmittedKeysRef.current.has(submissionKey)) {
+          setSubmittedServer(true)
+          setFeedback('Submitted. Editing is locked for this question in this round.')
+          return
+        }
+
+        const existing = await getStudentResponse(sessionId, {
+          questionId: currentQuestion.question_id,
+          roundNumber,
+        })
+
+        if (cancelled) return
+
+        if (existing) {
+          setSubmittedServer(true)
+          setAnswer(existing.answer)
+          setConfidence(existing.confidence)
+          setFeedback('Submitted. Editing is locked for this question in this round.')
+          return
+        }
+
+        setSubmittedServer(false)
+
+        // In revision, preload round 1 answer if present.
+        if (roundNumber === 2) {
+          const original = await getStudentResponse(sessionId, {
+            questionId: currentQuestion.question_id,
+            roundNumber: 1,
+          })
+          if (original) {
+            setAnswer(original.answer)
+            setConfidence(original.confidence)
+          } else {
+            setAnswer('')
+            setConfidence(3)
+          }
+        } else {
+          setAnswer('')
+          setConfidence(3)
+        }
+      } catch (err) {
+        console.error('Error loading existing response:', err)
+        setError('Failed to load your response state')
+      }
+    }
+
+    void loadExisting()
+    return () => {
+      cancelled = true
+    }
+  }, [sessionId, session?.id, currentQuestion?.question_id, roundNumber, submissionKey])
+
+  const realtimeTables = useMemo(
+    () => [{ table: 'sessions', event: 'UPDATE' as const, filter: `id=eq.${sessionId}` }],
+    [sessionId]
+  )
+
   usePostgresChanges({
-    tables: [{ table: 'sessions', event: 'UPDATE', filter: `id=eq.${sessionId}` }],
+    tables: realtimeTables,
     onChange: async () => {
       try {
         const updated = await getSession(sessionId)
@@ -72,29 +179,34 @@ export default function StudentRespond() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!session) return
+    if (!session || !currentQuestion) return
+    if (submitted) return
 
     try {
       setSubmitting(true)
       setError(null)
 
-      // Submit response
-      await submitStudentResponse(sessionId, { answerText: answer, confidence, questionType: 'main', roundNumber: 1 })
+      const timeTakenSeconds = Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000))
 
-      setSubmitted(true)
+      await submitStudentResponse(sessionId, {
+        questionId: currentQuestion.question_id,
+        answerText: answer,
+        confidence,
+        roundNumber,
+        questionType: roundNumber === 2 ? 'revision' : 'main',
+        timeTakenSeconds,
+      })
 
-      // For baseline condition, show AI feedback immediately
-      if (session.condition === 'baseline') {
-        // In a real implementation, this would call the AI API
-        // For now, show a placeholder
-        setFeedback('Your response has been submitted. Your instructor will provide feedback shortly.')
-      } else {
-        // For treatment condition, show confidence matrix
-        setFeedback('Thank you for your response. You can now see how your answer compares to others in the class.')
+      if (submissionKey) {
+        localSubmittedKeysRef.current.add(submissionKey)
       }
+      setSubmittedServer(true)
+
+      setFeedback('Submitted. Editing is locked for this question in this round.')
     } catch (err) {
       console.error('Error submitting response:', err)
       setError(err instanceof Error ? err.message : 'Failed to submit response. Please try again.')
+    } finally {
       setSubmitting(false)
     }
   }
@@ -133,6 +245,11 @@ export default function StudentRespond() {
               Status: <span className="capitalize">{session.status}</span>
               {anonymizedLabel ? ` • You are: ${anonymizedLabel}` : ''}
             </p>
+            {remainingSeconds !== null && (
+              <p className="text-sm text-foreground/60 mt-1">
+                Time remaining: {remainingSeconds}s
+              </p>
+            )}
           </div>
           <Link href="/student/sessions">
             <Button variant="outline">Back</Button>
@@ -147,25 +264,35 @@ export default function StudentRespond() {
           </Card>
         )}
 
-        {session.status !== 'live' && !submitted && (
+        {(!canEdit || session.status === 'analysis_ready' || timerExpired) && (
           <Card className="mb-6 p-4 border-border/40 bg-secondary/20">
             <p className="text-sm text-foreground/70">
               {session.status === 'draft'
                 ? 'Waiting for your instructor to start the session.'
-                : session.status === 'revision'
-                  ? 'The session is in revision. Main submissions are currently closed.'
-                  : 'This session is closed.'}
+                : session.status === 'analysis_ready'
+                  ? 'Round 1 is closed while your instructor reviews and generates analysis.'
+                  : session.status === 'revision'
+                    ? 'Revision is open.'
+                    : timerExpired
+                      ? 'Time is up for this question.'
+                      : 'This session is closed.'}
             </p>
           </Card>
         )}
 
-        {!submitted ? (
+        {!currentQuestion ? (
+          <Card className="p-8 text-center">
+            <p className="text-foreground/70">No questions found for this session.</p>
+          </Card>
+        ) : !submitted ? (
           <form onSubmit={handleSubmit} className="space-y-6">
             {/* Question */}
             <Card className="p-8">
-              <h2 className="text-2xl font-bold text-foreground mb-6">Question</h2>
+              <h2 className="text-2xl font-bold text-foreground mb-6">
+                Question {currentQuestion.position} of {questions.length} {roundNumber === 2 ? '(Revision)' : ''}
+              </h2>
               <div className="text-lg text-foreground leading-relaxed">
-                {session.question}
+                {currentQuestion.prompt}
               </div>
             </Card>
 
@@ -215,7 +342,7 @@ export default function StudentRespond() {
               type="submit"
               size="lg"
               className="w-full"
-              disabled={submitting || !answer.trim() || session.status !== 'live'}
+              disabled={submitting || !answer.trim() || !canEdit || timerExpired}
             >
               {submitting ? 'Submitting...' : 'Submit Answer'}
             </Button>
@@ -233,33 +360,35 @@ export default function StudentRespond() {
               </div>
             </Card>
 
-            {/* Feedback for Baseline */}
-            {session.condition === 'baseline' && feedback && (
-              <Card className="p-8">
-                <h3 className="text-xl font-semibold text-foreground mb-4">Your Feedback</h3>
-                <p className="text-foreground/70 leading-relaxed">{feedback}</p>
+            {feedback && (
+              <Card className="p-6">
+                <p className="text-foreground/70">{feedback}</p>
               </Card>
             )}
 
-            {/* Confidence Matrix for Treatment */}
-            {session.condition === 'treatment' && (
-              <Card className="p-8">
-                <h3 className="text-xl font-semibold text-foreground mb-4">Class Response Overview</h3>
-                <p className="text-foreground/70 mb-6">
-                  Your response has been recorded. Below you can see how your confidence level compares to the class average.
-                </p>
-                    <div className="grid grid-cols-2 gap-4">
-                  <div className="p-4 rounded-lg bg-secondary/30">
-                    <p className="text-sm text-foreground/60 mb-2">Your Confidence</p>
-                    <p className="text-3xl font-bold text-accent">{confidence}/5</p>
-                  </div>
-                  <div className="p-4 rounded-lg bg-primary/10">
-                    <p className="text-sm text-foreground/60 mb-2">Class Average</p>
-                    <p className="text-3xl font-bold text-primary">--</p>
-                  </div>
-                </div>
-              </Card>
-            )}
+            <div className="flex gap-3">
+              <Button
+                variant="outline"
+                className="flex-1"
+                onClick={() => {
+                  const prev = Math.max(0, currentQuestionIndex - 1)
+                  router.push(`/student/respond/${sessionId}?q=${prev + 1}`)
+                }}
+                disabled={currentQuestionIndex === 0}
+              >
+                Previous
+              </Button>
+              <Button
+                className="flex-1"
+                onClick={() => {
+                  const next = Math.min(questions.length - 1, currentQuestionIndex + 1)
+                  router.push(`/student/respond/${sessionId}?q=${next + 1}`)
+                }}
+                disabled={currentQuestionIndex >= questions.length - 1}
+              >
+                Next
+              </Button>
+            </div>
 
             {/* Navigation */}
             <Link href="/student/sessions" className="block">

@@ -5,10 +5,10 @@ import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { getActiveSessions } from '@/lib/supabase/queries'
+import { studentLogout } from '@/app/student/auth-actions'
 
 export default function StudentSessions() {
   const router = useRouter()
-  const [anonymizedLabel, setAnonymizedLabel] = useState<string | null>(null)
   const [activeSessions, setActiveSessions] = useState<Array<{
     id: string
     session_code: string
@@ -18,9 +18,6 @@ export default function StudentSessions() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const label = sessionStorage.getItem('anonymizedLabel')
-    if (label) setAnonymizedLabel(label)
-
     const loadSessions = async () => {
       try {
         const sessions = await getActiveSessions()
@@ -44,15 +41,6 @@ export default function StudentSessions() {
     router.push(`/student/respond/${sessionId}`)
   }
 
-  const handleLogout = () => {
-    sessionStorage.removeItem('anonymizedLabel')
-    sessionStorage.removeItem('studentName')
-    sessionStorage.removeItem('studentId')
-    sessionStorage.removeItem('sessionId')
-    sessionStorage.removeItem('sessionCode')
-    router.push('/role-select')
-  }
-
   if (loading) {
     return (
       <main className="min-h-screen bg-background flex items-center justify-center">
@@ -68,13 +56,11 @@ export default function StudentSessions() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-foreground">Active Sessions</h1>
-            {anonymizedLabel && (
-              <p className="text-sm text-foreground/60 mt-1">You are: {anonymizedLabel}</p>
-            )}
+            <p className="text-sm text-foreground/60 mt-1">Join using your participant ID + password</p>
           </div>
-          <Button variant="outline" onClick={handleLogout}>
-            Log Out
-          </Button>
+          <form action={studentLogout}>
+            <Button variant="outline" type="submit">Log Out</Button>
+          </form>
         </div>
       </header>
 
@@ -113,7 +99,7 @@ export default function StudentSessions() {
                   onClick={() => handleStartSession(session.id)}
                   className="w-full md:w-auto"
                 >
-                  Answer Question
+                  Answer / View
                 </Button>
               </Card>
             ))}

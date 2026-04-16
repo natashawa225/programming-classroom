@@ -14,10 +14,13 @@ export default function CreateSession() {
   const [error, setError] = useState<string | null>(null)
 
   const [formData, setFormData] = useState({
-    question: '',
-    correctAnswer: '',
-    answerOptions: '',
+    title: '',
     condition: 'baseline' as 'baseline' | 'treatment',
+    questions: [
+      { prompt: '', correctAnswer: '', timerSeconds: '' },
+      { prompt: '', correctAnswer: '', timerSeconds: '' },
+      { prompt: '', correctAnswer: '', timerSeconds: '' },
+    ] as Array<{ prompt: string; correctAnswer: string; timerSeconds: string }>,
   })
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
@@ -28,21 +31,59 @@ export default function CreateSession() {
     }))
   }
 
+  const updateQuestion = (index: number, patch: Partial<{ prompt: string; correctAnswer: string; timerSeconds: string }>) => {
+    setFormData(prev => {
+      const next = prev.questions.slice()
+      next[index] = { ...next[index], ...patch }
+      return { ...prev, questions: next }
+    })
+  }
+
+  const addQuestion = () => {
+    setFormData(prev => {
+      if (prev.questions.length >= 5) return prev
+      return { ...prev, questions: [...prev.questions, { prompt: '', correctAnswer: '', timerSeconds: '' }] }
+    })
+  }
+
+  const removeQuestion = (index: number) => {
+    setFormData(prev => {
+      if (prev.questions.length <= 3) return prev
+      return { ...prev, questions: prev.questions.filter((_, i) => i !== index) }
+    })
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
     setError(null)
 
     try {
+      const normalized = formData.questions
+        .map(q => ({
+          prompt: q.prompt.trim(),
+          correctAnswer: q.correctAnswer.trim(),
+          timerSeconds: q.timerSeconds.trim() ? Number(q.timerSeconds) : null,
+        }))
+        .filter(q => q.prompt.length > 0)
+
+      if (normalized.length < 3) {
+        throw new Error('Please enter at least 3 questions.')
+      }
+      if (normalized.length > 5) {
+        throw new Error('Please enter no more than 5 questions.')
+      }
+
       // Create the session
       const session = await createSession({
-        answerOptions: formData.answerOptions
-          .split('\n')
-          .map(option => option.trim())
-          .filter(Boolean),
-        question: formData.question,
-        correctAnswer: formData.correctAnswer,
         condition: formData.condition,
+        title: formData.title.trim() || undefined,
+        answerOptions: [],
+        questions: normalized.map((q) => ({
+          prompt: q.prompt,
+          correctAnswer: q.correctAnswer || undefined,
+          timerSeconds: q.timerSeconds === null ? undefined : q.timerSeconds,
+        })),
       })
 
       // Redirect to session page
@@ -79,59 +120,97 @@ export default function CreateSession() {
             <Card className="p-6">
               <h2 className="text-xl font-semibold text-foreground mb-6">Basic Information</h2>
               
-              <div className="space-y-4">
-                <div className="p-3 rounded-md bg-secondary/30 text-sm text-foreground/70">
-                  A unique <span className="font-semibold text-foreground">session code</span> will be generated automatically when you create this session.
-                </div>
+	              <div className="space-y-4">
+	                <div className="p-3 rounded-md bg-secondary/30 text-sm text-foreground/70">
+	                  A unique <span className="font-semibold text-foreground">session code</span> will be generated automatically when you create this session.
+	                </div>
 
-                <div>
-                  <label htmlFor="question" className="block text-sm font-medium text-foreground mb-2">
-                    Question
-                  </label>
-                  <textarea
-                    id="question"
-                    name="question"
-                    value={formData.question}
-                    onChange={handleInputChange}
-                    placeholder="Enter your question here"
-                    rows={4}
-                    required
-                    className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                  />
-                </div>
+	                <div>
+	                  <label htmlFor="title" className="block text-sm font-medium text-foreground mb-2">
+	                    Session Title (optional)
+	                  </label>
+	                  <input
+	                    id="title"
+	                    name="title"
+	                    value={formData.title}
+	                    onChange={handleInputChange}
+	                    placeholder="e.g., Arrays & Complexity"
+	                    className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+	                  />
+	                </div>
 
-                <div>
-                  <label htmlFor="correctAnswer" className="block text-sm font-medium text-foreground mb-2">
-                    Correct Answer
-                  </label>
-                  <textarea
-                    id="correctAnswer"
-                    name="correctAnswer"
-                    value={formData.correctAnswer}
-                    onChange={handleInputChange}
-                    placeholder="The correct answer to your question"
-                    rows={3}
-                    required
-                    className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                  />
-                </div>
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-foreground">Questions</p>
+                        <p className="text-xs text-foreground/60">Add 3–5 open-ended questions. Students see one at a time.</p>
+                      </div>
+                      <Button type="button" variant="outline" onClick={addQuestion} disabled={formData.questions.length >= 5}>
+                        Add Question
+                      </Button>
+                    </div>
 
-                <div>
-                  <label htmlFor="answerOptions" className="block text-sm font-medium text-foreground mb-2">
-                    Answer Options
-                  </label>
-                  <textarea
-                    id="answerOptions"
-                    name="answerOptions"
-                    value={formData.answerOptions}
-                    onChange={handleInputChange}
-                    placeholder="Optional. Enter one option per line for multiple-choice sessions."
-                    rows={4}
-                    className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                  />
-                </div>
-              </div>
-            </Card>
+                    {formData.questions.map((q, idx) => (
+                      <Card key={idx} className="p-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <p className="font-semibold text-foreground">Q{idx + 1}</p>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            onClick={() => removeQuestion(idx)}
+                            disabled={formData.questions.length <= 3}
+                          >
+                            Remove
+                          </Button>
+                        </div>
+
+                        <div className="space-y-3">
+                          <div>
+                            <label className="block text-sm font-medium text-foreground mb-2">
+                              Prompt
+                            </label>
+                            <textarea
+                              value={q.prompt}
+                              onChange={(e) => updateQuestion(idx, { prompt: e.target.value })}
+                              placeholder="Enter the prompt"
+                              rows={3}
+                              required={idx < 3}
+                              className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-sm font-medium text-foreground mb-2">
+                              Correct Answer (optional, used for % correct)
+                            </label>
+                            <textarea
+                              value={q.correctAnswer}
+                              onChange={(e) => updateQuestion(idx, { correctAnswer: e.target.value })}
+                              placeholder="Optional: expected answer"
+                              rows={2}
+                              className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-sm font-medium text-foreground mb-2">
+                              Timer (seconds, optional)
+                            </label>
+                            <input
+                              type="number"
+                              min={0}
+                              value={q.timerSeconds}
+                              onChange={(e) => updateQuestion(idx, { timerSeconds: e.target.value })}
+                              placeholder="e.g., 90"
+                              className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                            />
+                          </div>
+                        </div>
+                      </Card>
+                    ))}
+                  </div>
+	              </div>
+	            </Card>
 
             {/* Condition Selection */}
             <Card className="p-6">

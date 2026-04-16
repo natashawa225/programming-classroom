@@ -7,7 +7,7 @@ const _geist = Geist({ subsets: ["latin"] });
 const _geistMono = Geist_Mono({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: 'SMART-Draft | Classroom Response System',
+  title: 'Classroom Response System',
   description: 'Real-time student response analysis with AI-powered feedback and misconception detection',
   generator: 'v0.app',
   icons: {

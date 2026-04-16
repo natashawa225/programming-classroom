@@ -14,9 +14,7 @@ export default async function TeacherLoginPage() {
     <main className="min-h-screen bg-background flex items-center justify-center">
       <div className="w-full max-w-md px-4">
         <div className="mb-10 text-center">
-          <Link href="/" className="inline-block mb-6">
-            <span className="text-2xl font-bold text-primary">SMART-Draft</span>
-          </Link>
+
           <h1 className="text-3xl font-bold text-foreground mb-2">Teacher Login</h1>
           <p className="text-sm text-foreground/70">Enter the dashboard password to continue</p>
         </div>

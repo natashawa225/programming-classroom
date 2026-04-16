@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useMemo, useState, useEffect } from 'react'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
@@ -9,6 +9,12 @@ import { getSession, getSessionResponses } from '@/lib/supabase/queries'
 import type { Session } from '@/lib/types/database'
 import { teacherLogout } from '@/app/teacher/auth-actions'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
+
+function formatDateUtc(isoLike: string) {
+  const date = new Date(isoLike)
+  if (Number.isNaN(date.getTime())) return isoLike
+  return date.toISOString().slice(0, 10)
+}
 
 export default function SessionExport() {
   const params = useParams()
@@ -20,6 +26,10 @@ export default function SessionExport() {
   const [exporting, setExporting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [exportFormat, setExportFormat] = useState<'csv' | 'json'>('csv')
+  const realtimeTables = useMemo(
+    () => [{ table: 'responses', event: 'INSERT' as const, filter: `session_id=eq.${sessionId}` }],
+    [sessionId]
+  )
 
   useEffect(() => {
     const loadData = async () => {
@@ -42,7 +52,7 @@ export default function SessionExport() {
   }, [sessionId])
 
   usePostgresChanges({
-    tables: [{ table: 'responses', event: 'INSERT', filter: `session_id=eq.${sessionId}` }],
+    tables: realtimeTables,
     onChange: async () => {
       try {
         const responsesData = await getSessionResponses(sessionId)
@@ -61,8 +71,15 @@ export default function SessionExport() {
       setError(null)
 
       if (exportFormat === 'csv') {
-        const response = await fetch(`/api/export-session?sessionId=${sessionId}`)
-        if (!response.ok) throw new Error('Export failed')
+        const response = await fetch(`/teacher/api/export-session?sessionId=${sessionId}`)
+        if (!response.ok) {
+          let message = 'Export failed'
+          try {
+            const body = await response.json()
+            if (typeof body?.error === 'string') message = body.error
+          } catch {}
+          throw new Error(message)
+        }
 
         const blob = await response.blob()
         const url = window.URL.createObjectURL(blob)
@@ -75,8 +92,15 @@ export default function SessionExport() {
         document.body.removeChild(a)
       } else {
         // JSON export
-        const response = await fetch(`/api/export-session?sessionId=${sessionId}&format=json`)
-        if (!response.ok) throw new Error('Export failed')
+        const response = await fetch(`/teacher/api/export-session?sessionId=${sessionId}&format=json`)
+        if (!response.ok) {
+          let message = 'Export failed'
+          try {
+            const body = await response.json()
+            if (typeof body?.error === 'string') message = body.error
+          } catch {}
+          throw new Error(message)
+        }
 
         const data = await response.json()
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
@@ -91,7 +115,7 @@ export default function SessionExport() {
       }
     } catch (err) {
       console.error('Error exporting:', err)
-      setError('Failed to export data')
+      setError(err instanceof Error ? err.message : 'Failed to export data')
     } finally {
       setExporting(false)
     }
@@ -167,7 +191,7 @@ export default function SessionExport() {
             </div>
             <div>
               <p className="text-sm text-foreground/60 mb-2">Created</p>
-              <p className="text-lg font-semibold">{new Date(session.created_at).toLocaleDateString()}</p>
+              <p className="text-lg font-semibold">{formatDateUtc(session.created_at)}</p>
             </div>
           </div>
         </Card>

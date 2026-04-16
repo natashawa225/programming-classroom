@@ -1,16 +1,18 @@
-const DEFAULT_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+const DEFAULT_SESSION_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
-export function generateSessionCode(length = 6, alphabet = DEFAULT_ALPHABET): string {
-  const chars = alphabet.split('')
+export function generateSessionCode(
+  length = 6,
+  alphabet: string = DEFAULT_SESSION_ALPHABET
+): string {
+  const chars = alphabet.split('').filter(Boolean)
+  if (chars.length === 0) throw new Error('Alphabet must not be empty')
+
+  // Use Web Crypto when available (browser + modern Node). Fallback to Math.random.
   const bytes = new Uint8Array(length)
-
-  // Prefer Web Crypto when available (works in browser + modern runtimes).
-  if (globalThis.crypto && 'getRandomValues' in globalThis.crypto) {
+  if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
     globalThis.crypto.getRandomValues(bytes)
   } else {
-    for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = Math.floor(Math.random() * 256)
-    }
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256)
   }
 
   let out = ''
