@@ -213,9 +213,11 @@ export async function POST(request: NextRequest) {
             roundNumber: rn as 1 | 2,
             responseId: r.response_id,
             understandingLevel: lab?.understanding_level ?? null,
+            evaluationCategory: lab?.evaluation_category ?? null,
             isCorrect: lab?.is_correct ?? null,
             misconceptionLabel: lab?.misconception_label ?? null,
             clusterId: lab?.cluster_id ?? null,
+            reasoningSummary: lab?.reasoning_summary ?? null,
             explanation: lab?.explanation ?? null,
           }
         })

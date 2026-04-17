@@ -629,9 +629,25 @@ export default function SessionAnalysis() {
                   <Card key={q.question_id} className="p-4">
                     <p className="font-semibold text-foreground mb-2">Q{q.position}</p>
                     <p className="text-sm text-foreground/70">Responses: {q.submission_count ?? 0}</p>
-                    <p className="text-sm text-foreground/70">
-                      % Fully correct: {(q.percent_fully_correct ?? q.percent_correct) === null || (q.percent_fully_correct ?? q.percent_correct) === undefined ? 'N/A' : `${q.percent_fully_correct ?? q.percent_correct}%`}
-                    </p>
+                    {session.condition === 'baseline' && q.response_quality_breakdown ? (
+                      <div className="mt-3 bg-secondary/20 p-3 rounded-lg">
+                        <p className="text-sm font-medium text-foreground mb-2">Response Quality Breakdown</p>
+                        <div className="grid sm:grid-cols-2 gap-2 text-sm text-foreground/80">
+                          <div>Fully correct: {q.response_quality_breakdown.fully_correct}</div>
+                          <div>Partially correct: {q.response_quality_breakdown.partially_correct}</div>
+                          <div>Relevant but incomplete: {q.response_quality_breakdown.relevant_incomplete}</div>
+                          <div>Misconception: {q.response_quality_breakdown.misconception}</div>
+                          <div>Unclear / off-topic: {q.response_quality_breakdown.unclear}</div>
+                        </div>
+                        <p className="text-xs text-foreground/60 mt-2">
+                          % fully correct: {(q.percent_fully_correct ?? q.percent_correct) === null || (q.percent_fully_correct ?? q.percent_correct) === undefined ? 'N/A' : `${q.percent_fully_correct ?? q.percent_correct}%`}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-foreground/70">
+                        % Fully correct: {(q.percent_fully_correct ?? q.percent_correct) === null || (q.percent_fully_correct ?? q.percent_correct) === undefined ? 'N/A' : `${q.percent_fully_correct ?? q.percent_correct}%`}
+                      </p>
+                    )}
                     <p className="text-sm text-foreground/70">
                       Avg confidence: {q.avg_confidence === null || q.avg_confidence === undefined ? 'N/A' : Number(q.avg_confidence).toFixed(2)}
                     </p>
@@ -639,6 +655,23 @@ export default function SessionAnalysis() {
                       <p className="text-xs text-foreground/60 mt-2">
                         Breakdown: C {q.evaluation_breakdown.correct}, MC {q.evaluation_breakdown.mostly_correct}, PC {q.evaluation_breakdown.partially_correct}, I {q.evaluation_breakdown.incorrect}, U {q.evaluation_breakdown.unclear}
                       </p>
+                    )}
+                    {session.condition === 'baseline' && q.teacher_interpretation && (
+                      <p className="text-sm text-foreground/70 mt-3">{q.teacher_interpretation}</p>
+                    )}
+                    {session.condition === 'baseline' && q.suggested_teacher_action && (
+                      <div className="mt-3 p-3 rounded-lg bg-background/60 border border-border/40">
+                        <p className="text-xs font-semibold text-foreground/60 mb-1">Suggested teacher action</p>
+                        <p className="text-sm text-foreground/80">{q.suggested_teacher_action}</p>
+                      </div>
+                    )}
+                    {session.condition === 'baseline' && q.representative_examples && (
+                      <details className="mt-3">
+                        <summary className="cursor-pointer text-xs text-primary">Show representative examples</summary>
+                        <pre className="mt-2 text-xs whitespace-pre-wrap bg-secondary/30 p-3 rounded-lg">
+                          {JSON.stringify(q.representative_examples, null, 2)}
+                        </pre>
+                      </details>
                     )}
                     {q.top_misconceptions && q.top_misconceptions.length > 0 && (
                       <div className="mt-3">
@@ -650,6 +683,9 @@ export default function SessionAnalysis() {
                                 <span>{w.label}</span>
                                 <span className="text-foreground/50">({w.count})</span>
                               </div>
+                              {session.condition === 'baseline' && w.interpretation && (
+                                <p className="text-xs text-foreground/60 mt-1">{w.interpretation}</p>
+                              )}
                               {session.condition === 'treatment' && w.hint && (
                                 <p className="text-xs text-foreground/60 mt-1">Hint: {w.hint}</p>
                               )}

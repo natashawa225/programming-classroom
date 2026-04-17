@@ -30,9 +30,11 @@ CREATE TABLE IF NOT EXISTS public.response_ai_labels (
   question_id UUID REFERENCES public.session_questions(question_id) ON DELETE CASCADE,
   round_number INT NOT NULL CHECK (round_number IN (1, 2)),
   understanding_level TEXT CHECK (understanding_level IN ('correct', 'mostly_correct', 'partially_correct', 'incorrect', 'unclear')),
+  evaluation_category TEXT CHECK (evaluation_category IN ('fully_correct', 'partially_correct', 'relevant_incomplete', 'misconception', 'unclear')),
   is_correct BOOLEAN,
   misconception_label TEXT,
   cluster_id TEXT,
+  reasoning_summary TEXT,
   explanation TEXT,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(analysis_run_id, response_id)

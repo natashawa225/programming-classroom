@@ -98,9 +98,11 @@ export interface ResponseAiLabel {
   question_id: string
   round_number: 1 | 2
   understanding_level: 'correct' | 'mostly_correct' | 'partially_correct' | 'incorrect' | 'unclear' | null
+  evaluation_category: 'fully_correct' | 'partially_correct' | 'relevant_incomplete' | 'misconception' | 'unclear' | null
   is_correct: boolean | null
   misconception_label: string | null
   cluster_id: string | null
+  reasoning_summary: string | null
   explanation: string | null
   created_at: string
 }

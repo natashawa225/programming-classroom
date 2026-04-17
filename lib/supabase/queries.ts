@@ -793,9 +793,11 @@ export async function upsertResponseAiLabels(labels: Array<{
   roundNumber: 1 | 2
   responseId: string
   understandingLevel?: 'correct' | 'mostly_correct' | 'partially_correct' | 'incorrect' | 'unclear' | null
+  evaluationCategory?: 'fully_correct' | 'partially_correct' | 'relevant_incomplete' | 'misconception' | 'unclear' | null
   isCorrect: boolean | null
   misconceptionLabel: string | null
   clusterId: string | null
+  reasoningSummary?: string | null
   explanation: string | null
 }>) {
   await assertTeacherAuthenticated()
@@ -812,9 +814,11 @@ export async function upsertResponseAiLabels(labels: Array<{
         question_id: l.questionId,
         round_number: l.roundNumber,
         understanding_level: l.understandingLevel ?? null,
+        evaluation_category: l.evaluationCategory ?? null,
         is_correct: l.isCorrect,
         misconception_label: l.misconceptionLabel,
         cluster_id: l.clusterId,
+        reasoning_summary: l.reasoningSummary ?? null,
         explanation: l.explanation,
       })),
       { onConflict: 'analysis_run_id,response_id' }
