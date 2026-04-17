@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS public.response_ai_labels (
   session_id UUID REFERENCES public.sessions(id) ON DELETE CASCADE,
   question_id UUID REFERENCES public.session_questions(question_id) ON DELETE CASCADE,
   round_number INT NOT NULL CHECK (round_number IN (1, 2)),
+  understanding_level TEXT CHECK (understanding_level IN ('correct', 'mostly_correct', 'partially_correct', 'incorrect', 'unclear')),
   is_correct BOOLEAN,
   misconception_label TEXT,
   cluster_id TEXT,

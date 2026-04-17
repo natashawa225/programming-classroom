@@ -8,6 +8,7 @@ import type { Response, Session, SessionParticipant } from '@/lib/types/database
 import { createClient } from '@/lib/supabase/client'
 import { updateSessionStatus } from '@/lib/supabase/queries'
 import { teacherLogout } from '@/app/teacher/auth-actions'
+import { summarizeSessionRoundMetrics } from '@/lib/session-metrics'
 
 type Props = {
   initialSession: Session
@@ -19,6 +20,11 @@ function formatTimestampUtc(isoLike: string) {
   const date = new Date(isoLike)
   if (Number.isNaN(date.getTime())) return isoLike
   return date.toISOString().replace('T', ' ').replace('Z', ' UTC')
+}
+
+function formatPercent(value: number | null) {
+  if (value === null) return 'N/A'
+  return `${Math.round(value)}%`
 }
 
 function mergeById<T extends Record<string, any>>(
@@ -59,18 +65,24 @@ const Header = memo(function Header({ session }: { session: Session }) {
 const Overview = memo(function Overview({
   status,
   conditionLabel,
-  respondingCount,
-  totalParticipants,
-  responseRate,
+  studentsJoined,
+  studentsResponded,
+  participationRate,
+  totalSubmissions,
+  completionRate,
 }: {
   status: string
   conditionLabel: string
-  respondingCount: number
-  totalParticipants: number
-  responseRate: number
+  studentsJoined: number
+  studentsResponded: number
+  participationRate: number | null
+  totalSubmissions: number
+  completionRate: number | null
 }) {
+  const gridClassName = completionRate === null ? 'md:grid-cols-4' : 'md:grid-cols-5'
+
   return (
-    <div className="grid md:grid-cols-4 gap-4 mb-8">
+    <div className={`grid gap-4 mb-8 ${gridClassName}`}>
       <Card className="p-6">
         <p className="text-sm text-foreground/60 mb-2">Status</p>
         <p className="text-2xl font-bold text-primary capitalize">{status}</p>
@@ -80,13 +92,27 @@ const Overview = memo(function Overview({
         <p className="text-2xl font-bold text-accent">{conditionLabel}</p>
       </Card>
       <Card className="p-6">
-        <p className="text-sm text-foreground/60 mb-2">Responses</p>
-        <p className="text-2xl font-bold">{respondingCount}/{totalParticipants}</p>
+        <p className="text-sm text-foreground/60 mb-2">Students Joined</p>
+        <p className="text-2xl font-bold">{studentsJoined}</p>
       </Card>
       <Card className="p-6">
-        <p className="text-sm text-foreground/60 mb-2">Response Rate</p>
-        <p className="text-2xl font-bold">{responseRate}%</p>
+        <p className="text-sm text-foreground/60 mb-2">Students Responded</p>
+        <p className="text-2xl font-bold">{studentsResponded}</p>
       </Card>
+      <Card className="p-6">
+        <p className="text-sm text-foreground/60 mb-2">Participation Rate</p>
+        <p className="text-2xl font-bold">{formatPercent(participationRate)}</p>
+      </Card>
+      <Card className="p-6">
+        <p className="text-sm text-foreground/60 mb-2">Total Submissions</p>
+        <p className="text-2xl font-bold">{totalSubmissions}</p>
+      </Card>
+      {completionRate !== null && (
+        <Card className="p-6">
+          <p className="text-sm text-foreground/60 mb-2">Completion Rate</p>
+          <p className="text-2xl font-bold">{formatPercent(completionRate)}</p>
+        </Card>
+      )}
     </div>
   )
 })
@@ -259,10 +285,17 @@ export default function SessionDetailClient({
   const recentTimeouts = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const participantsRef = useRef<SessionParticipant[]>(initialParticipants)
 
-  const respondingCount = responses.length
-  const totalParticipants = participants.length
-  const responseRate = totalParticipants > 0 ? Math.round((respondingCount / totalParticipants) * 100) : 0
   const conditionLabel = session.condition === 'baseline' ? 'Baseline' : 'Treatment'
+  const metrics = useMemo(
+    () =>
+      summarizeSessionRoundMetrics({
+        session,
+        participants,
+        responses,
+        questionCount: 1,
+      }),
+    [participants, responses, session]
+  )
 
   useEffect(() => {
     return () => {
@@ -395,9 +428,11 @@ export default function SessionDetailClient({
         <Overview
           status={session.status}
           conditionLabel={conditionLabel}
-          respondingCount={respondingCount}
-          totalParticipants={totalParticipants}
-          responseRate={responseRate}
+          studentsJoined={metrics.studentsJoined}
+          studentsResponded={metrics.studentsResponded}
+          participationRate={metrics.participationRate}
+          totalSubmissions={metrics.totalSubmissions}
+          completionRate={metrics.completionRate}
         />
 
         <Controls

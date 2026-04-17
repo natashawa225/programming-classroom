@@ -6,9 +6,17 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { getSession, getSessionResponses, getLatestCompletedAnalysisRun, getLatestInProgressAnalysisRun } from '@/lib/supabase/queries'
-import type { Session } from '@/lib/types/database'
+import {
+  getSession,
+  getSessionParticipants,
+  getSessionQuestions,
+  getSessionResponses,
+  getLatestCompletedAnalysisRun,
+  getLatestInProgressAnalysisRun,
+} from '@/lib/supabase/queries'
+import type { Response, Session, SessionParticipant, SessionQuestion } from '@/lib/types/database'
 import type { SessionRoundAnalysis } from '@/lib/ai/experiment-analysis'
+import { summarizeSessionRoundMetrics } from '@/lib/session-metrics'
 import { teacherLogout } from '@/app/teacher/auth-actions'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
 import { AnalysisDashboard } from '@/components/analysis-dashboard'
@@ -109,15 +117,27 @@ function formatPercentValue(value: number | null | undefined) {
   return `${Math.round(value)}%`
 }
 
+function isDetailedTransitionMetrics(value: any) {
+  return Boolean(value && typeof value.total_pairs === 'number' && value.incorrect_to_correct && typeof value.incorrect_to_correct === 'object')
+}
+
 function getTransitionSummary(analysis: any, totalRound2Responses: number) {
   const transitions = analysis?.transitions
-  if (!transitions) return null
+  const transitionMetrics = analysis?.transition_metrics
+  const detailed = transitionMetrics || (isDetailedTransitionMetrics(transitions) ? transitions : null)
+  const simple = !detailed && transitions && typeof transitions.incorrect_to_correct === 'number' ? transitions : null
+  if (!detailed && !simple) return null
 
-  const improved = transitions.incorrect_to_correct?.count ?? 0
-  const regressed = transitions.correct_to_incorrect?.count ?? 0
-  const stayedCorrect = transitions.stayed_correct?.count ?? 0
-  const stayedIncorrect = transitions.stayed_incorrect?.count ?? 0
-  const noChange = stayedCorrect + stayedIncorrect
+  const improved = detailed
+    ? detailed.incorrect_to_correct?.count ?? 0
+    : simple?.incorrect_to_correct ?? 0
+  const regressed = detailed
+    ? detailed.correct_to_incorrect?.count ?? 0
+    : simple?.correct_to_incorrect ?? 0
+  const noChange = detailed
+    ? (detailed.stayed_correct?.count ?? 0) + (detailed.stayed_incorrect?.count ?? 0)
+    : simple?.no_change ?? 0
+  if ((detailed && (detailed.total_pairs ?? 0) === 0) || (!detailed && improved + regressed + noChange === 0)) return null
   const denominator = totalRound2Responses > 0 ? totalRound2Responses : analysis?.totals?.total_submissions ?? 0
 
   return {
@@ -133,7 +153,7 @@ function getTransitionSummary(analysis: any, totalRound2Responses: number) {
       count: noChange,
       percent: denominator > 0 ? (noChange / denominator) * 100 : null,
     },
-    totalPairs: transitions.total_pairs ?? 0,
+    totalPairs: detailed?.total_pairs ?? improved + regressed + noChange,
   }
 }
 
@@ -146,32 +166,47 @@ export default function SessionAnalysis() {
   const [loading, setLoading] = useState(true)
   const [analyzing, setAnalyzing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [responseCount, setResponseCount] = useState(0)
+  const [participants, setParticipants] = useState<SessionParticipant[]>([])
+  const [questions, setQuestions] = useState<SessionQuestion[]>([])
+  const [responses, setResponses] = useState<Response[]>([])
   const [roundNumber, setRoundNumber] = useState<1 | 2>(1)
   const [analysisStatus, setAnalysisStatus] = useState<'none' | 'in_progress' | 'completed'>('none')
   const [analysisRunMeta, setAnalysisRunMeta] = useState<{ analysisRunId: string; status: string; createdAt: string } | null>(null)
-  const realtimeTables = useMemo(
-    () => [{ table: 'responses', event: 'INSERT' as const, filter: `session_id=eq.${sessionId}` }],
-    [sessionId]
-  )
   const analysisRealtimeTables = useMemo(
     () => [{ table: 'analysis_runs', event: '*' as const, filter: `session_id=eq.${sessionId}` }],
     [sessionId]
+  )
+
+  const metrics = useMemo(
+    () =>
+      summarizeSessionRoundMetrics({
+        session,
+        participants,
+        responses,
+        roundNumber,
+        questionCount: questions.length || analysis?.per_question?.length || 1,
+      }),
+    [analysis?.per_question?.length, participants, questions.length, responses, roundNumber, session]
   )
 
   useEffect(() => {
     const loadData = async () => {
       try {
         setLoading(true)
-        const sessionData = await getSession(sessionId)
+        const [sessionData, participantsData, questionsData, responsesData] = await Promise.all([
+          getSession(sessionId),
+          getSessionParticipants(sessionId),
+          getSessionQuestions(sessionId),
+          getSessionResponses(sessionId),
+        ])
         setSession(sessionData)
-
-        const responsesData = await getSessionResponses(sessionId)
+        setParticipants(participantsData || [])
+        setQuestions(questionsData || [])
+        setResponses(responsesData || [])
         const hasRound2 = (responsesData || []).some(r => (r.round_number ?? 1) === 2)
         const defaultRound: 1 | 2 =
           sessionData.condition === 'baseline' ? 1 : hasRound2 && sessionData.status !== 'revision' ? 2 : 1
         setRoundNumber(defaultRound)
-        setResponseCount((responsesData || []).filter(r => (r.round_number ?? 1) === defaultRound).length)
       } catch (err) {
         console.error('Error loading session:', err)
         setError('Failed to load session data')
@@ -228,8 +263,12 @@ export default function SessionAnalysis() {
   useEffect(() => {
     const refreshCount = async () => {
       try {
-        const responsesData = await getSessionResponses(sessionId)
-        setResponseCount((responsesData || []).filter(r => (r.round_number ?? 1) === roundNumber).length)
+        const [participantsData, responsesData] = await Promise.all([
+          getSessionParticipants(sessionId),
+          getSessionResponses(sessionId),
+        ])
+        setParticipants(participantsData || [])
+        setResponses(responsesData || [])
       } catch {}
     }
     void refreshCount()
@@ -242,17 +281,34 @@ export default function SessionAnalysis() {
   }, [sessionId, session?.id, roundNumber])
 
   usePostgresChanges({
-    tables: realtimeTables,
+    tables: [
+      { table: 'responses', event: 'INSERT' as const, filter: `session_id=eq.${sessionId}` },
+      { table: 'responses', event: 'UPDATE' as const, filter: `session_id=eq.${sessionId}` },
+    ],
     onChange: async () => {
       try {
         const responsesData = await getSessionResponses(sessionId)
-        setResponseCount((responsesData || []).filter(r => (r.round_number ?? 1) === roundNumber).length)
+        setResponses(responsesData || [])
       } catch (err) {
         console.error('Error refreshing response count:', err)
       }
     },
     pollMs: 10000,
     debugLabel: `teacher-analysis-${sessionId}-r${roundNumber}`,
+  })
+
+  usePostgresChanges({
+    tables: [{ table: 'session_participants', event: '*' as const, filter: `session_id=eq.${sessionId}` }],
+    onChange: async () => {
+      try {
+        const participantsData = await getSessionParticipants(sessionId)
+        setParticipants(participantsData || [])
+      } catch (err) {
+        console.error('Error refreshing participant count:', err)
+      }
+    },
+    pollMs: 10000,
+    debugLabel: `teacher-analysis-participants-${sessionId}`,
   })
 
   usePostgresChanges({
@@ -314,6 +370,14 @@ export default function SessionAnalysis() {
     }
   }
 
+  const transitionSummary = getTransitionSummary(analysis, metrics.totalSubmissions)
+  const detailedTransitionMetricsRaw =
+    analysis?.transition_metrics || (isDetailedTransitionMetrics(analysis?.transitions) ? analysis.transitions : null)
+  const detailedTransitionMetrics =
+    detailedTransitionMetricsRaw && (detailedTransitionMetricsRaw.total_pairs ?? 0) > 0
+      ? detailedTransitionMetricsRaw
+      : null
+
   if (loading) {
     return (
       <main className="min-h-screen bg-background flex items-center justify-center">
@@ -374,13 +438,45 @@ export default function SessionAnalysis() {
               </p>
             </div>
             <div>
-              <p className="text-sm text-foreground/60 mb-1">Total Responses</p>
-              <p className="text-lg font-semibold text-foreground">{responseCount}</p>
-            </div>
-            <div>
               <p className="text-sm text-foreground/60 mb-1">Status</p>
               <p className="text-lg font-semibold text-primary capitalize">{session.status}</p>
             </div>
+            <div>
+              <p className="text-sm text-foreground/60 mb-1">Viewing Round</p>
+              <p className="text-lg font-semibold text-foreground">Round {roundNumber}</p>
+            </div>
+          </div>
+        </Card>
+
+        <Card className="p-6 mb-8">
+          <h2 className="text-lg font-semibold text-foreground mb-4">Participation Metrics</h2>
+          <div className={`grid gap-4 ${metrics.questionCount > 1 ? 'md:grid-cols-5' : 'md:grid-cols-4'}`}>
+            <div className="p-4 rounded-lg bg-secondary/30">
+              <p className="text-sm text-foreground/60 mb-1">Students Joined</p>
+              <p className="text-2xl font-bold text-foreground">{metrics.studentsJoined}</p>
+            </div>
+            <div className="p-4 rounded-lg bg-secondary/30">
+              <p className="text-sm text-foreground/60 mb-1">Students Responded</p>
+              <p className="text-2xl font-bold text-foreground">{metrics.studentsResponded}</p>
+            </div>
+            <div className="p-4 rounded-lg bg-secondary/30">
+              <p className="text-sm text-foreground/60 mb-1">Participation Rate</p>
+              <p className="text-2xl font-bold text-foreground">
+                {metrics.participationRate === null ? 'N/A' : `${Math.round(metrics.participationRate)}%`}
+              </p>
+            </div>
+            <div className="p-4 rounded-lg bg-secondary/30">
+              <p className="text-sm text-foreground/60 mb-1">Total Submissions</p>
+              <p className="text-2xl font-bold text-foreground">{metrics.totalSubmissions}</p>
+            </div>
+            {metrics.questionCount > 1 && (
+              <div className="p-4 rounded-lg bg-secondary/30">
+                <p className="text-sm text-foreground/60 mb-1">Completion Rate</p>
+                <p className="text-2xl font-bold text-foreground">
+                  {metrics.completionRate === null ? 'N/A' : `${Math.round(metrics.completionRate)}%`}
+                </p>
+              </div>
+            )}
           </div>
         </Card>
 
@@ -425,12 +521,12 @@ export default function SessionAnalysis() {
               </div>
             )}
 
-            {responseCount > 0 && (
+            {metrics.totalSubmissions > 0 && (
               <Button onClick={() => handleAnalyze()} disabled={analyzing} size="lg">
                 {analyzing ? 'Analyzing...' : 'Generate Analysis'}
               </Button>
             )}
-            {responseCount === 0 && (
+            {metrics.totalSubmissions === 0 && (
               <p className="text-foreground/60">No responses to analyze yet</p>
             )}
           </Card>
@@ -468,43 +564,27 @@ export default function SessionAnalysis() {
                 <p className="text-sm text-foreground/60 mb-4">
                   Round 1 to round 2 movement for the current treatment group, based on the backend transition counts.
                 </p>
-                {analysis.transitions ? (
-                  (() => {
-                    const summary = getTransitionSummary(analysis, responseCount)
-                    if (!summary) {
-                      return (
-                        <div className="rounded-lg border border-dashed border-border/60 bg-secondary/20 p-4">
-                          <p className="text-sm font-medium text-foreground mb-1">Transition Summary unavailable</p>
-                          <p className="text-sm text-foreground/60">
-                            No transition data available (ensure round 1 and round 2 are both present).
-                          </p>
-                        </div>
-                      )
-                    }
-
-                    return (
-                      <>
-                        <div className="grid gap-4 md:grid-cols-3">
-                          <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-4">
-                            <p className="text-sm text-emerald-700 dark:text-emerald-300 mb-1">Incorrect → Correct (Improved)</p>
-                            <p className="text-2xl font-bold text-foreground">{summary.improved.count}</p>
-                            <p className="text-xs text-foreground/60 mt-1">{formatPercentValue(summary.improved.percent)} of round 2 responses</p>
-                          </div>
-                          <div className="rounded-lg border border-rose-500/20 bg-rose-500/10 p-4">
-                            <p className="text-sm text-rose-700 dark:text-rose-300 mb-1">Correct → Incorrect (Regressed)</p>
-                            <p className="text-2xl font-bold text-foreground">{summary.regressed.count}</p>
-                            <p className="text-xs text-foreground/60 mt-1">{formatPercentValue(summary.regressed.percent)} of round 2 responses</p>
-                          </div>
-                          <div className="rounded-lg border border-border/60 bg-secondary/25 p-4">
-                            <p className="text-sm text-foreground/70 mb-1">No Change</p>
-                            <p className="text-2xl font-bold text-foreground">{summary.noChange.count}</p>
-                            <p className="text-xs text-foreground/60 mt-1">{formatPercentValue(summary.noChange.percent)} of round 2 responses</p>
-                          </div>
-                        </div>
-                        <p className="text-xs text-foreground/60 mt-3">Pairs analyzed: {summary.totalPairs}</p>
-                      </>
-                    )
-                  })()
+                {transitionSummary ? (
+                  <>
+                    <div className="grid gap-4 md:grid-cols-3">
+                      <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-4">
+                        <p className="text-sm text-emerald-700 dark:text-emerald-300 mb-1">Incorrect → Correct (Improved)</p>
+                        <p className="text-2xl font-bold text-foreground">{transitionSummary.improved.count}</p>
+                        <p className="text-xs text-foreground/60 mt-1">{formatPercentValue(transitionSummary.improved.percent)} of round 2 responses</p>
+                      </div>
+                      <div className="rounded-lg border border-rose-500/20 bg-rose-500/10 p-4">
+                        <p className="text-sm text-rose-700 dark:text-rose-300 mb-1">Correct → Incorrect (Regressed)</p>
+                        <p className="text-2xl font-bold text-foreground">{transitionSummary.regressed.count}</p>
+                        <p className="text-xs text-foreground/60 mt-1">{formatPercentValue(transitionSummary.regressed.percent)} of round 2 responses</p>
+                      </div>
+                      <div className="rounded-lg border border-border/60 bg-secondary/25 p-4">
+                        <p className="text-sm text-foreground/70 mb-1">No Change</p>
+                        <p className="text-2xl font-bold text-foreground">{transitionSummary.noChange.count}</p>
+                        <p className="text-xs text-foreground/60 mt-1">{formatPercentValue(transitionSummary.noChange.percent)} of round 2 responses</p>
+                      </div>
+                    </div>
+                    <p className="text-xs text-foreground/60 mt-3">Pairs analyzed: {transitionSummary.totalPairs}</p>
+                  </>
                 ) : (
                   <div className="rounded-lg border border-dashed border-border/60 bg-secondary/20 p-4">
                     <p className="text-sm font-medium text-foreground mb-1">Transition Summary unavailable</p>
@@ -529,9 +609,10 @@ export default function SessionAnalysis() {
                 <div className="p-4 rounded-lg bg-secondary/30">
                   <p className="text-sm text-foreground/60 mb-1">% correct (labeled)</p>
                   <p className="text-2xl font-bold text-foreground">
-                    {analysis.totals?.percent_correct === null || analysis.totals?.percent_correct === undefined
+                    {(analysis.totals?.percent_fully_correct ?? analysis.totals?.percent_correct) === null ||
+                    (analysis.totals?.percent_fully_correct ?? analysis.totals?.percent_correct) === undefined
                       ? 'N/A'
-                      : `${analysis.totals.percent_correct}%`}
+                      : `${analysis.totals?.percent_fully_correct ?? analysis.totals.percent_correct}%`}
                   </p>
                 </div>
                 <div className="p-4 rounded-lg bg-secondary/30">
@@ -549,11 +630,16 @@ export default function SessionAnalysis() {
                     <p className="font-semibold text-foreground mb-2">Q{q.position}</p>
                     <p className="text-sm text-foreground/70">Responses: {q.submission_count ?? 0}</p>
                     <p className="text-sm text-foreground/70">
-                      % Correct: {q.percent_correct === null || q.percent_correct === undefined ? 'N/A' : `${q.percent_correct}%`}
+                      % Fully correct: {(q.percent_fully_correct ?? q.percent_correct) === null || (q.percent_fully_correct ?? q.percent_correct) === undefined ? 'N/A' : `${q.percent_fully_correct ?? q.percent_correct}%`}
                     </p>
                     <p className="text-sm text-foreground/70">
                       Avg confidence: {q.avg_confidence === null || q.avg_confidence === undefined ? 'N/A' : Number(q.avg_confidence).toFixed(2)}
                     </p>
+                    {q.evaluation_breakdown && (
+                      <p className="text-xs text-foreground/60 mt-2">
+                        Breakdown: C {q.evaluation_breakdown.correct}, MC {q.evaluation_breakdown.mostly_correct}, PC {q.evaluation_breakdown.partially_correct}, I {q.evaluation_breakdown.incorrect}, U {q.evaluation_breakdown.unclear}
+                      </p>
+                    )}
                     {q.top_misconceptions && q.top_misconceptions.length > 0 && (
                       <div className="mt-3">
                         <p className="text-sm font-medium text-foreground mb-2">Top misconceptions</p>
@@ -577,32 +663,32 @@ export default function SessionAnalysis() {
               </div>
             </Card>
 
-            {analysis.transitions && (
+            {detailedTransitionMetrics && (
               <Card className="p-6">
                 <h3 className="text-lg font-semibold text-foreground mb-4">Round 1 → Round 2 Transitions</h3>
                 <div className="grid md:grid-cols-4 gap-4">
                   <div className="p-4 rounded-lg bg-secondary/30">
                     <p className="text-sm text-foreground/60 mb-1">Incorrect → Correct</p>
-                    <p className="text-2xl font-bold text-foreground">{analysis.transitions.incorrect_to_correct?.count ?? 0}</p>
-                    <p className="text-xs text-foreground/60 mt-1">{analysis.transitions.incorrect_to_correct?.percent ?? 0}%</p>
+                    <p className="text-2xl font-bold text-foreground">{detailedTransitionMetrics.incorrect_to_correct?.count ?? 0}</p>
+                    <p className="text-xs text-foreground/60 mt-1">{detailedTransitionMetrics.incorrect_to_correct?.percent ?? 0}%</p>
                   </div>
                   <div className="p-4 rounded-lg bg-secondary/30">
                     <p className="text-sm text-foreground/60 mb-1">Correct → Incorrect</p>
-                    <p className="text-2xl font-bold text-foreground">{analysis.transitions.correct_to_incorrect?.count ?? 0}</p>
-                    <p className="text-xs text-foreground/60 mt-1">{analysis.transitions.correct_to_incorrect?.percent ?? 0}%</p>
+                    <p className="text-2xl font-bold text-foreground">{detailedTransitionMetrics.correct_to_incorrect?.count ?? 0}</p>
+                    <p className="text-xs text-foreground/60 mt-1">{detailedTransitionMetrics.correct_to_incorrect?.percent ?? 0}%</p>
                   </div>
                   <div className="p-4 rounded-lg bg-secondary/30">
                     <p className="text-sm text-foreground/60 mb-1">Stayed Correct</p>
-                    <p className="text-2xl font-bold text-foreground">{analysis.transitions.stayed_correct?.count ?? 0}</p>
-                    <p className="text-xs text-foreground/60 mt-1">{analysis.transitions.stayed_correct?.percent ?? 0}%</p>
+                    <p className="text-2xl font-bold text-foreground">{detailedTransitionMetrics.stayed_correct?.count ?? 0}</p>
+                    <p className="text-xs text-foreground/60 mt-1">{detailedTransitionMetrics.stayed_correct?.percent ?? 0}%</p>
                   </div>
                   <div className="p-4 rounded-lg bg-secondary/30">
                     <p className="text-sm text-foreground/60 mb-1">Stayed Incorrect</p>
-                    <p className="text-2xl font-bold text-foreground">{analysis.transitions.stayed_incorrect?.count ?? 0}</p>
-                    <p className="text-xs text-foreground/60 mt-1">{analysis.transitions.stayed_incorrect?.percent ?? 0}%</p>
+                    <p className="text-2xl font-bold text-foreground">{detailedTransitionMetrics.stayed_incorrect?.count ?? 0}</p>
+                    <p className="text-xs text-foreground/60 mt-1">{detailedTransitionMetrics.stayed_incorrect?.percent ?? 0}%</p>
                   </div>
                 </div>
-                <p className="text-xs text-foreground/60 mt-3">Pairs analyzed: {analysis.transitions.total_pairs ?? 0}</p>
+                <p className="text-xs text-foreground/60 mt-3">Pairs analyzed: {detailedTransitionMetrics.total_pairs ?? 0}</p>
               </Card>
             )}
 

@@ -88,6 +88,23 @@ function jaccard(a: Set<string>, b: Set<string>) {
   return union === 0 ? 0 : inter / union
 }
 
+function parseUnderstandingLevel(input: unknown) {
+  const s = String(input || '').toLowerCase().replace(/[\s_-]+/g, '_').trim()
+  if (s === 'correct') return 'correct'
+  if (s === 'mostly_correct' || s === 'mostlycorrect') return 'mostly_correct'
+  if (s === 'partially_correct' || s === 'partiallycorrect') return 'partially_correct'
+  if (s === 'incorrect') return 'incorrect'
+  return 'unclear'
+}
+
+function levelScore(level: ReturnType<typeof parseUnderstandingLevel>) {
+  if (level === 'correct') return 4
+  if (level === 'mostly_correct') return 3
+  if (level === 'partially_correct') return 2
+  if (level === 'incorrect') return 1
+  return 0
+}
+
 export async function POST(request: NextRequest) {
   try {
     const teacherSession = await getTeacherSession()
@@ -195,6 +212,7 @@ export async function POST(request: NextRequest) {
             questionId: r.question_id as string,
             roundNumber: rn as 1 | 2,
             responseId: r.response_id,
+            understandingLevel: lab?.understanding_level ?? null,
             isCorrect: lab?.is_correct ?? null,
             misconceptionLabel: lab?.misconception_label ?? null,
             clusterId: lab?.cluster_id ?? null,
@@ -216,15 +234,23 @@ export async function POST(request: NextRequest) {
 
         // If we have a stored round-1 analysis, use its labels when available.
         const round1Correctness = new Map<string, boolean | null>()
+        const round1Levels = new Map<string, ReturnType<typeof parseUnderstandingLevel>>()
         const compare = (analysis as any).compare_to_round_1
+        const round1LabelArrays: any[] = []
+        if (Array.isArray(compare?.response_labels)) round1LabelArrays.push(compare.response_labels)
         if (compare?.per_question && Array.isArray(compare.per_question)) {
           for (const q of compare.per_question) {
-            const labels = q?.response_labels
-            if (!Array.isArray(labels)) continue
-            for (const l of labels) {
-              if (typeof l?.response_id === 'string' && typeof l?.is_correct === 'boolean') {
-                round1Correctness.set(l.response_id, l.is_correct)
-              }
+            if (Array.isArray(q?.response_labels)) round1LabelArrays.push(q.response_labels)
+          }
+        }
+        for (const arr of round1LabelArrays) {
+          for (const l of arr) {
+            if (typeof l?.response_id !== 'string') continue
+            if (typeof l?.is_correct === 'boolean') {
+              round1Correctness.set(l.response_id, l.is_correct)
+            }
+            if (l?.understanding_level) {
+              round1Levels.set(l.response_id, parseUnderstandingLevel(l.understanding_level))
             }
           }
         }
@@ -239,11 +265,14 @@ export async function POST(request: NextRequest) {
         }
 
         const round2Correctness = new Map<string, boolean | null>()
+        const round2Levels = new Map<string, ReturnType<typeof parseUnderstandingLevel>>()
         for (const r2 of responsesData) {
           const lab = labelsByResponseId.get(r2.response_id)
           if (typeof lab?.is_correct === 'boolean') {
             round2Correctness.set(r2.response_id, lab.is_correct)
-            continue
+          }
+          if (lab?.understanding_level) {
+            round2Levels.set(r2.response_id, parseUnderstandingLevel(lab.understanding_level))
           }
           const q = r2.question_id ? questionById.get(r2.question_id) : null
           const correctKey = q?.correct_answer ? normalize(q.correct_answer) : ''
@@ -284,13 +313,60 @@ export async function POST(request: NextRequest) {
         }
 
         const percent = (n: number) => (totalPairs > 0 ? Math.round((n / totalPairs) * 100) : null)
+        const noChange = stayedCorrect + stayedIncorrect
 
         ;(analysis as any).transitions = {
+          incorrect_to_correct: incorrectToCorrect,
+          correct_to_incorrect: correctToIncorrect,
+          no_change: noChange,
+        }
+        ;(analysis as any).transition_metrics = {
           total_pairs: totalPairs,
           incorrect_to_correct: { count: incorrectToCorrect, percent: percent(incorrectToCorrect) },
           correct_to_incorrect: { count: correctToIncorrect, percent: percent(correctToIncorrect) },
           stayed_correct: { count: stayedCorrect, percent: percent(stayedCorrect) },
           stayed_incorrect: { count: stayedIncorrect, percent: percent(stayedIncorrect) },
+        }
+
+        // Quality-based transitions (preferred for open-ended responses).
+        let qualityPairs = 0
+        let improved = 0
+        let worsened = 0
+        let unchanged = 0
+        let movedToFullyCorrect = 0
+        let sumScoreDelta = 0
+
+        for (const r2 of responsesData) {
+          const originalId = r2.original_response_id || null
+          const r1 =
+            (originalId && round1ById.get(originalId)) ||
+            round1Responses.find(
+              (r) =>
+                r.session_participant_id === r2.session_participant_id &&
+                r.question_id === r2.question_id
+            ) ||
+            null
+          if (!r1) continue
+
+          const l1 = round1Levels.get(r1.response_id)
+          const l2 = round2Levels.get(r2.response_id)
+          if (!l1 || !l2) continue
+          qualityPairs += 1
+          const d = levelScore(l2) - levelScore(l1)
+          sumScoreDelta += d
+          if (d > 0) improved += 1
+          else if (d < 0) worsened += 1
+          else unchanged += 1
+          if (l1 !== 'correct' && l2 === 'correct') movedToFullyCorrect += 1
+        }
+
+        ;(analysis as any).quality_transitions = {
+          total_pairs: qualityPairs,
+          improved,
+          worsened,
+          unchanged,
+          moved_to_fully_correct: movedToFullyCorrect,
+          avg_score_delta: qualityPairs > 0 ? Number((sumScoreDelta / qualityPairs).toFixed(2)) : null,
         }
       } catch {}
 

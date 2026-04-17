@@ -792,6 +792,7 @@ export async function upsertResponseAiLabels(labels: Array<{
   questionId: string
   roundNumber: 1 | 2
   responseId: string
+  understandingLevel?: 'correct' | 'mostly_correct' | 'partially_correct' | 'incorrect' | 'unclear' | null
   isCorrect: boolean | null
   misconceptionLabel: string | null
   clusterId: string | null
@@ -810,6 +811,7 @@ export async function upsertResponseAiLabels(labels: Array<{
         session_id: l.sessionId,
         question_id: l.questionId,
         round_number: l.roundNumber,
+        understanding_level: l.understandingLevel ?? null,
         is_correct: l.isCorrect,
         misconception_label: l.misconceptionLabel,
         cluster_id: l.clusterId,

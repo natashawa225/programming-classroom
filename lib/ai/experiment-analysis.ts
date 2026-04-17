@@ -1,8 +1,11 @@
 import type { Response, Session, SessionQuestion } from '@/lib/types/database'
 import { openaiChatJson } from '@/lib/ai/openai-json'
 
+export type UnderstandingLevel = 'correct' | 'mostly_correct' | 'partially_correct' | 'incorrect' | 'unclear'
+
 export type ResponseLabel = {
   response_id: string
+  understanding_level: UnderstandingLevel
   is_correct: boolean | null
   misconception_label: string | null
   cluster_id: string | null
@@ -13,19 +16,42 @@ export type MisconceptionCluster = {
   cluster_id: string
   label: string
   description?: string | null
+  interpretation?: string | null
   count: number
   hint?: string | null
   example_response_ids?: string[]
+  representative_answers?: string[]
+}
+
+export type SessionAnalysisResponseLabel = {
+  response_id: string
+  question_id: string
+  is_correct: boolean | null
+  understanding_level: UnderstandingLevel
+  misconception_label: string | null
+  cluster_id: string | null
+  explanation: string | null
 }
 
 export type QuestionAnalysis = {
   question_id: string
+  question_no?: number
   position: number
   prompt: string
   correct_answer: string | null
   submission_count: number
+  response_count?: number
   avg_confidence: number | null
+  average_confidence?: number | null
   percent_correct: number | null
+  percent_fully_correct?: number | null
+  evaluation_breakdown?: {
+    correct: number
+    mostly_correct: number
+    partially_correct: number
+    incorrect: number
+    unclear: number
+  }
   confidence_breakdown: Record<
     '1' | '2' | '3' | '4' | '5',
     { correct: number; incorrect: number; unknown: number; total: number }
@@ -48,21 +74,41 @@ export type SessionRoundAnalysis = {
   created_at: string
   totals: {
     total_submissions: number
+    average_confidence?: number | null
     avg_confidence: number | null
     percent_correct: number | null
+    percent_fully_correct?: number | null
+    evaluation_breakdown?: {
+      correct: number
+      mostly_correct: number
+      partially_correct: number
+      incorrect: number
+      unclear: number
+    }
     confidence_breakdown: Record<
       '1' | '2' | '3' | '4' | '5',
       { correct: number; incorrect: number; unknown: number; total: number }
     >
   }
   per_question: QuestionAnalysis[]
+  response_labels?: SessionAnalysisResponseLabel[]
+  teaching_summary?: {
+    overall_summary: string
+    top_class_issues: string[]
+    teaching_suggestions: string[]
+  }
   summary_text: string
-  transitions?: {
+  transition_metrics?: {
     total_pairs: number
     incorrect_to_correct: { count: number; percent: number | null }
     correct_to_incorrect: { count: number; percent: number | null }
     stayed_correct: { count: number; percent: number | null }
     stayed_incorrect: { count: number; percent: number | null }
+  }
+  transitions?: {
+    incorrect_to_correct: number
+    correct_to_incorrect: number
+    no_change: number
   }
   misconception_comparison?: Array<{
     question_id: string
@@ -124,6 +170,38 @@ function normalize(s: string) {
   return String(s || '').trim().toLowerCase().replace(/\s+/g, ' ')
 }
 
+function canonicalizeLabel(label: string) {
+  const raw = String(label || '')
+    .trim()
+    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, '')
+    .toLowerCase()
+  // Keep letters/numbers and spaces; drop most punctuation so O(1) and o(1) match.
+  const stripped = raw.replace(/[^a-z0-9\s]+/g, ' ')
+  return stripped.replace(/\s+/g, ' ').trim()
+}
+
+function parseUnderstandingLevel(input: unknown): UnderstandingLevel {
+  const s = String(input || '').toLowerCase().replace(/[\s_-]+/g, '_').trim()
+  if (s === 'correct') return 'correct'
+  if (s === 'mostly_correct' || s === 'mostlycorrect') return 'mostly_correct'
+  if (s === 'partially_correct' || s === 'partiallycorrect') return 'partially_correct'
+  if (s === 'incorrect') return 'incorrect'
+  return 'unclear'
+}
+
+function levelToScore(level: UnderstandingLevel) {
+  // Ordinal score for round-1 vs round-2 comparisons.
+  if (level === 'correct') return 4
+  if (level === 'mostly_correct') return 3
+  if (level === 'partially_correct') return 2
+  if (level === 'incorrect') return 1
+  return 0
+}
+
+function isFullyCorrect(level: UnderstandingLevel) {
+  return level === 'correct'
+}
+
 function mean(values: number[]) {
   if (values.length === 0) return null
   return values.reduce((a, b) => a + b, 0) / values.length
@@ -163,8 +241,11 @@ function makeFallbackClusters(question: SessionQuestion, responses: Response[]) 
     const ans = normalize(r.answer)
     const isCorrect = correctKey ? ans === correctKey : null
     const cluster = isCorrect === false ? wrongAnswerToClusterId.get(ans) || null : null
+    const understanding_level: UnderstandingLevel =
+      isCorrect === true ? 'correct' : isCorrect === false ? 'incorrect' : 'unclear'
     return {
       response_id: r.response_id,
+      understanding_level,
       is_correct: isCorrect,
       misconception_label: isCorrect === false ? (clusters.find(c => c.cluster_id === cluster)?.label || 'Incorrect') : null,
       cluster_id: cluster,
@@ -178,7 +259,7 @@ function makeFallbackClusters(question: SessionQuestion, responses: Response[]) 
 export async function analyzeQuestionWithAI(options: {
   session: Session
   question: SessionQuestion
-  responses: Array<Pick<Response, 'response_id' | 'answer' | 'confidence'>>
+  responses: Array<Pick<Response, 'response_id' | 'answer' | 'confidence' | 'explanation'>>
 }): Promise<
   | {
       ok: true
@@ -190,27 +271,37 @@ export async function analyzeQuestionWithAI(options: {
   | { ok: false; error: string; promptMessages?: Array<{ role: 'system' | 'user'; content: string }> }
 > {
   const { question, responses } = options
-  const reference = question.correct_answer ? `Reference answer:\n${question.correct_answer}\n` : 'No reference answer provided.\n'
+  const reference = question.correct_answer
+    ? `Intended correct answer (conceptual, not exact wording):\n${question.correct_answer}\n`
+    : 'No intended answer provided.\n'
 
   const responseList = responses.map((r) => ({
     response_id: r.response_id,
     answer_text: r.answer,
     confidence: r.confidence,
+    explanation: r.explanation || null,
   }))
 
-  const system = `You are an educational measurement assistant. Return ONLY valid JSON (no markdown). The JSON must follow this schema:
+  const system = `You are an educational measurement assistant helping a classroom teacher. Return ONLY valid JSON (no markdown). The JSON must follow this schema:
 {
   "summary": string,
   "clusters": [{"cluster_id": "C1", "label": string, "description": string, "hint": string, "response_ids": [string]}],
-  "response_labels": [{"response_id": string, "is_correct": true|false|null, "cluster_id": string|null, "misconception_label": string|null, "explanation": string|null}]
+  "response_labels": [{"response_id": string, "understanding_level": "correct"|"mostly_correct"|"partially_correct"|"incorrect"|"unclear", "cluster_id": string|null, "misconception_label": string|null, "explanation": string|null}]
 }
 Rules:
 - "cluster_id" must be like C1, C2, ...
-- If a response is correct, set cluster_id=null and misconception_label=null.
-- If you cannot judge correctness without a reference answer, set is_correct=null.
+- Evaluate conceptual correctness relative to the intended answer. Do NOT rely on exact string matching.
+- Use understanding_level:
+  - correct: conceptually correct
+  - mostly_correct: largely correct but missing a detail
+  - partially_correct: has some correct idea but key gaps
+  - incorrect: wrong or based on a misconception
+  - unclear: too vague / off-topic / unreadable / language barrier
+- If understanding_level is correct, set cluster_id=null and misconception_label=null.
+- Clusters should group semantically similar misunderstandings from incorrect/partial answers.
 - Keep labels short and teacher-friendly.`
 
-  const user = `Question prompt:\n${question.prompt}\n\n${reference}\nStudent responses:\n${JSON.stringify(responseList)}`
+  const user = `Question prompt:\n${question.prompt}\n\n${reference}\nStudent responses (JSON):\n${JSON.stringify(responseList)}`
 
   const messages: Array<{ role: 'system' | 'user'; content: string }> = [
     { role: 'system', content: system },
@@ -239,7 +330,8 @@ Rules:
     .filter((l: any) => l && typeof l.response_id === 'string')
     .map((l: any) => ({
       response_id: String(l.response_id),
-      is_correct: typeof l.is_correct === 'boolean' ? l.is_correct : null,
+      understanding_level: parseUnderstandingLevel(l.understanding_level),
+      is_correct: isFullyCorrect(parseUnderstandingLevel(l.understanding_level)),
       misconception_label: typeof l.misconception_label === 'string' ? l.misconception_label.slice(0, 120) : null,
       cluster_id: typeof l.cluster_id === 'string' ? l.cluster_id : null,
       explanation: typeof l.explanation === 'string' ? l.explanation.slice(0, 280) : null,
@@ -247,6 +339,178 @@ Rules:
 
   const summary = typeof json?.summary === 'string' ? json.summary : ''
   return { ok: true, analysis: { clusters, labels, summary }, rawJson: json, rawText: result.rawText, promptMessages: messages }
+}
+
+type SessionAnalysisPromptResponse = {
+  response_id: string
+  question_id: string
+  answer_text: string
+  confidence: number | null
+  explanation: string | null
+  original_response_id: string | null
+  question_type: Response['question_type']
+}
+
+type SessionAnalysisPromptQuestion = {
+  question_id: string
+  question_no: number
+  prompt: string
+  correct_answer: string | null
+  response_count: number
+  responses: SessionAnalysisPromptResponse[]
+}
+
+function buildCombinedSessionPrompt(options: {
+  session: Session
+  questions: SessionQuestion[]
+  responses: Response[]
+  roundNumber: 1 | 2
+}) {
+  const { session, questions, responses, roundNumber } = options
+  const questionById = new Map(questions.map((q) => [q.question_id, q]))
+  const groupedQuestions: SessionAnalysisPromptQuestion[] = questions
+    .slice()
+    .sort((a, b) => a.position - b.position)
+    .map((question) => {
+      const qResponses = responses
+        .filter((r) => r.question_id === question.question_id)
+        .map<SessionAnalysisPromptResponse>((r) => ({
+          response_id: r.response_id,
+          question_id: r.question_id || question.question_id,
+          answer_text: r.answer,
+          confidence: typeof r.confidence === 'number' ? r.confidence : null,
+          explanation: r.explanation,
+          original_response_id: r.original_response_id,
+          question_type: r.question_type,
+        }))
+
+      return {
+        question_id: question.question_id,
+        question_no: question.position,
+        prompt: question.prompt,
+        correct_answer: question.correct_answer,
+        response_count: qResponses.length,
+        responses: qResponses,
+      }
+    })
+
+  const promptJson = {
+    version: 'analysis_prompt_v2',
+    session: {
+      session_id: session.id,
+      session_code: session.session_code,
+      condition: session.condition,
+      status: session.status,
+    },
+    round_number: roundNumber,
+    questions: groupedQuestions.map((q) => ({
+      question_id: q.question_id,
+      question_no: q.question_no,
+      prompt: q.prompt,
+      correct_answer: q.correct_answer,
+      response_count: q.response_count,
+    })),
+    responses_by_question: groupedQuestions,
+  }
+
+  const system = `You are an educational measurement assistant helping a classroom teacher. Return ONLY valid JSON (no markdown or code fences).
+Use this exact shape:
+{
+  "round_number": 1 | 2,
+  "condition": "baseline" | "treatment",
+  "totals": {
+    "total_submissions": number,
+    "percent_fully_correct": number,
+    "average_confidence": number,
+    "evaluation_breakdown": {
+      "correct": number,
+      "mostly_correct": number,
+      "partially_correct": number,
+      "incorrect": number,
+      "unclear": number
+    }
+  },
+  "per_question": [
+    {
+      "question_id": string,
+      "question_no": number,
+      "prompt": string,
+      "response_count": number,
+      "percent_fully_correct": number,
+      "average_confidence": number,
+      "evaluation_breakdown": {
+        "correct": number,
+        "mostly_correct": number,
+        "partially_correct": number,
+        "incorrect": number,
+        "unclear": number
+      },
+      "top_misconceptions": [
+        { "label": string, "count": number, "description": string, "interpretation": string, "representative_answers": [string], "hint": string }
+      ]
+    }
+  ],
+  "response_labels": [
+    {
+      "response_id": string,
+      "question_id": string,
+      "understanding_level": "correct" | "mostly_correct" | "partially_correct" | "incorrect" | "unclear",
+      "misconception_label": string | null,
+      "cluster_id": string | null,
+      "explanation": string | null
+    }
+  ],
+  "teaching_summary": {
+    "overall_summary": string,
+    "top_class_issues": [string],
+    "teaching_suggestions": [string]
+  }
+}
+Rules:
+- Use the provided questions and grouped responses.
+- Evaluate conceptual correctness relative to the intended correct answer. Do NOT rely on exact string matching.
+- Classify each response using understanding_level.
+- Clusters should group semantically similar misunderstandings from incorrect/partial responses.
+- Count misconceptions consistently across the whole session.
+- Keep labels short, teacher-friendly, and stable across similar responses.
+- Return one object for the entire session/round.`
+
+  const user = JSON.stringify(promptJson)
+  const messages: Array<{ role: 'system' | 'user'; content: string }> = [
+    { role: 'system', content: system },
+    { role: 'user', content: user },
+  ]
+
+  return { promptJson, messages, questionMap: questionById }
+}
+
+function normalizeSessionResponseLabel(input: any): SessionAnalysisResponseLabel {
+  const understanding_level = parseUnderstandingLevel(input?.understanding_level)
+  return {
+    response_id: String(input?.response_id || ''),
+    question_id: String(input?.question_id || ''),
+    is_correct: isFullyCorrect(understanding_level),
+    understanding_level,
+    misconception_label: typeof input?.misconception_label === 'string' ? input.misconception_label.slice(0, 120) : null,
+    cluster_id: typeof input?.cluster_id === 'string' ? input.cluster_id.slice(0, 30) : null,
+    explanation: typeof input?.explanation === 'string' ? input.explanation.slice(0, 280) : null,
+  }
+}
+
+function normalizeTopMisconception(input: any): {
+  label: string
+  count: number
+  hint: string
+  description: string
+  interpretation: string
+} {
+  return {
+    label: typeof input?.label === 'string' ? input.label.slice(0, 120) : 'Misconception',
+    count: typeof input?.count === 'number' ? input.count : 0,
+    hint: typeof input?.hint === 'string' ? input.hint.slice(0, 220) : '',
+    description: typeof input?.description === 'string' ? input.description.slice(0, 260) : '',
+    interpretation: typeof input?.interpretation === 'string' ? input.interpretation.slice(0, 260) : '',
+  }
 }
 
 export async function buildRoundAnalysis(options: {
@@ -261,9 +525,56 @@ export async function buildRoundAnalysis(options: {
 }> {
   const { session, questions, responses, roundNumber } = options
 
-  const perQuestion: QuestionAnalysis[] = []
-  const labelsByResponseId = new Map<string, ResponseLabel>()
-  let allConf: number[] = []
+  const { promptJson, messages } = buildCombinedSessionPrompt({ session, questions, responses, roundNumber })
+  const aiResult = await openaiChatJson({
+    messages,
+    maxTokens: 4000,
+    timeoutMs: 30000,
+  })
+
+  const aiJson = aiResult.ok ? aiResult.json : null
+  const rawText = aiResult.ok ? aiResult.rawText : null
+
+  const aiResponseLabels = new Map<string, SessionAnalysisResponseLabel>()
+  for (const item of Array.isArray(aiJson?.response_labels) ? aiJson.response_labels : []) {
+    const label = normalizeSessionResponseLabel(item)
+    if (label.response_id) aiResponseLabels.set(label.response_id, label)
+  }
+
+  const aiQuestionInsights = new Map<string, Array<{ label: string; hint: string; description: string; interpretation: string }>>()
+  for (const question of Array.isArray(aiJson?.per_question) ? aiJson.per_question : []) {
+    if (!question || typeof question.question_id !== 'string') continue
+    const insights = Array.isArray(question.top_misconceptions)
+      ? question.top_misconceptions.map((entry: any) => normalizeTopMisconception(entry))
+      : []
+    aiQuestionInsights.set(
+      question.question_id,
+      insights.map((entry: ReturnType<typeof normalizeTopMisconception>) => ({
+        label: entry.label,
+        hint: entry.hint || '',
+        description: entry.description || '',
+        interpretation: entry.interpretation || '',
+      }))
+    )
+  }
+
+  const teaching_summary = {
+    overall_summary:
+      typeof aiJson?.teaching_summary?.overall_summary === 'string'
+        ? aiJson.teaching_summary.overall_summary
+        : session.condition === 'baseline'
+          ? 'Baseline round analysis generated.'
+          : roundNumber === 1
+            ? 'Treatment round 1 analysis generated. Use the top misconceptions to plan instruction, then open revision.'
+            : 'Treatment final analysis generated. Review improvement and remaining misconceptions.',
+    top_class_issues: Array.isArray(aiJson?.teaching_summary?.top_class_issues)
+      ? aiJson.teaching_summary.top_class_issues.filter((value: unknown) => typeof value === 'string').slice(0, 5)
+      : [],
+    teaching_suggestions: Array.isArray(aiJson?.teaching_summary?.teaching_suggestions)
+      ? aiJson.teaching_summary.teaching_suggestions.filter((value: unknown) => typeof value === 'string').slice(0, 5)
+      : [],
+  }
+
   const totalsConfidenceBreakdown: SessionRoundAnalysis['totals']['confidence_breakdown'] = {
     '1': { correct: 0, incorrect: 0, unknown: 0, total: 0 },
     '2': { correct: 0, incorrect: 0, unknown: 0, total: 0 },
@@ -271,85 +582,70 @@ export async function buildRoundAnalysis(options: {
     '4': { correct: 0, incorrect: 0, unknown: 0, total: 0 },
     '5': { correct: 0, incorrect: 0, unknown: 0, total: 0 },
   }
-  let totalsCorrectCount = 0
-  let totalsLabeledCount = 0
-  const promptQuestions: any[] = []
-  const aiResults: any[] = []
 
-  for (const q of questions) {
-    const qResponses = responses.filter((r) => r.question_id === q.question_id)
-    const conf = qResponses.map(r => r.confidence).filter((c): c is number => typeof c === 'number')
-    allConf = allConf.concat(conf)
-    const correctKey = q.correct_answer ? normalize(q.correct_answer) : ''
+  const labelsByResponseId = new Map<string, ResponseLabel>()
+  const allResponseLabels: SessionAnalysisResponseLabel[] = []
+  const perQuestion: QuestionAnalysis[] = []
+  const allConf: number[] = []
+  const totalsEval = {
+    correct: 0,
+    mostly_correct: 0,
+    partially_correct: 0,
+    incorrect: 0,
+    unclear: 0,
+  }
 
-    // Limit payload to keep OpenAI call stable.
-    const payloadResponses = qResponses.slice(0, 60).map((r) => ({
-      response_id: r.response_id,
-      answer: r.answer,
-      confidence: r.confidence,
-    }))
+  const topMisconceptionLimit = session.condition === 'treatment' ? 2 : 5
 
-    const ai = await analyzeQuestionWithAI({ session, question: q, responses: payloadResponses })
-    let clusters: MisconceptionCluster[] = []
-    let labels: ResponseLabel[] = []
-    let summaryText = ''
-    let percentCorrect: number | null = null
+  for (const question of questions.slice().sort((a, b) => a.position - b.position)) {
+    const qResponses = responses.filter((response) => response.question_id === question.question_id)
+    const fallback = makeFallbackClusters(question, qResponses)
+    const fallbackLabelMap = new Map(fallback.labels.map((label) => [label.response_id, label]))
+    const correctKey = question.correct_answer ? normalize(question.correct_answer) : ''
+    const conf = qResponses
+      .map((response) => response.confidence)
+      .filter((value): value is Response['confidence'] => typeof value === 'number')
+    allConf.push(...conf)
 
-    if (ai.ok) {
-      clusters = ai.analysis.clusters
-      labels = ai.analysis.labels
-      summaryText = ai.analysis.summary
-    } else {
-      const fb = makeFallbackClusters(q, qResponses)
-      clusters = fb.clusters
-      labels = fb.labels
-      summaryText = 'AI unavailable; using heuristic grouping.'
-    }
-
-    promptQuestions.push({
-      question_id: q.question_id,
-      position: q.position,
-      prompt: q.prompt,
-      correct_answer: q.correct_answer,
-      response_payload: payloadResponses,
-    })
-    aiResults.push(
-      ai.ok
-        ? {
-            question_id: q.question_id,
-            ok: true,
-            raw_text: ai.rawText,
-            parsed_json: ai.rawJson,
-          }
-        : {
-            question_id: q.question_id,
-            ok: false,
-            error: ai.error,
-          }
-    )
-
-    // Map labels into full response set (if AI only labeled subset, keep others unknown).
-    const labelMap = new Map(labels.map((l) => [l.response_id, l]))
-    const fullLabels: ResponseLabel[] = qResponses.map((r) => {
-      const found = labelMap.get(r.response_id)
-      const out: ResponseLabel = found || {
-        response_id: r.response_id,
-        is_correct: null,
-        misconception_label: null,
-        cluster_id: null,
-        explanation: null,
+    const fullLabels: ResponseLabel[] = qResponses.map((response) => {
+      const aiLabel = aiResponseLabels.get(response.response_id)
+      const fallbackLabel = fallbackLabelMap.get(response.response_id)
+      const understanding_level =
+        aiLabel?.understanding_level || fallbackLabel?.understanding_level || 'unclear'
+      const out: ResponseLabel = {
+        response_id: response.response_id,
+        understanding_level,
+        is_correct: isFullyCorrect(understanding_level),
+        misconception_label: aiLabel?.misconception_label ?? fallbackLabel?.misconception_label ?? null,
+        cluster_id: aiLabel?.cluster_id ?? fallbackLabel?.cluster_id ?? null,
+        explanation: aiLabel?.explanation ?? fallbackLabel?.explanation ?? null,
       }
-      // If model didn't label (or couldn't judge), derive correctness if we have a reference answer.
-      if (out.is_correct === null && correctKey) {
-        out.is_correct = normalize(r.answer) === correctKey
+
+      // If model didn't label and we have a reference answer, fall back to exact-match for MVP.
+      if (!aiLabel && correctKey) {
+        out.understanding_level = normalize(response.answer) === correctKey ? 'correct' : 'incorrect'
+        out.is_correct = isFullyCorrect(out.understanding_level)
       }
+
+      if (out.understanding_level === 'correct') {
+        out.cluster_id = null
+        out.misconception_label = null
+      } else if ((out.understanding_level === 'incorrect' || out.understanding_level === 'partially_correct') && !out.misconception_label) {
+        out.misconception_label = fallbackLabel?.misconception_label || 'Incorrect response'
+      }
+
       labelsByResponseId.set(out.response_id, out)
+      allResponseLabels.push({
+        response_id: out.response_id,
+        question_id: question.question_id,
+        is_correct: out.is_correct,
+        understanding_level: out.understanding_level,
+        misconception_label: out.misconception_label,
+        cluster_id: out.cluster_id,
+        explanation: out.explanation,
+      })
       return out
     })
-
-    // Compute top misconceptions
-    const sortedClusters = [...clusters].sort((a, b) => b.count - a.count)
-    const topMisconceptions = sortedClusters.slice(0, session.condition === 'treatment' ? 2 : 5)
 
     const questionConfidenceBreakdown: QuestionAnalysis['confidence_breakdown'] = {
       '1': { correct: 0, incorrect: 0, unknown: 0, total: 0 },
@@ -359,81 +655,146 @@ export async function buildRoundAnalysis(options: {
       '5': { correct: 0, incorrect: 0, unknown: 0, total: 0 },
     }
 
-    for (const r of qResponses) {
-      const lab = labelsByResponseId.get(r.response_id)
-      const c = String(r.confidence) as keyof QuestionAnalysis['confidence_breakdown']
-      if (!questionConfidenceBreakdown[c]) continue
-      questionConfidenceBreakdown[c].total += 1
-      totalsConfidenceBreakdown[c].total += 1
-      if (lab?.is_correct === true) {
-        questionConfidenceBreakdown[c].correct += 1
-        totalsConfidenceBreakdown[c].correct += 1
-        totalsCorrectCount += 1
-        totalsLabeledCount += 1
-      } else if (lab?.is_correct === false) {
-        questionConfidenceBreakdown[c].incorrect += 1
-        totalsConfidenceBreakdown[c].incorrect += 1
-        totalsLabeledCount += 1
+    const evalBreakdown = {
+      correct: 0,
+      mostly_correct: 0,
+      partially_correct: 0,
+      incorrect: 0,
+      unclear: 0,
+    }
+
+    for (const response of qResponses) {
+      const label = labelsByResponseId.get(response.response_id)
+      const key = String(response.confidence) as keyof QuestionAnalysis['confidence_breakdown']
+      if (!questionConfidenceBreakdown[key]) continue
+      questionConfidenceBreakdown[key].total += 1
+      totalsConfidenceBreakdown[key].total += 1
+      const lvl = label?.understanding_level || 'unclear'
+      if (lvl in evalBreakdown) (evalBreakdown as any)[lvl] += 1
+      if (lvl in totalsEval) (totalsEval as any)[lvl] += 1
+      if (label?.is_correct === true) {
+        questionConfidenceBreakdown[key].correct += 1
+        totalsConfidenceBreakdown[key].correct += 1
+      } else if (label?.is_correct === false) {
+        questionConfidenceBreakdown[key].incorrect += 1
+        totalsConfidenceBreakdown[key].incorrect += 1
       } else {
-        questionConfidenceBreakdown[c].unknown += 1
-        totalsConfidenceBreakdown[c].unknown += 1
+        questionConfidenceBreakdown[key].unknown += 1
+        totalsConfidenceBreakdown[key].unknown += 1
       }
     }
 
-    const derivedCorrectCount = fullLabels.filter((l) => l.is_correct === true).length
-    const derivedLabeledCount = fullLabels.filter((l) => typeof l.is_correct === 'boolean').length
-    percentCorrect = derivedLabeledCount > 0 ? Math.round((derivedCorrectCount / derivedLabeledCount) * 100) : null
+    const derivedCorrectCount = fullLabels.filter((label) => label.is_correct === true).length
+    const percentFullyCorrect = qResponses.length > 0 ? Math.round((derivedCorrectCount / qResponses.length) * 100) : null
+    const percentCorrect = percentFullyCorrect
+    const avgConfidence = mean(conf)
 
-    // Graph-ready nodes: clusters + correct
+    const answerById = new Map(qResponses.map((r) => [r.response_id, r.answer]))
+    const misconceptionCounts = new Map<string, { label: string; count: number; hint: string; description: string; interpretation: string; reps: string[] }>()
+    for (const label of fullLabels) {
+      if (label.understanding_level === 'correct' || label.understanding_level === 'mostly_correct') continue
+      const misconceptionLabel = String(label.misconception_label || '').trim()
+      if (!misconceptionLabel) continue
+      const canon = canonicalizeLabel(misconceptionLabel)
+      if (!canon) continue
+      const hintMatch = aiQuestionInsights
+        .get(question.question_id)
+        ?.find((entry) => canonicalizeLabel(entry.label) === canon)
+      const existing = misconceptionCounts.get(canon)
+      if (existing) {
+        existing.count += 1
+        if (misconceptionLabel.length > existing.label.length) existing.label = misconceptionLabel
+        if (!existing.hint && hintMatch?.hint) existing.hint = hintMatch.hint
+        if (!existing.description && hintMatch?.description) existing.description = hintMatch.description
+        if (!existing.interpretation && hintMatch?.interpretation) existing.interpretation = hintMatch.interpretation
+        if (existing.reps.length < 3) {
+          existing.reps.push(String(answerById.get(label.response_id) || misconceptionLabel).slice(0, 220))
+        }
+      } else {
+        misconceptionCounts.set(canon, {
+          label: misconceptionLabel.length > 120 ? `${misconceptionLabel.slice(0, 117)}...` : misconceptionLabel,
+          count: 1,
+          hint: hintMatch?.hint || (question.correct_answer ? `Contrast with correct answer: ${question.correct_answer}` : ''),
+          description: hintMatch?.description || '',
+          interpretation: hintMatch?.interpretation || '',
+          reps: [String(answerById.get(label.response_id) || misconceptionLabel).slice(0, 220)],
+        })
+      }
+    }
+
+    const sortedMisconceptions = [...misconceptionCounts.values()].sort((a, b) => b.count - a.count)
+    const topMisconceptions: MisconceptionCluster[] = sortedMisconceptions
+      .slice(0, topMisconceptionLimit)
+      .map((entry, index): MisconceptionCluster => ({
+        cluster_id: `C${index + 1}`,
+        label: entry.label,
+        description: entry.description || null,
+        interpretation: entry.interpretation || null,
+        count: entry.count,
+        hint: entry.hint || null,
+        example_response_ids: [] as string[],
+        representative_answers: entry.reps,
+      }))
+
+    if (topMisconceptions.length === 0) {
+      topMisconceptions.push(...fallback.clusters.slice(0, topMisconceptionLimit))
+    }
+
     const correctNode = {
       id: 'correct',
       label: 'Correct',
       count: derivedCorrectCount,
       kind: 'correct' as const,
     }
-    const clusterNodes = sortedClusters.map((c) => ({ id: c.cluster_id, label: c.label, count: c.count, kind: 'cluster' as const }))
+    const clusterNodes = topMisconceptions.map((cluster, index) => ({
+      id: cluster.cluster_id || `C${index + 1}`,
+      label: cluster.label,
+      count: cluster.count,
+      kind: 'cluster' as const,
+    }))
     const unknownNode = {
       id: 'unknown',
       label: 'Unlabeled',
-      count: fullLabels.filter(l => l.is_correct === null).length,
+      count: fullLabels.filter((label) => label.is_correct === null).length,
       kind: 'unknown' as const,
     }
 
-    const analysis: QuestionAnalysis = {
-      question_id: q.question_id,
-      position: q.position,
-      prompt: q.prompt,
-      correct_answer: q.correct_answer,
+    perQuestion.push({
+      question_id: question.question_id,
+      question_no: question.position,
+      position: question.position,
+      prompt: question.prompt,
+      correct_answer: question.correct_answer,
       submission_count: qResponses.length,
-      avg_confidence: mean(conf),
+      response_count: qResponses.length,
+      avg_confidence: avgConfidence,
+      average_confidence: avgConfidence,
       percent_correct: percentCorrect,
+      percent_fully_correct: percentFullyCorrect,
+      evaluation_breakdown: evalBreakdown,
       confidence_breakdown: questionConfidenceBreakdown,
-      clusters: sortedClusters,
+      clusters: topMisconceptions,
       top_misconceptions: topMisconceptions,
       response_labels: fullLabels,
       graph: {
-        nodes: [correctNode, ...clusterNodes, unknownNode].filter(n => n.count > 0),
-        links: [], // reserved for future richer viz
+        nodes: [correctNode, ...clusterNodes, unknownNode].filter((node) => node.count > 0),
+        links: [],
       },
-    }
-    perQuestion.push(analysis)
+    })
   }
 
+  const avgConfidence = mean(allConf)
   const totals = {
     total_submissions: responses.length,
-    avg_confidence: mean(allConf),
-    percent_correct: totalsLabeledCount > 0 ? Math.round((totalsCorrectCount / totalsLabeledCount) * 100) : null,
+    average_confidence: avgConfidence,
+    avg_confidence: avgConfidence,
+    percent_correct: responses.length > 0 ? Math.round((totalsEval.correct / responses.length) * 100) : null,
+    percent_fully_correct: responses.length > 0 ? Math.round((totalsEval.correct / responses.length) * 100) : null,
+    evaluation_breakdown: totalsEval,
     confidence_breakdown: totalsConfidenceBreakdown,
   }
 
-  const summary_text =
-    session.condition === 'baseline'
-      ? 'Baseline round analysis generated.'
-      : roundNumber === 1
-        ? 'Treatment round 1 analysis generated. Use the top misconceptions to plan instruction, then open revision.'
-        : 'Treatment final analysis generated. Review improvement and remaining misconceptions.'
-
-  const out: SessionRoundAnalysis = {
+  const analysis: SessionRoundAnalysis = {
     version: 'analysis_v1',
     session_id: session.id,
     session_code: session.session_code,
@@ -442,25 +803,23 @@ export async function buildRoundAnalysis(options: {
     created_at: new Date().toISOString(),
     totals,
     per_question: perQuestion.sort((a, b) => a.position - b.position),
-    summary_text,
+    response_labels: allResponseLabels,
+    teaching_summary,
+    summary_text: teaching_summary.overall_summary,
   }
 
   const rawAi = {
-    prompt_json: {
-      version: 'analysis_prompt_v1',
+    prompt_json: promptJson,
+    raw_response_json: {
+      version: 'analysis_raw_v2',
       session_id: session.id,
       session_code: session.session_code,
-      condition: session.condition,
       round_number: roundNumber,
-      questions: promptQuestions,
-    },
-    raw_response_json: {
-      version: 'analysis_raw_v1',
-      session_id: session.id,
-      round_number: roundNumber,
-      per_question: aiResults,
+      parsed: aiJson,
+      heuristic_fallback: !aiResult.ok,
+      raw_text: rawText || null,
     },
   }
 
-  return { analysis: out, labelsByResponseId, rawAi }
+  return { analysis, labelsByResponseId, rawAi }
 }

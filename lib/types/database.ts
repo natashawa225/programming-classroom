@@ -97,6 +97,7 @@ export interface ResponseAiLabel {
   session_id: string
   question_id: string
   round_number: 1 | 2
+  understanding_level: 'correct' | 'mostly_correct' | 'partially_correct' | 'incorrect' | 'unclear' | null
   is_correct: boolean | null
   misconception_label: string | null
   cluster_id: string | null
