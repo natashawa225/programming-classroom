@@ -4,8 +4,16 @@ export type OpenAIJsonResult =
   | { ok: true; json: any; rawText: string }
   | { ok: false; error: string; rawText?: string }
 
-function getApiKey() {
-  return process.env.OPENAI_API_KEY || process.env.OPENAI_APIKEY || ''
+function getOpenAIConfig() {
+  const apiKey = process.env.OPENAI_API_KEY || process.env.OPENAI_APIKEY || ''
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY is missing')
+  }
+
+  return {
+    apiKey,
+    model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
+  }
 }
 
 export async function openaiChatJson(options: {
@@ -14,10 +22,17 @@ export async function openaiChatJson(options: {
   timeoutMs?: number
   maxTokens?: number
 }): Promise<OpenAIJsonResult> {
-  const apiKey = getApiKey()
-  if (!apiKey) return { ok: false, error: 'Missing OPENAI_API_KEY' }
+  let config: ReturnType<typeof getOpenAIConfig>
+  try {
+    config = getOpenAIConfig()
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : 'OPENAI_API_KEY is missing',
+    }
+  }
 
-  const model = options.model || process.env.OPENAI_MODEL || 'gpt-4.1-mini'
+  const model = options.model || config.model
   const timeoutMs = options.timeoutMs ?? 25000
   const maxTokens = options.maxTokens ?? 900
 
@@ -29,7 +44,7 @@ export async function openaiChatJson(options: {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${config.apiKey}`,
       },
       body: JSON.stringify({
         model,
@@ -65,4 +80,3 @@ export async function openaiChatJson(options: {
     clearTimeout(timer)
   }
 }
-
