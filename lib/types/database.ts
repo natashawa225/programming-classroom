@@ -62,6 +62,7 @@ export interface Response {
   original_response_id: string | null
   created_at: string
   session_participants?: Pick<SessionParticipant, 'session_participant_id' | 'anonymized_label'> | null
+  session_questions?: Pick<SessionQuestion, 'question_id' | 'position'> | null
 }
 
 export interface AIOutput {

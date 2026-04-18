@@ -4,7 +4,7 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import type { Response, Session, SessionParticipant } from '@/lib/types/database'
+import type { Response, Session, SessionParticipant, SessionQuestion } from '@/lib/types/database'
 import { createClient } from '@/lib/supabase/client'
 import { updateSessionStatus } from '@/lib/supabase/queries'
 import { teacherLogout } from '@/app/teacher/auth-actions'
@@ -12,6 +12,7 @@ import { summarizeSessionRoundMetrics } from '@/lib/session-metrics'
 
 type Props = {
   initialSession: Session
+  initialQuestions: SessionQuestion[]
   initialParticipants: SessionParticipant[]
   initialResponses: Response[]
 }
@@ -41,13 +42,23 @@ function mergeById<T extends Record<string, any>>(
   return next
 }
 
-const Header = memo(function Header({ session }: { session: Session }) {
+const Header = memo(function Header({
+  session,
+  questionCount,
+}: {
+  session: Session
+  questionCount: number
+}) {
+  const subtitle =
+    questionCount > 0
+      ? `${questionCount} question${questionCount === 1 ? '' : 's'} configured`
+      : session.question
   return (
     <header className="border-b border-border/40 sticky top-0 bg-background/95 backdrop-blur-sm z-10">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-foreground">{session.session_code}</h1>
-          <p className="text-sm text-foreground/60 mt-1">{session.question}</p>
+          <p className="text-sm text-foreground/60 mt-1">{subtitle}</p>
         </div>
         <div className="flex items-center gap-3">
           <Link href="/teacher/dashboard">
@@ -268,13 +279,113 @@ const Controls = memo(function Controls({
   return null
 })
 
+const QuestionSet = memo(function QuestionSet({
+  session,
+  questions,
+}: {
+  session: Session
+  questions: SessionQuestion[]
+}) {
+  const orderedQuestions = questions.slice().sort((a, b) => a.position - b.position)
+  const hasQuestionRows = orderedQuestions.length > 0
+
+  if (!hasQuestionRows) {
+    return (
+      <Card className="p-6 mb-8">
+        <div className="flex items-start justify-between gap-4 mb-4">
+          <div>
+            <h2 className="text-lg font-semibold text-foreground">Question Set</h2>
+            <p className="text-sm text-foreground/60 mt-1">Legacy single-question session</p>
+          </div>
+          <div className="text-sm text-foreground/60">1 question</div>
+        </div>
+
+        <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
+          <p className="text-sm font-medium text-foreground/70 mb-2">Question</p>
+          <p className="text-foreground whitespace-pre-wrap">{session.question}</p>
+        </div>
+
+        {session.answer_options.length > 0 && (
+          <div className="mt-4">
+            <p className="text-sm text-foreground/60 mb-2">Answer Options</p>
+            <ul className="space-y-2">
+              {session.answer_options.map((option, idx) => (
+                <li key={idx} className="px-4 py-2 rounded-lg bg-secondary/30 text-foreground">
+                  {option}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {session.correct_answer && (
+          <details className="mt-4 rounded-lg bg-primary/5 p-4">
+            <summary className="cursor-pointer text-sm font-medium text-foreground/70">
+              Teacher reference: correct answer
+            </summary>
+            <p className="mt-3 text-foreground whitespace-pre-wrap">{session.correct_answer}</p>
+          </details>
+        )}
+      </Card>
+    )
+  }
+
+  return (
+    <Card className="p-6 mb-8">
+      <div className="flex items-start justify-between gap-4 mb-6">
+        <div>
+          <h2 className="text-lg font-semibold text-foreground">Question Set</h2>
+          <p className="text-sm text-foreground/60 mt-1">
+            Review the full data-collection question set before opening the session.
+          </p>
+        </div>
+        <div className="text-sm text-foreground/60">
+          {orderedQuestions.length} question{orderedQuestions.length === 1 ? '' : 's'}
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        {orderedQuestions.map((question) => (
+          <div key={question.question_id} className="rounded-xl border border-border/50 bg-secondary/20 p-4">
+            <div className="flex items-start justify-between gap-4 mb-3">
+              <div>
+                <p className="text-sm font-semibold text-foreground">Question {question.position}</p>
+              </div>
+              {typeof question.timer_seconds === 'number' && (
+                <div className="text-sm text-foreground/60">
+                  Timer: {question.timer_seconds}s
+                </div>
+              )}
+            </div>
+
+            <p className="text-foreground whitespace-pre-wrap">{question.prompt}</p>
+
+            {question.correct_answer && (
+              <details className="mt-4 rounded-lg bg-background/70 p-3">
+                <summary className="cursor-pointer text-sm font-medium text-foreground/70">
+                  Teacher reference
+                </summary>
+                <p className="mt-2 text-sm text-foreground whitespace-pre-wrap">
+                  {question.correct_answer}
+                </p>
+              </details>
+            )}
+          </div>
+        ))}
+      </div>
+    </Card>
+  )
+})
+
 export default function SessionDetailClient({
   initialSession,
+  initialQuestions,
   initialParticipants,
   initialResponses,
 }: Props) {
   const sessionId = initialSession.id
   const [session, setSession] = useState<Session>(initialSession)
+  const [questions] = useState<SessionQuestion[]>(initialQuestions)
   const [participants, setParticipants] = useState<SessionParticipant[]>(initialParticipants)
   const [responses, setResponses] = useState<Response[]>(initialResponses)
   const [error, setError] = useState<string | null>(null)
@@ -292,9 +403,9 @@ export default function SessionDetailClient({
         session,
         participants,
         responses,
-        questionCount: 1,
+        questionCount: questions.length || 1,
       }),
-    [participants, responses, session]
+    [participants, questions.length, responses, session]
   )
 
   useEffect(() => {
@@ -416,7 +527,7 @@ export default function SessionDetailClient({
 
   return (
     <main className="min-h-screen bg-background">
-      <Header session={session} />
+      <Header session={session} questionCount={questions.length} />
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         {error && (
@@ -443,27 +554,7 @@ export default function SessionDetailClient({
           onChangeStatus={handleStatusChange}
         />
 
-        {/* Question Details */}
-        <Card className="p-6 mb-8">
-          <h2 className="text-lg font-semibold text-foreground mb-4">Question</h2>
-          <p className="text-foreground mb-6">{session.question}</p>
-          {session.answer_options.length > 0 && (
-            <div className="mb-6">
-              <p className="text-sm text-foreground/60 mb-2">Answer Options:</p>
-              <ul className="space-y-2">
-                {session.answer_options.map((option, idx) => (
-                  <li key={idx} className="px-4 py-2 rounded-lg bg-secondary/30 text-foreground">
-                    {option}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          <div className="bg-primary/10 p-4 rounded-lg">
-            <p className="text-sm text-foreground/60 mb-2">Correct Answer:</p>
-            <p className="text-foreground font-medium">{session.correct_answer}</p>
-          </div>
-        </Card>
+        <QuestionSet session={session} questions={questions} />
 
         {/* Responses List */}
         <div className="space-y-4">

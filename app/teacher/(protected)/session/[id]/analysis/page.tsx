@@ -739,12 +739,21 @@ export default function SessionAnalysis() {
                     const { groupEntries, hasAny } = getComparisonGroups(mc)
                     const summaryLine = mc.summary_line || 'No major misconception changes detected.'
                     const actionLine = formatQuestionActionLine(mc)
-                    const counts = mc.counts || {
+                    const computedCounts: Record<MisconceptionGroupKey, number> = {
                       resolved: groupEntries.find((g) => g.key === 'resolved')?.items.length || 0,
                       reduced: groupEntries.find((g) => g.key === 'reduced')?.items.length || 0,
                       persistent: groupEntries.find((g) => g.key === 'persistent')?.items.length || 0,
                       emerging: groupEntries.find((g) => g.key === 'emerging')?.items.length || 0,
                     }
+                    const rawCounts = mc.counts as Partial<Record<MisconceptionGroupKey, unknown>> | undefined
+                    const counts: Record<MisconceptionGroupKey, number> = rawCounts
+                      ? {
+                          resolved: typeof rawCounts.resolved === 'number' ? rawCounts.resolved : computedCounts.resolved,
+                          reduced: typeof rawCounts.reduced === 'number' ? rawCounts.reduced : computedCounts.reduced,
+                          persistent: typeof rawCounts.persistent === 'number' ? rawCounts.persistent : computedCounts.persistent,
+                          emerging: typeof rawCounts.emerging === 'number' ? rawCounts.emerging : computedCounts.emerging,
+                        }
+                      : computedCounts
 
                     return (
                       <div key={mc.question_id} className="rounded-xl border border-border/60 bg-secondary/20 p-4">

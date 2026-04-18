@@ -1,5 +1,5 @@
 import { notFound } from 'next/navigation'
-import { getSession, getSessionParticipants, getSessionResponses } from '@/lib/supabase/queries'
+import { getSession, getSessionParticipants, getSessionQuestions, getSessionResponses } from '@/lib/supabase/queries'
 import SessionDetailClient from './session-detail-client'
 
 export default async function SessionDetailPage({
@@ -10,15 +10,17 @@ export default async function SessionDetailPage({
   const { id: sessionId } = await params
 
   try {
-    const [session, participants, responses] = await Promise.all([
+    const [session, participants, questions, responses] = await Promise.all([
       getSession(sessionId),
       getSessionParticipants(sessionId),
+      getSessionQuestions(sessionId),
       getSessionResponses(sessionId),
     ])
 
     return (
       <SessionDetailClient
         initialSession={session}
+        initialQuestions={questions || []}
         initialParticipants={participants || []}
         initialResponses={responses || []}
       />

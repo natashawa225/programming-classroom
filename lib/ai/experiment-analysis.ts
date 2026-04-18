@@ -1,4 +1,5 @@
 import type { Response, Session, SessionQuestion } from '@/lib/types/database'
+import { createHash } from 'crypto'
 import { openaiChatJson } from '@/lib/ai/openai-json'
 import { getUnionFindQuestionContext } from '@/lib/ai/union-find-question-config'
 
@@ -205,6 +206,10 @@ export type SessionRoundAnalysis = {
 
 function normalize(s: string) {
   return String(s || '').trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+function sha256(input: string) {
+  return createHash('sha256').update(input).digest('hex')
 }
 
 function canonicalizeLabel(label: string) {
@@ -436,17 +441,16 @@ Rules:
   return { ok: true, analysis: { clusters, labels, summary }, rawJson: json, rawText: result.rawText, promptMessages: messages }
 }
 
-type SessionAnalysisPromptResponse = {
-  response_id: string
-  question_id: string
-  answer_text: string
-  confidence: number | null
-  explanation: string | null
-  original_response_id: string | null
-  question_type: Response['question_type']
+type GroupedQuestionResponse = {
+  grouped_response_id: string
+  normalized_answer: string
+  representative_answer_text: string
+  count: number
+  response_ids: string[]
+  average_confidence: number | null
 }
 
-type SessionAnalysisPromptQuestion = {
+type PerQuestionPromptQuestion = {
   question_id: string
   question_no: number
   prompt: string
@@ -455,54 +459,162 @@ type SessionAnalysisPromptQuestion = {
   target_misconception?: string | null
   strong_answer_criteria?: string[]
   misconception_variants?: string[]
-  response_count: number
-  responses: SessionAnalysisPromptResponse[]
+  unique_response_count: number
+  total_response_count: number
+  grouped_responses: GroupedQuestionResponse[]
 }
 
-function buildCombinedSessionPrompt(options: {
-  session: Session
-  questions: SessionQuestion[]
-  responses: Response[]
-  roundNumber: 1 | 2
-}) {
-  const { session, questions, responses, roundNumber } = options
-  const questionById = new Map(questions.map((q) => [q.question_id, q]))
-  const groupedQuestions: SessionAnalysisPromptQuestion[] = questions
-    .slice()
-    .sort((a, b) => a.position - b.position)
-    .map((question) => {
-      const ctx = getUnionFindQuestionContext({
-        position: question.position,
-        prompt: question.prompt,
-      })
-      const qResponses = responses
-        .filter((r) => r.question_id === question.question_id)
-        .map<SessionAnalysisPromptResponse>((r) => ({
-          response_id: r.response_id,
-          question_id: r.question_id || question.question_id,
-          answer_text: r.answer,
-          confidence: typeof r.confidence === 'number' ? r.confidence : null,
-          explanation: r.explanation,
-          original_response_id: r.original_response_id,
-          question_type: r.question_type,
-        }))
+type PerQuestionPromptResult = {
+  promptJson: {
+    version: string
+    session: {
+      session_id: string
+      session_code: string
+      condition: Session['condition']
+      status: Session['status']
+    }
+    round_number: 1 | 2
+    question: PerQuestionPromptQuestion
+  }
+  messages: Array<{ role: 'system' | 'user'; content: string }>
+}
 
-      return {
-        question_id: question.question_id,
-        question_no: question.position,
-        prompt: question.prompt,
-        correct_answer: question.correct_answer,
-        lesson_concept: ctx?.lesson_concept ?? null,
-        target_misconception: ctx?.target_misconception ?? null,
-        strong_answer_criteria: ctx?.strong_answer_criteria ?? [],
-        misconception_variants: ctx?.misconception_variants ?? [],
-        response_count: qResponses.length,
-        responses: qResponses,
+type PerQuestionAIResult = {
+  question_id: string
+  question_no: number
+  response_breakdown?: {
+    strong_correct: number
+    partially_correct: number
+    target_misconception: number
+    other_misconception: number
+    unclear: number
+  }
+  top_misconceptions: Array<ReturnType<typeof normalizeTopMisconception>>
+  teacher_interpretation?: string
+  suggested_teacher_action?: string
+  response_labels: SessionAnalysisResponseLabel[]
+  summary?: string
+}
+
+const perQuestionAnalysisCache = new Map<
+  string,
+  {
+    promptJson: Record<string, unknown>
+    aiResult: PerQuestionAIResult
+    raw_response_json: Record<string, unknown>
+  }
+>()
+
+function groupResponsesForAnalysis(options: {
+  responses: Array<Pick<Response, 'response_id' | 'answer' | 'confidence'>>
+}) {
+  const groups = new Map<
+    string,
+    {
+      normalized_answer: string
+      representative_answer_text: string
+      count: number
+      response_ids: string[]
+      confidences: number[]
+    }
+  >()
+
+  for (const response of options.responses) {
+    const normalized_answer = normalize(response.answer)
+    const key = normalized_answer || '__EMPTY__'
+    const existing = groups.get(key)
+    if (existing) {
+      existing.count += 1
+      existing.response_ids.push(response.response_id)
+      if (
+        String(response.answer || '').trim().length >
+        String(existing.representative_answer_text || '').trim().length
+      ) {
+        existing.representative_answer_text = String(response.answer || '')
       }
+      if (typeof response.confidence === 'number') existing.confidences.push(response.confidence)
+    } else {
+      groups.set(key, {
+        normalized_answer,
+        representative_answer_text: String(response.answer || ''),
+        count: 1,
+        response_ids: [response.response_id],
+        confidences: typeof response.confidence === 'number' ? [response.confidence] : [],
+      })
+    }
+  }
+
+  const groupedResponses: GroupedQuestionResponse[] = [...groups.values()]
+    .sort((a, b) => b.count - a.count || a.normalized_answer.localeCompare(b.normalized_answer))
+    .map((group, index) => ({
+      grouped_response_id: `G${index + 1}`,
+      normalized_answer: group.normalized_answer,
+      representative_answer_text: group.representative_answer_text,
+      count: group.count,
+      response_ids: group.response_ids,
+      average_confidence: mean(group.confidences),
+    }))
+
+  return groupedResponses
+}
+
+function computeQuestionFingerprint(options: {
+  session: Session
+  question: SessionQuestion
+  roundNumber: 1 | 2
+  groupedResponses: GroupedQuestionResponse[]
+}) {
+  const ctx = getUnionFindQuestionContext({
+    position: options.question.position,
+    prompt: options.question.prompt,
+  })
+  return sha256(
+    JSON.stringify({
+      version: 'per_question_analysis_v1',
+      session_id: options.session.id,
+      question_id: options.question.question_id,
+      round_number: options.roundNumber,
+      prompt: options.question.prompt,
+      correct_answer: options.question.correct_answer || null,
+      context: ctx || null,
+      grouped_responses: options.groupedResponses.map((group) => ({
+        normalized_answer: group.normalized_answer,
+        representative_answer_text: group.representative_answer_text,
+        count: group.count,
+        response_ids: [...group.response_ids].sort(),
+      })),
     })
+  )
+}
+
+function buildPerQuestionPrompt(options: {
+  session: Session
+  question: SessionQuestion
+  groupedResponses: GroupedQuestionResponse[]
+  roundNumber: 1 | 2
+}): PerQuestionPromptResult {
+  const { session, question, groupedResponses, roundNumber } = options
+  const ctx = getUnionFindQuestionContext({
+    position: question.position,
+    prompt: question.prompt,
+  })
+
+  const promptQuestion: PerQuestionPromptQuestion = {
+    question_id: question.question_id,
+    question_no: question.position,
+    prompt: question.prompt,
+    correct_answer: question.correct_answer,
+    lesson_concept: ctx?.lesson_concept ?? null,
+    target_misconception: ctx?.target_misconception ?? null,
+    strong_answer_criteria: ctx?.strong_answer_criteria ?? [],
+    misconception_variants: ctx?.misconception_variants ?? [],
+    unique_response_count: groupedResponses.length,
+    total_response_count: groupedResponses.reduce((sum, group) => sum + group.count, 0),
+    grouped_responses: groupedResponses,
+  }
 
   const promptJson = {
-    version: 'analysis_prompt_v2',
+    version: 'analysis_prompt_per_question_v1',
     session: {
       session_id: session.id,
       session_code: session.session_code,
@@ -510,18 +622,7 @@ function buildCombinedSessionPrompt(options: {
       status: session.status,
     },
     round_number: roundNumber,
-    questions: groupedQuestions.map((q) => ({
-      question_id: q.question_id,
-      question_no: q.question_no,
-      prompt: q.prompt,
-      correct_answer: q.correct_answer,
-      lesson_concept: q.lesson_concept ?? null,
-      target_misconception: q.target_misconception ?? null,
-      strong_answer_criteria: q.strong_answer_criteria ?? [],
-      misconception_variants: q.misconception_variants ?? [],
-      response_count: q.response_count,
-    })),
-    responses_by_question: groupedQuestions,
+    question: promptQuestion,
   }
 
   const modeLine =
@@ -532,29 +633,18 @@ function buildCombinedSessionPrompt(options: {
         : 'MODE: TREATMENT round 2 revision analysis. Analyze ONLY the round-2 responses; do not compare to round 1 inside this output.'
 
   const system = `
-You are an educational analysis assistant helping a teacher interpret open-ended in-class quiz responses.
+You are an educational analysis assistant helping a teacher interpret open-ended in-class quiz responses for one question at a time.
 
 These are NOT multiple-choice answers and should NOT be graded with a simplistic right/wrong mindset.
 
-Each question is designed to diagnose a specific conceptual misconception from a data structures lesson.
-
-For each question, you will be given:
-
-* the lesson concept
-* the target misconception
-* what a strong answer should include
-* common misconception variants
-* student responses
-
-Your job is to classify each response in relation to that pedagogical context.
-
-The user JSON provides, per question:
-- lesson_concept
-- target_misconception
-- strong_answer_criteria
-- misconception_variants
-
-If any of these are missing/empty, infer as best you can from the prompt and intended answer.
+You will be given:
+- the question prompt
+- the intended/correct answer
+- the lesson concept
+- the target misconception
+- what a strong answer should include
+- common misconception variants
+- grouped unique student answers with counts and response_ids
 
 ${modeLine}
 
@@ -562,12 +652,8 @@ Return ONLY valid JSON.
 
 Use this schema:
 {
-  "round_number": 1 | 2,
-  "condition": "baseline" | "treatment",
-  "per_question": [
-{
-"question_id": string,
-"question_no": number,
+  "question_id": string,
+  "question_no": number,
 "response_breakdown": {
 "strong_correct": number,
 "partially_correct": number,
@@ -588,24 +674,20 @@ Use this schema:
 ],
 "teacher_interpretation": string,
 "suggested_teacher_action": string
-}
-],
+,
+"summary": string,
 "response_labels": [
 {
-"response_id": string,
+"grouped_response_id": string,
 "question_id": string,
 "category": "strong_correct" | "partially_correct" | "target_misconception" | "other_misconception" | "unclear",
 "is_correct": boolean | null,
 "misconception_label": string | null,
 "misconception_variant": string | null,
 "reasoning_summary": string | null,
-"missing_key_idea": string | null
-}
-],
-"teaching_summary": {
-"overall_summary": string,
-"top_class_issues": [string],
-"teaching_suggestions": [string]
+"missing_key_idea": string | null,
+"key_concepts_detected": [string],
+"missing_key_concepts": [string]
 }
 }
 
@@ -621,6 +703,9 @@ Rules:
 * Keep misconception labels short, concept-based, and teacher-friendly.
 * Prefer stable conceptual labels such as "direct-edge-only thinking" over repeating raw student wording.
 * Representative answers should be anonymized and short.
+* The input answers are deduplicated. Label each grouped answer once, based on the representative answer text, and account for its frequency count in the breakdowns and top misconceptions.
+* Use the provided grouped_response_id exactly in response_labels.
+* Do not invent grouped_response_ids or omit any grouped answer.
 * For baseline: hints can be empty or generic; prioritize diagnosis and interpretation.
 * For treatment round 1: hints MUST be specific, teacher-actionable repair guidance for the top misconceptions.
 * For treatment round 2: still provide hints, but do NOT attempt to compare to round 1 inside this response.
@@ -632,7 +717,130 @@ Rules:
     { role: 'user', content: user },
   ]
 
-  return { promptJson, messages, questionMap: questionById }
+  return { promptJson, messages }
+}
+
+function expandGroupedLabelsToResponses(options: {
+  question: SessionQuestion
+  groupedResponses: GroupedQuestionResponse[]
+  responseLabels: any[]
+}) {
+  const groupedById = new Map(options.groupedResponses.map((group) => [group.grouped_response_id, group]))
+  const expanded: SessionAnalysisResponseLabel[] = []
+
+  for (const item of Array.isArray(options.responseLabels) ? options.responseLabels : []) {
+    const groupId = typeof item?.grouped_response_id === 'string' ? item.grouped_response_id : ''
+    const group = groupedById.get(groupId)
+    if (!group) continue
+    const base = normalizeSessionResponseLabel({
+      ...item,
+      response_id: group.response_ids[0],
+      question_id: options.question.question_id,
+      cluster_id: typeof item?.cluster_id === 'string' ? item.cluster_id : null,
+      explanation: null,
+    })
+
+    for (const responseId of group.response_ids) {
+      expanded.push({
+        ...base,
+        response_id: responseId,
+        question_id: options.question.question_id,
+      })
+    }
+  }
+
+  return expanded
+}
+
+async function analyzeGroupedQuestionWithAI(options: {
+  session: Session
+  question: SessionQuestion
+  groupedResponses: GroupedQuestionResponse[]
+  roundNumber: 1 | 2
+}): Promise<
+  | {
+      ok: true
+      aiResult: PerQuestionAIResult
+      promptJson: Record<string, unknown>
+      raw_response_json: Record<string, unknown>
+    }
+  | {
+      ok: false
+      error: string
+      promptJson?: Record<string, unknown>
+    }
+> {
+  const fingerprint = computeQuestionFingerprint(options)
+  const cached = perQuestionAnalysisCache.get(fingerprint)
+  if (cached) {
+    return {
+      ok: true,
+      aiResult: cached.aiResult,
+      promptJson: cached.promptJson,
+      raw_response_json: { ...cached.raw_response_json, cache_hit: true },
+    }
+  }
+
+  const { promptJson, messages } = buildPerQuestionPrompt(options)
+  const result = await openaiChatJson({
+    messages,
+    maxTokens: 1400,
+    timeoutMs: 30000,
+  })
+
+  if (!result.ok) {
+    return { ok: false, error: result.error, promptJson }
+  }
+
+  const json = result.json
+  const aiResult: PerQuestionAIResult = {
+    question_id: options.question.question_id,
+    question_no: options.question.position,
+    response_breakdown:
+      json?.response_breakdown && typeof json.response_breakdown === 'object'
+        ? {
+            strong_correct: Number(json.response_breakdown.strong_correct || 0),
+            partially_correct: Number(json.response_breakdown.partially_correct || 0),
+            target_misconception: Number(json.response_breakdown.target_misconception || 0),
+            other_misconception: Number(json.response_breakdown.other_misconception || 0),
+            unclear: Number(json.response_breakdown.unclear || 0),
+          }
+        : undefined,
+    top_misconceptions: Array.isArray(json?.top_misconceptions)
+      ? json.top_misconceptions.map((x: any) => normalizeTopMisconception(x))
+      : [],
+    teacher_interpretation:
+      typeof json?.teacher_interpretation === 'string' ? json.teacher_interpretation : undefined,
+    suggested_teacher_action:
+      typeof json?.suggested_teacher_action === 'string' ? json.suggested_teacher_action : undefined,
+    response_labels: expandGroupedLabelsToResponses({
+      question: options.question,
+      groupedResponses: options.groupedResponses,
+      responseLabels: Array.isArray(json?.response_labels) ? json.response_labels : [],
+    }),
+    summary: typeof json?.summary === 'string' ? json.summary : undefined,
+  }
+
+  const raw_response_json = {
+    version: 'analysis_raw_per_question_v1',
+    session_id: options.session.id,
+    session_code: options.session.session_code,
+    question_id: options.question.question_id,
+    round_number: options.roundNumber,
+    parsed: json,
+    heuristic_fallback: false,
+    raw_text: result.rawText || null,
+    cache_hit: false,
+    fingerprint,
+  }
+
+  perQuestionAnalysisCache.set(fingerprint, {
+    promptJson,
+    aiResult,
+    raw_response_json,
+  })
+
+  return { ok: true, aiResult, promptJson, raw_response_json }
 }
 
 function normalizeSessionResponseLabel(input: any): SessionAnalysisResponseLabel {
@@ -713,57 +921,7 @@ export async function buildRoundAnalysis(options: {
 }> {
   const { session, questions, responses, roundNumber } = options
 
-  const { promptJson, messages } = buildCombinedSessionPrompt({ session, questions, responses, roundNumber })
-  const aiResult = await openaiChatJson({
-    messages,
-    maxTokens: 4000,
-    timeoutMs: 30000,
-  })
-
-  const aiJson = aiResult.ok ? aiResult.json : null
-  const rawText = aiResult.ok ? aiResult.rawText : null
-
   const aiResponseLabels = new Map<string, SessionAnalysisResponseLabel>()
-  for (const item of Array.isArray(aiJson?.response_labels) ? aiJson.response_labels : []) {
-    const label = normalizeSessionResponseLabel(item)
-    if (label.response_id) aiResponseLabels.set(label.response_id, label)
-  }
-
-  const aiQuestionInsights = new Map<string, Array<{ label: string; variant: string; hint: string; description: string; interpretation: string; representative_answers: string[] }>>()
-  for (const question of Array.isArray(aiJson?.per_question) ? aiJson.per_question : []) {
-    if (!question || typeof question.question_id !== 'string') continue
-    const insights = Array.isArray(question.top_misconceptions)
-      ? question.top_misconceptions.map((entry: any) => normalizeTopMisconception(entry))
-      : []
-    aiQuestionInsights.set(
-      question.question_id,
-      insights.map((entry: ReturnType<typeof normalizeTopMisconception>) => ({
-        label: entry.label,
-        variant: entry.variant,
-        hint: entry.hint || '',
-        description: entry.description || '',
-        interpretation: entry.interpretation || '',
-        representative_answers: entry.representative_answers || [],
-      }))
-    )
-  }
-
-  const teaching_summary = {
-    overall_summary:
-      typeof aiJson?.teaching_summary?.overall_summary === 'string'
-        ? aiJson.teaching_summary.overall_summary
-        : session.condition === 'baseline'
-          ? 'Baseline round analysis generated.'
-          : roundNumber === 1
-            ? 'Treatment round 1 analysis generated. Use the top misconceptions to plan instruction, then open revision.'
-            : 'Treatment final analysis generated. Review improvement and remaining misconceptions.',
-    top_class_issues: Array.isArray(aiJson?.teaching_summary?.top_class_issues)
-      ? aiJson.teaching_summary.top_class_issues.filter((value: unknown) => typeof value === 'string').slice(0, 5)
-      : [],
-    teaching_suggestions: Array.isArray(aiJson?.teaching_summary?.teaching_suggestions)
-      ? aiJson.teaching_summary.teaching_suggestions.filter((value: unknown) => typeof value === 'string').slice(0, 5)
-      : [],
-  }
 
   const perQuestionModel = new Map<
     string,
@@ -781,26 +939,71 @@ export async function buildRoundAnalysis(options: {
     }
   >()
 
-  for (const q of Array.isArray(aiJson?.per_question) ? aiJson.per_question : []) {
-    if (!q || typeof q.question_id !== 'string') continue
-    const breakdown = q?.response_breakdown
-    perQuestionModel.set(q.question_id, {
-      response_breakdown:
-        breakdown && typeof breakdown === 'object'
-          ? {
-              strong_correct: Number(breakdown.strong_correct || 0),
-              partially_correct: Number(breakdown.partially_correct || 0),
-              target_misconception: Number(breakdown.target_misconception || 0),
-              other_misconception: Number(breakdown.other_misconception || 0),
-              unclear: Number(breakdown.unclear || 0),
-            }
-          : undefined,
-      top_misconceptions: Array.isArray(q.top_misconceptions)
-        ? q.top_misconceptions.map((x: any) => normalizeTopMisconception(x))
-        : [],
-      teacher_interpretation: typeof q.teacher_interpretation === 'string' ? q.teacher_interpretation : undefined,
-      suggested_teacher_action: typeof q.suggested_teacher_action === 'string' ? q.suggested_teacher_action : undefined,
+  const aiQuestionInsights = new Map<string, Array<{ label: string; variant: string; hint: string; description: string; interpretation: string; representative_answers: string[] }>>()
+  const rawPromptByQuestion: Record<string, unknown> = {}
+  const rawResponseByQuestion: Record<string, unknown> = {}
+  const questionSummaries: string[] = []
+
+  for (const question of questions.slice().sort((a, b) => a.position - b.position)) {
+    const qResponses = responses.filter((response) => response.question_id === question.question_id)
+    const groupedResponses = groupResponsesForAnalysis({ responses: qResponses })
+    const questionContext = getUnionFindQuestionContext({
+      position: question.position,
+      prompt: question.prompt,
     })
+    const shouldUseAI = Boolean(questionContext) || !isFixedAnswerQuestion(question)
+
+    if (!shouldUseAI || groupedResponses.length === 0) continue
+
+    const groupedAi = await analyzeGroupedQuestionWithAI({
+      session,
+      question,
+      groupedResponses,
+      roundNumber,
+    })
+
+    if (!groupedAi.ok) {
+      const errorMessage = groupedAi.error
+      rawPromptByQuestion[question.question_id] = groupedAi.promptJson || {}
+      rawResponseByQuestion[question.question_id] = {
+        version: 'analysis_raw_per_question_v1',
+        question_id: question.question_id,
+        error: errorMessage,
+        heuristic_fallback: true,
+      }
+      continue
+    }
+
+    rawPromptByQuestion[question.question_id] = groupedAi.promptJson
+    rawResponseByQuestion[question.question_id] = groupedAi.raw_response_json
+
+    for (const item of groupedAi.aiResult.response_labels) {
+      const label = normalizeSessionResponseLabel(item)
+      if (label.response_id) aiResponseLabels.set(label.response_id, label)
+    }
+
+    perQuestionModel.set(question.question_id, {
+      response_breakdown: groupedAi.aiResult.response_breakdown,
+      top_misconceptions: groupedAi.aiResult.top_misconceptions,
+      teacher_interpretation: groupedAi.aiResult.teacher_interpretation,
+      suggested_teacher_action: groupedAi.aiResult.suggested_teacher_action,
+    })
+
+    aiQuestionInsights.set(
+      question.question_id,
+      groupedAi.aiResult.top_misconceptions.map((entry) => ({
+        label: entry.label,
+        variant: entry.variant,
+        hint: entry.hint || '',
+        description: entry.description || '',
+        interpretation: entry.interpretation || '',
+        representative_answers: entry.representative_answers || [],
+      }))
+    )
+
+    if (groupedAi.aiResult.summary?.trim()) {
+      questionSummaries.push(groupedAi.aiResult.summary.trim())
+    }
   }
 
   const totalsConfidenceBreakdown: SessionRoundAnalysis['totals']['confidence_breakdown'] = {
@@ -1172,6 +1375,27 @@ export async function buildRoundAnalysis(options: {
     confidence_breakdown: totalsConfidenceBreakdown,
   }
 
+  const topClassIssues = perQuestion
+    .flatMap((question) => question.top_misconceptions.slice(0, 1).map((entry) => `${question.question_no || question.position}: ${entry.label}`))
+    .slice(0, 5)
+
+  const teachingSuggestions = perQuestion
+    .map((question) => question.suggested_teacher_action)
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .slice(0, 5)
+
+  const teaching_summary = {
+    overall_summary:
+      questionSummaries[0] ||
+      (session.condition === 'baseline'
+        ? 'Baseline round analysis generated.'
+        : roundNumber === 1
+          ? 'Treatment round 1 analysis generated. Use the top misconceptions to plan instruction, then open revision.'
+          : 'Treatment final analysis generated. Review improvement and remaining misconceptions.'),
+    top_class_issues: topClassIssues,
+    teaching_suggestions: teachingSuggestions,
+  }
+
   const analysis: SessionRoundAnalysis = {
     version: 'analysis_v1',
     session_id: session.id,
@@ -1187,15 +1411,18 @@ export async function buildRoundAnalysis(options: {
   }
 
   const rawAi = {
-    prompt_json: promptJson,
+    prompt_json: {
+      version: 'analysis_prompt_per_question_bundle_v1',
+      session_id: session.id,
+      round_number: roundNumber,
+      questions: rawPromptByQuestion,
+    },
     raw_response_json: {
-      version: 'analysis_raw_v2',
+      version: 'analysis_raw_per_question_bundle_v1',
       session_id: session.id,
       session_code: session.session_code,
       round_number: roundNumber,
-      parsed: aiJson,
-      heuristic_fallback: !aiResult.ok,
-      raw_text: rawText || null,
+      questions: rawResponseByQuestion,
     },
   }
 

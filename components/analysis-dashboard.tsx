@@ -429,67 +429,19 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
 
         {/* Misconception bubbles */}
         <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <p className="text-sm font-medium text-foreground">Misconception clusters</p>
-            <div className="flex gap-2">
-              <Badge variant="destructive" className="text-[10px] py-0">high</Badge>
-              <Badge variant="secondary"   className="text-[10px] py-0">medium</Badge>
-              <Badge variant="outline"     className="text-[10px] py-0">standard</Badge>
-            </div>
-          </div>
-          <div ref={bubbleRef} style={{ height: CHART_H }}>
-            {bubbleData.length > 0 ? (
-              <ScatterChart
-                width={bubbleWidth}
-                height={CHART_H}
-                margin={{ top: 4, right: 4, left: -16, bottom: 0 }}
-              >
-                <CartesianGrid strokeDasharray="3 3" stroke={palette.grid} />
-                <XAxis
-                  type="number" dataKey="questionPosition"
-                  domain={['dataMin - 0.5', 'dataMax + 0.5']}
-                  allowDecimals={false} tickLine={false} axisLine={false}
-                  tick={{ fontSize: 12, fill: palette.axis }}
-                  tickFormatter={v => `Q${v}`}
-                />
-                <YAxis
-                  type="number" dataKey="count"
-                  allowDecimals={false} tickLine={false} axisLine={false}
-                  tick={{ fontSize: 11, fill: palette.axis }}
-                />
-                <ZAxis dataKey="count" range={[60, 500]} />
-                <Tooltip content={<BubbleTooltip />} cursor={{ strokeDasharray: '3 3' }} />
-                <Scatter
-                  data={bubbleData}
-                  isAnimationActive={false}
-                  shape={(props: any) => {
-                    const { cx, cy, payload } = props
-                    if (!payload) return null
-                    const key = `${payload.questionId}:${payload.label}`
-                    const isSelected = key === selectedBubbleKey
-                    const r = Math.max(7, Math.min(24, 6 + payload.count * 1.8))
-                    const strokeColor =
-                      payload.severity === 'high'   ? '#E24B4A' :
-                      payload.severity === 'medium' ? '#BA7517' :
-                      palette.refLine
-                    return (
-                      <circle
-                        cx={cx} cy={cy}
-                        r={isSelected ? r + 3 : r}
-                        fill={palette.bubble}
-                        fillOpacity={payload.severity === 'high' ? 0.8 : payload.severity === 'medium' ? 0.6 : 0.4}
-                        stroke={isSelected ? palette.selection : strokeColor}
-                        strokeWidth={payload.severity === 'high' ? 2.5 : payload.severity === 'medium' ? 2 : 1.5}
-                        style={{ cursor: 'pointer' }}
-                        onClick={() => setSelectedBubbleKey(key)}
-                      />
-                    )
-                  }}
-                />
-              </ScatterChart>
-            ) : (
-              <EmptySlate label="No misconception data" />
-            )}
+        
+          <div className="space-y-2">
+            <p className="text-sm font-medium">Top misconceptions</p>
+            {analysis?.per_question?.map(q => (
+              <div key={q.question_id} className="text-xs border p-2 rounded">
+                <p className="font-medium">Q{q.position}</p>
+                {q.top_misconceptions?.map((m: any, i: number) => (
+                  <p key={i}>
+                    - {m.label} ({m.count})
+                  </p>
+                ))}
+              </div>
+            ))}
           </div>
           {selectedBubble && (
             <div className="rounded-md border border-border/50 bg-secondary/10 px-3 py-2 text-xs">

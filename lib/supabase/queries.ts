@@ -141,7 +141,6 @@ export async function createSession(
       .insert({
         session_code: sessionCode,
         condition: data.condition,
-        title: data.title?.trim() || null,
         question: normalizedQuestions[0].prompt,
         answer_options: normalizeArrayValue(data.answerOptions),
         correct_answer: normalizedQuestions[0].correctAnswer || '',
