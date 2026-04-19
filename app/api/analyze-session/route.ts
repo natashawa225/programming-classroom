@@ -105,6 +105,65 @@ function levelScore(level: ReturnType<typeof parseUnderstandingLevel>) {
   return 0
 }
 
+function isLikelyFixedAnswerQuestion(question: { correct_answer?: string | null } | null | undefined) {
+  const ca = String(question?.correct_answer || '').trim()
+  if (!ca) return false
+  const len = ca.length
+  const words = ca.split(/\s+/).filter(Boolean).length
+  if (/^o\([^)]+\)$/i.test(ca)) return true
+  if (len <= 24 && words <= 4) return true
+  if (words === 1 && len <= 32) return true
+  return false
+}
+
+function responsePairKey(response: { session_participant_id?: string | null; question_id?: string | null }) {
+  return `${response.session_participant_id || ''}::${response.question_id || ''}`
+}
+
+function getLabelForResponse(responseId: string, labelMap: Map<string, any>, fallbackResponse: any) {
+  const lab = labelMap.get(responseId)
+  if (typeof lab?.misconception_label === 'string' && lab.misconception_label.trim()) return lab.misconception_label.trim()
+  if (typeof lab?.evaluation_category === 'string' && lab.evaluation_category.trim()) return lab.evaluation_category.trim()
+  if (typeof lab?.understanding_level === 'string' && lab.understanding_level.trim()) return lab.understanding_level.trim()
+  if (fallbackResponse?.is_correct === true) return 'correct'
+  if (fallbackResponse?.is_correct === false) return 'incorrect'
+  return null
+}
+
+function getQuestionMisconceptionCounts(question: any) {
+  const counts = new Map<string, { label: string; count: number; tokens: Set<string> }>()
+
+  const addLabel = (label: string, count: number) => {
+    const canon = canonicalizeLabel(label)
+    if (!canon || count <= 0) return
+    const existing = counts.get(canon)
+    if (existing) {
+      existing.count += count
+      if (label.length > existing.label.length) existing.label = label
+    } else {
+      counts.set(canon, { label, count, tokens: comparisonTokenSet(label) })
+    }
+  }
+
+  if (Array.isArray(question?.response_labels)) {
+    for (const label of question.response_labels) {
+      if (label?.evaluation_category !== 'misconception') continue
+      if (typeof label?.misconception_label !== 'string' || !label.misconception_label.trim()) continue
+      addLabel(label.misconception_label.trim(), 1)
+    }
+  }
+
+  if (counts.size === 0) {
+    for (const cluster of Array.isArray(question?.clusters || question?.top_misconceptions) ? (question.clusters || question.top_misconceptions) : []) {
+      const label = typeof cluster?.label === 'string' ? cluster.label : ''
+      const count = typeof cluster?.count === 'number' ? cluster.count : 0
+      if (label && count > 0) addLabel(label, count)
+    }
+  }
+
+  return counts
+}
+
 function getStoredAnalysisPromptVersion(promptJson: Record<string, any> | null | undefined) {
   if (!promptJson || typeof promptJson !== 'object') return null
   if (typeof promptJson.prompt_version === 'string' && promptJson.prompt_version.trim()) {
@@ -137,10 +196,40 @@ export async function POST(request: NextRequest) {
 
     const rn = Number(roundNumber) === 2 ? 2 : 1
     const responsesData = (allResponses || []).filter(r => (r.round_number ?? 1) === rn)
+    const round2Responses = (allResponses || []).filter(r => (r.round_number ?? 1) === 2)
     const currentPromptVersion = getAnalysisPromptVersion({
       condition: session.condition,
       roundNumber: rn as 1 | 2,
     })
+
+    if (session.condition === 'treatment' && rn === 2) {
+      if (session.status === 'revision') {
+        return NextResponse.json(
+          { error: 'Finish revision before generating final analysis.' },
+          { status: 409 }
+        )
+      }
+      if (round2Responses.length === 0) {
+        return NextResponse.json(
+          { error: 'No revision responses available yet for final analysis.' },
+          { status: 400 }
+        )
+      }
+      const round1Completed = await getLatestCompletedAnalysisRun(sessionId, 1)
+      if (!round1Completed?.summary_json) {
+        return NextResponse.json(
+          { error: 'Generate round 1 treatment analysis before running final analysis.' },
+          { status: 409 }
+        )
+      }
+    }
+
+    if (session.condition === 'treatment' && rn === 1 && (session.status === 'draft' || session.status === 'live')) {
+      return NextResponse.json(
+        { error: 'Round 1 treatment analysis is only available after round 1 has been closed.' },
+        { status: 409 }
+      )
+    }
 
     if (!responsesData || responsesData.length === 0) {
       return NextResponse.json(
@@ -262,6 +351,7 @@ export async function POST(request: NextRequest) {
         const questionById = new Map((questions || []).map((q) => [q.question_id, q]))
         const round1Responses = (allResponses || []).filter((r) => (r.round_number ?? 1) === 1)
         const round1ById = new Map(round1Responses.map((r) => [r.response_id, r]))
+        const round1ByPair = new Map(round1Responses.map((r) => [responsePairKey(r), r]))
 
         // If we have a stored round-1 analysis, use its labels when available.
         const round1Correctness = new Map<string, boolean | null>()
@@ -291,7 +381,7 @@ export async function POST(request: NextRequest) {
           if (typeof fromAi === 'boolean') return fromAi
           const q = fallbackResponse?.question_id ? questionById.get(fallbackResponse.question_id) : null
           const correctKey = q?.correct_answer ? normalize(q.correct_answer) : ''
-          if (!correctKey) return null
+          if (!correctKey || !isLikelyFixedAnswerQuestion(q)) return null
           return normalize(fallbackResponse?.answer || '') === correctKey
         }
 
@@ -299,18 +389,18 @@ export async function POST(request: NextRequest) {
         const round2Levels = new Map<string, ReturnType<typeof parseUnderstandingLevel>>()
         for (const r2 of responsesData) {
           const lab = labelsByResponseId.get(r2.response_id)
-          if (typeof lab?.is_correct === 'boolean') {
-            round2Correctness.set(r2.response_id, lab.is_correct)
-          }
+          if (typeof lab?.is_correct === 'boolean') round2Correctness.set(r2.response_id, lab.is_correct)
           if (lab?.understanding_level) {
             round2Levels.set(r2.response_id, parseUnderstandingLevel(lab.understanding_level))
           }
-          const q = r2.question_id ? questionById.get(r2.question_id) : null
-          const correctKey = q?.correct_answer ? normalize(q.correct_answer) : ''
-          if (!correctKey) {
-            round2Correctness.set(r2.response_id, null)
-          } else {
-            round2Correctness.set(r2.response_id, normalize(r2.answer || '') === correctKey)
+          if (!round2Correctness.has(r2.response_id)) {
+            const q = r2.question_id ? questionById.get(r2.question_id) : null
+            const correctKey = q?.correct_answer ? normalize(q.correct_answer) : ''
+            if (!correctKey || !isLikelyFixedAnswerQuestion(q)) {
+              round2Correctness.set(r2.response_id, null)
+            } else {
+              round2Correctness.set(r2.response_id, normalize(r2.answer || '') === correctKey)
+            }
           }
         }
 
@@ -324,11 +414,7 @@ export async function POST(request: NextRequest) {
           const originalId = r2.original_response_id || null
           const r1 =
             (originalId && round1ById.get(originalId)) ||
-            round1Responses.find(
-              (r) =>
-                r.session_participant_id === r2.session_participant_id &&
-                r.question_id === r2.question_id
-            ) ||
+            round1ByPair.get(responsePairKey(r2)) ||
             null
 
           if (!r1) continue
@@ -371,11 +457,7 @@ export async function POST(request: NextRequest) {
           const originalId = r2.original_response_id || null
           const r1 =
             (originalId && round1ById.get(originalId)) ||
-            round1Responses.find(
-              (r) =>
-                r.session_participant_id === r2.session_participant_id &&
-                r.question_id === r2.question_id
-            ) ||
+            round1ByPair.get(responsePairKey(r2)) ||
             null
           if (!r1) continue
 
@@ -399,6 +481,116 @@ export async function POST(request: NextRequest) {
           moved_to_fully_correct: movedToFullyCorrect,
           avg_score_delta: qualityPairs > 0 ? Number((sumScoreDelta / qualityPairs).toFixed(2)) : null,
         }
+
+        const round1LabelMap = new Map<string, any>()
+        for (const arr of round1LabelArrays) {
+          for (const l of arr) {
+            if (typeof l?.response_id === 'string') {
+              round1LabelMap.set(l.response_id, l)
+            }
+          }
+        }
+
+        const questionTransitionMap = new Map<
+          string,
+          {
+            question_id: string
+            position: number
+            total_pairs: number
+            incorrect_to_correct: number
+            correct_to_incorrect: number
+            stayed_correct: number
+            stayed_incorrect: number
+            examples: {
+              incorrect_to_correct: any[]
+              correct_to_incorrect: any[]
+              stayed_correct: any[]
+              stayed_incorrect: any[]
+            }
+          }
+        >()
+
+        const pushExample = (bucket: any[], example: any) => {
+          if (bucket.length < 2) bucket.push(example)
+        }
+
+        for (const r2 of responsesData) {
+          const originalId = r2.original_response_id || null
+          const r1 =
+            (originalId && round1ById.get(originalId)) ||
+            round1ByPair.get(responsePairKey(r2)) ||
+            null
+
+          if (!r1 || !r2.question_id) continue
+
+          const c1 = deriveCorrect(r1.response_id, r1)
+          const c2 = round2Correctness.get(r2.response_id) ?? null
+          if (typeof c1 !== 'boolean' || typeof c2 !== 'boolean') continue
+
+          const q = questionById.get(r2.question_id)
+          const entry =
+            questionTransitionMap.get(r2.question_id) ||
+            {
+              question_id: r2.question_id,
+              position: q?.position ?? 0,
+              total_pairs: 0,
+              incorrect_to_correct: 0,
+              correct_to_incorrect: 0,
+              stayed_correct: 0,
+              stayed_incorrect: 0,
+              examples: {
+                incorrect_to_correct: [],
+                correct_to_incorrect: [],
+                stayed_correct: [],
+                stayed_incorrect: [],
+              },
+            }
+
+          entry.total_pairs += 1
+
+          const example = {
+            round1_response_id: r1.response_id,
+            round2_response_id: r2.response_id,
+            round1_answer: r1.answer,
+            round2_answer: r2.answer,
+            round1_label: getLabelForResponse(r1.response_id, round1LabelMap, r1),
+            round2_label: getLabelForResponse(r2.response_id, labelsByResponseId, r2),
+          }
+
+          if (c1 === false && c2 === true) {
+            entry.incorrect_to_correct += 1
+            pushExample(entry.examples.incorrect_to_correct, example)
+          } else if (c1 === true && c2 === false) {
+            entry.correct_to_incorrect += 1
+            pushExample(entry.examples.correct_to_incorrect, example)
+          } else if (c1 === true && c2 === true) {
+            entry.stayed_correct += 1
+            pushExample(entry.examples.stayed_correct, example)
+          } else if (c1 === false && c2 === false) {
+            entry.stayed_incorrect += 1
+            pushExample(entry.examples.stayed_incorrect, example)
+          }
+
+          questionTransitionMap.set(r2.question_id, entry)
+        }
+
+        ;(analysis as any).per_question_transition_breakdown = Array.from(questionTransitionMap.values())
+          .map((entry) => {
+            const percentFor = (n: number) => (entry.total_pairs > 0 ? Math.round((n / entry.total_pairs) * 100) : null)
+            const noChange = entry.stayed_correct + entry.stayed_incorrect
+            return {
+              question_id: entry.question_id,
+              position: entry.position,
+              total_pairs: entry.total_pairs,
+              incorrect_to_correct: { count: entry.incorrect_to_correct, percent: percentFor(entry.incorrect_to_correct) },
+              correct_to_incorrect: { count: entry.correct_to_incorrect, percent: percentFor(entry.correct_to_incorrect) },
+              stayed_correct: { count: entry.stayed_correct, percent: percentFor(entry.stayed_correct) },
+              stayed_incorrect: { count: entry.stayed_incorrect, percent: percentFor(entry.stayed_incorrect) },
+              no_change: { count: noChange, percent: percentFor(noChange) },
+              examples: entry.examples,
+            }
+          })
+          .sort((a, b) => a.position - b.position)
       } catch {}
 
       // Simple misconception delta summary (label-based) for quick teacher readout.
@@ -426,27 +618,6 @@ export async function POST(request: NextRequest) {
               classification === 'resolved' ? 1 : 0
             // Prioritize what is still present (round2), then large changes.
             return classWeight * 10000 + round2 * 100 + Math.abs(delta) * 10 + round1
-          }
-
-          const countsToMap = (clusters: any[]) => {
-            // Map canonical -> { displayLabel, roundCount }
-            const out = new Map<string, { label: string; count: number; tokens: Set<string> }>()
-            for (const c of Array.isArray(clusters) ? clusters : []) {
-              const label = typeof c?.label === 'string' ? c.label : null
-              const count = typeof c?.count === 'number' ? c.count : 0
-              if (!label || count <= 0) continue
-              const canon = canonicalizeLabel(label)
-              if (!canon) continue
-              const existing = out.get(canon)
-              if (existing) {
-                existing.count += count
-                // Keep a nicer/longer label for display.
-                if (label.length > existing.label.length) existing.label = label
-              } else {
-                out.set(canon, { label, count, tokens: comparisonTokenSet(label) })
-              }
-            }
-            return out
           }
 
           const alignRound2KeyToRound1 = (
@@ -479,8 +650,8 @@ export async function POST(request: NextRequest) {
           ;(analysis as any).misconception_comparison = (analysis as any).per_question
             .map((q2: any) => {
               const q1 = round1ByQ.get(q2.question_id)
-              const round1 = countsToMap(q1?.clusters || q1?.top_misconceptions || [])
-              const round2Raw = countsToMap(q2?.clusters || q2?.top_misconceptions || [])
+              const round1 = getQuestionMisconceptionCounts(q1)
+              const round2Raw = getQuestionMisconceptionCounts(q2)
 
               // Align round2 keys into round1 "namespace" when labels are very similar.
               const round2Aligned = new Map<string, { label: string; count: number }>()

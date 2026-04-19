@@ -5,7 +5,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { getSession, getSessionParticipantForStudent, getSessionQuestions, getStudentResponse, submitStudentResponse } from '@/lib/supabase/queries'
+import { getSession, getSessionParticipantForStudent, getSessionQuestions, getStudentResponse, getRevisionPrefillResponse, submitStudentResponse } from '@/lib/supabase/queries'
 import type { Session, SessionQuestion } from '@/lib/types/database'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
 
@@ -29,6 +29,8 @@ export default function StudentRespond() {
   const [feedback, setFeedback] = useState<string | null>(null)
   const [startTimeMs, setStartTimeMs] = useState<number>(() => Date.now())
   const [nowMs, setNowMs] = useState<number>(() => Date.now())
+  const previousRoundRef = useRef<1 | 2 | null>(null)
+  const [revisionPrefillNote, setRevisionPrefillNote] = useState<string | null>(null)
 
   useEffect(() => {
     const loadSession = async () => {
@@ -61,7 +63,10 @@ export default function StudentRespond() {
     if (!questions || questions.length === 0) return
     const q = searchParams.get('q')
     const parsed = q ? Number(q) : NaN
-    if (!Number.isFinite(parsed) || parsed < 1) return
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      setCurrentQuestionIndex(0)
+      return
+    }
     const idx = Math.max(0, Math.min(questions.length - 1, Math.floor(parsed) - 1))
     setCurrentQuestionIndex(idx)
   }, [searchParams, questions])
@@ -81,6 +86,23 @@ export default function StudentRespond() {
   const timerExpired = timerSeconds ? remainingSeconds === 0 : false
 
   useEffect(() => {
+    const previousRound = previousRoundRef.current
+    if (previousRound === null) {
+      previousRoundRef.current = roundNumber
+      return
+    }
+
+    if (previousRound !== roundNumber) {
+      previousRoundRef.current = roundNumber
+      setCurrentQuestionIndex(0)
+      setSubmittedServer(false)
+      setError(null)
+      setFeedback(roundNumber === 2 ? 'Revision round is open. Start again from Question 1.' : null)
+      router.replace(`/student/respond/${sessionId}?q=1`)
+    }
+  }, [roundNumber, router, sessionId])
+
+  useEffect(() => {
     if (!timerSeconds || submitted || !canEdit) return
     const t = setInterval(() => setNowMs(Date.now()), 1000)
     return () => clearInterval(t)
@@ -94,6 +116,7 @@ export default function StudentRespond() {
 
       setError(null)
       setFeedback(null)
+      setRevisionPrefillNote(null)
       setSubmitting(false)
       if (submissionKey && !localSubmittedKeysRef.current.has(submissionKey)) {
         setSubmittedServer(false)
@@ -112,35 +135,63 @@ export default function StudentRespond() {
           return
         }
 
-        const existing = await getStudentResponse(sessionId, {
-          questionId: currentQuestion.question_id,
-          roundNumber,
-        })
+        const currentRoundResponse =
+          roundNumber === 2
+            ? null
+            : await getStudentResponse(sessionId, {
+                questionId: currentQuestion.question_id,
+                roundNumber,
+              })
+
+        const revisionPrefill =
+          roundNumber === 2
+            ? await getRevisionPrefillResponse(sessionId, {
+                questionId: currentQuestion.question_id,
+              })
+            : null
 
         if (cancelled) return
 
-        if (existing) {
+        if (currentRoundResponse) {
+          console.info(
+            `[student:prefill-ui] session_id=${sessionId} question_id=${currentQuestion.question_id} round=${roundNumber} source=current-round submitted=true`
+          )
           setSubmittedServer(true)
-          setAnswer(existing.answer)
-          setConfidence(existing.confidence)
+          setAnswer(currentRoundResponse.answer)
+          setConfidence(currentRoundResponse.confidence)
           setFeedback('Submitted. Editing is locked for this question in this round.')
+          if (roundNumber === 2) {
+            setRevisionPrefillNote('Your saved revision answer is shown below.')
+          }
           return
         }
 
         setSubmittedServer(false)
 
-        // In revision, preload round 1 answer if present.
         if (roundNumber === 2) {
-          const original = await getStudentResponse(sessionId, {
-            questionId: currentQuestion.question_id,
-            roundNumber: 1,
-          })
-          if (original) {
-            setAnswer(original.answer)
-            setConfidence(original.confidence)
+          if (revisionPrefill?.round2Response) {
+            console.info(
+              `[student:prefill-ui] session_id=${sessionId} question_id=${currentQuestion.question_id} round=2 source=round2 submitted=true`
+            )
+            setSubmittedServer(true)
+            setAnswer(revisionPrefill.round2Response.answer)
+            setConfidence(revisionPrefill.round2Response.confidence)
+            setFeedback('Submitted. Editing is locked for this question in this round.')
+            setRevisionPrefillNote('Your saved revision answer is shown below.')
+          } else if (revisionPrefill?.round1Response) {
+            console.info(
+              `[student:prefill-ui] session_id=${sessionId} question_id=${currentQuestion.question_id} round=2 source=round1 submitted=false`
+            )
+            setAnswer(revisionPrefill.round1Response.answer)
+            setConfidence(revisionPrefill.round1Response.confidence)
+            setRevisionPrefillNote('Your previous round 1 answer has been loaded below for editing.')
           } else {
+            console.info(
+              `[student:prefill-ui] session_id=${sessionId} question_id=${currentQuestion.question_id} round=2 source=blank submitted=false`
+            )
             setAnswer('')
             setConfidence(3)
+            setRevisionPrefillNote('No previous answer was found for this question, so you can answer from scratch.')
           }
         } else {
           setAnswer('')
@@ -173,7 +224,7 @@ export default function StudentRespond() {
         console.error('Error refreshing session status:', err)
       }
     },
-    pollMs: 8000,
+    pollMs: 2000,
     debugLabel: `student-session-${sessionId}`,
   })
 
@@ -276,6 +327,14 @@ export default function StudentRespond() {
                     : timerExpired
                       ? 'Time is up for this question.'
                       : 'This session is closed.'}
+            </p>
+          </Card>
+        )}
+
+        {roundNumber === 2 && revisionPrefillNote && !submitted && (
+          <Card className="mb-6 p-4 border-primary/20 bg-primary/5">
+            <p className="text-sm text-foreground/80">
+              <span className="font-medium">Revision Round.</span> {revisionPrefillNote}
             </p>
           </Card>
         )}

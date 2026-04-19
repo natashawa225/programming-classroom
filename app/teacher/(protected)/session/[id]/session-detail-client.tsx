@@ -132,12 +132,14 @@ const Controls = memo(function Controls({
   sessionId,
   status,
   condition,
+  hasRound2Responses,
   actionLoading,
   onChangeStatus,
 }: {
   sessionId: string
   status: Session['status']
   condition: Session['condition']
+  hasRound2Responses: boolean
   actionLoading: boolean
   onChangeStatus: (next: Session['status']) => void
 }) {
@@ -195,14 +197,17 @@ const Controls = memo(function Controls({
   }
 
   if (isAnalysisReady) {
+    const isRevisionClosed = condition === 'treatment' && hasRound2Responses
     return (
       <Card className="p-6 mb-8">
-        <h2 className="text-lg font-semibold text-foreground mb-4">Round 1 Closed</h2>
+        <h2 className="text-lg font-semibold text-foreground mb-4">
+          {isRevisionClosed ? 'Revision Closed' : 'Round 1 Closed'}
+        </h2>
         <div className="flex flex-col md:flex-row gap-4">
           <Button disabled variant="secondary" className="flex-1">
-            Analysis Ready
+            {isRevisionClosed ? 'Ready for Final Analysis' : 'Analysis Ready'}
           </Button>
-          {condition === 'treatment' && (
+          {condition === 'treatment' && !isRevisionClosed && (
             <Button
               onClick={() => onChangeStatus('revision')}
               disabled={actionLoading}
@@ -221,7 +226,7 @@ const Controls = memo(function Controls({
             {actionLoading ? 'Closing...' : condition === 'baseline' ? 'End Baseline' : 'Close'}
           </Button>
           <Link href={`/teacher/session/${sessionId}/analysis`} className="flex-1">
-            <Button className="w-full">Generate Analysis</Button>
+            <Button className="w-full">{isRevisionClosed ? 'Generate Final Analysis' : 'Generate Round 1 Analysis'}</Button>
           </Link>
         </div>
       </Card>
@@ -503,13 +508,20 @@ export default function SessionDetailClient({
   }, [supabase, sessionId])
 
   const handleStatusChange = async (newStatus: Session['status']) => {
+    const previousSession = session
     try {
       setActionLoading(true)
       setError(null)
+      if (newStatus === 'revision') {
+        setSession(prev => (prev ? { ...prev, status: 'revision' } : prev))
+      }
       const updated = await updateSessionStatus(sessionId, newStatus)
       setSession(updated)
     } catch (err) {
       console.error('Error updating session status:', err)
+      if (previousSession) {
+        setSession(previousSession)
+      }
       setError('Failed to update session status')
     } finally {
       setActionLoading(false)
@@ -524,6 +536,11 @@ export default function SessionDetailClient({
       return String(a.response_id).localeCompare(String(b.response_id))
     })
   }, [responses])
+
+  const hasRound2Responses = useMemo(
+    () => responses.some((response) => (response.round_number ?? 1) === 2),
+    [responses]
+  )
 
   return (
     <main className="min-h-screen bg-background">
@@ -550,6 +567,7 @@ export default function SessionDetailClient({
           sessionId={sessionId}
           status={session.status}
           condition={session.condition}
+          hasRound2Responses={hasRound2Responses}
           actionLoading={actionLoading}
           onChangeStatus={handleStatusChange}
         />

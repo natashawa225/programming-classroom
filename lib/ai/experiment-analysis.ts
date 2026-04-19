@@ -4,8 +4,8 @@ import { openaiChatJson } from '@/lib/ai/openai-json'
 import { getUnionFindQuestionContext } from '@/lib/ai/union-find-question-config'
 
 export const BASELINE_ANALYSIS_PROMPT_VERSION = 'baseline_v6_misconception_detector_compact'
-export const TREATMENT_R1_ANALYSIS_PROMPT_VERSION = 'treatment_r1_v1_compact_repair'
-export const TREATMENT_R2_ANALYSIS_PROMPT_VERSION = 'treatment_r2_v1_compact_revision'
+export const TREATMENT_R1_ANALYSIS_PROMPT_VERSION = 'treatment_r1_v2_compact_repair'
+export const TREATMENT_R2_ANALYSIS_PROMPT_VERSION = 'treatment_r2_v2_compact_revision'
 
 export type UnderstandingLevel = 'correct' | 'mostly_correct' | 'partially_correct' | 'incorrect' | 'unclear'
 export type EvaluationCategory =
@@ -149,11 +149,63 @@ export type SessionRoundAnalysis = {
     stayed_correct: { count: number; percent: number | null }
     stayed_incorrect: { count: number; percent: number | null }
   }
+  quality_transitions?: {
+    total_pairs: number
+    improved: number
+    worsened: number
+    unchanged: number
+    moved_to_fully_correct: number
+    avg_score_delta: number | null
+  }
   transitions?: {
     incorrect_to_correct: number
     correct_to_incorrect: number
     no_change: number
   }
+  per_question_transition_breakdown?: Array<{
+    question_id: string
+    position: number
+    total_pairs: number
+    incorrect_to_correct: { count: number; percent: number | null }
+    correct_to_incorrect: { count: number; percent: number | null }
+    stayed_correct: { count: number; percent: number | null }
+    stayed_incorrect: { count: number; percent: number | null }
+    no_change: { count: number; percent: number | null }
+    examples?: {
+      incorrect_to_correct: Array<{
+        round1_response_id: string
+        round2_response_id: string
+        round1_answer: string
+        round2_answer: string
+        round1_label?: string | null
+        round2_label?: string | null
+      }>
+      correct_to_incorrect: Array<{
+        round1_response_id: string
+        round2_response_id: string
+        round1_answer: string
+        round2_answer: string
+        round1_label?: string | null
+        round2_label?: string | null
+      }>
+      stayed_correct: Array<{
+        round1_response_id: string
+        round2_response_id: string
+        round1_answer: string
+        round2_answer: string
+        round1_label?: string | null
+        round2_label?: string | null
+      }>
+      stayed_incorrect: Array<{
+        round1_response_id: string
+        round2_response_id: string
+        round1_answer: string
+        round2_answer: string
+        round1_label?: string | null
+        round2_label?: string | null
+      }>
+    }
+  }>
   misconception_comparison?: Array<{
     question_id: string
     position: number
@@ -728,8 +780,8 @@ function buildPerQuestionPrompt(options: {
   const isBaseline = session.condition === 'baseline'
   const treatmentFocus =
     roundNumber === 2
-      ? 'Treat answers as revised responses. Focus on what still needs repair.'
-      : 'Focus on repair-oriented guidance for the main misconceptions.'
+      ? 'These are revised answers after teacher feedback. Analyze only the revised responses as the current state and focus on what still needs repair.'
+      : 'These are initial treatment answers before revision. Focus on the top misconceptions the teacher should address before opening revision.'
 
   const schemaText = isBaseline
     ? `{
@@ -848,11 +900,14 @@ Rules:
 - Do not wrap the JSON in markdown fences.
 - Preserve grouped_response_id exactly.
 - Use stable misconception labels when target_misconception or misconception_variants fit.
+- Return at most 2 top_misconceptions.
 - misconception_label: max 4 words.
 - reasoning_summary: max 12 words.
 - missing_key_idea: max 6 words, only for relevant but incomplete answers.
 - hint, description, teacher_interpretation, suggested_teacher_action: each max 1 short sentence.
-- Keep output brief.`
+- Keep output brief.
+- For round 1, make hints directly usable for immediate teacher explanation before revision opens.
+- For round 2, do not compare to round 1 or mention improvement in prose; only describe the revised-answer state.`
 
   const user = isBaseline
     ? `Analyze this baseline question.
@@ -884,7 +939,34 @@ Your goal:
 - use relevant_incomplete only for on-topic but non-false partial answers
 - produce concise teacher-usable misconception summaries
 - keep the JSON compact enough to finish completely`
-    : JSON.stringify(promptJson)
+    : `Analyze this treatment question for round ${roundNumber}.
+
+Question:
+${question.prompt}
+
+Correct answer:
+${question.correct_answer || ''}
+
+Lesson concept:
+${ctx?.lesson_concept ?? ''}
+
+Target misconception:
+${ctx?.target_misconception ?? ''}
+
+Strong answer criteria:
+${JSON.stringify(ctx?.strong_answer_criteria ?? [])}
+
+Known misconception variants:
+${JSON.stringify(ctx?.misconception_variants ?? [])}
+
+Grouped student responses:
+${JSON.stringify(promptQuestion.grouped_responses)}
+
+Your goal:
+- label each grouped response conceptually
+- return only the top 2 misconceptions
+- keep hints short and teacher-usable
+- ${roundNumber === 2 ? 'treat these as revised answers only' : 'support the teacher before revision opens'}`
   const messages: Array<{ role: 'system' | 'user'; content: string }> = [
     { role: 'system', content: system },
     { role: 'user', content: user },

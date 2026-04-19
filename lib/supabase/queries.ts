@@ -644,6 +644,70 @@ export async function getStudentResponse(
   return response as Response | null
 }
 
+export async function getRevisionPrefillResponse(
+  sessionId: string,
+  data: { questionId: string }
+) {
+  const supabase = await createClient()
+  const participation = await getSessionParticipantForStudent(sessionId)
+  if (!participation) {
+    console.info(
+      `[student:revision-prefill] session_id=${sessionId} question_id=${data.questionId} participation=missing source=blank`
+    )
+    return {
+      sessionParticipantId: null,
+      round1Response: null as Response | null,
+      round2Response: null as Response | null,
+      displayResponse: null as Response | null,
+      displaySource: 'blank' as 'round2' | 'round1' | 'blank',
+    }
+  }
+
+  const { data: rows, error } = await supabase
+    .from('responses')
+    .select(
+      `
+      response_id,
+      session_id,
+      session_participant_id,
+      question_id,
+      question_type,
+      round_number,
+      answer,
+      confidence,
+      explanation,
+      is_correct,
+      time_taken_seconds,
+      original_response_id,
+      created_at
+    `
+    )
+    .eq('session_id', sessionId)
+    .eq('session_participant_id', participation.session_participant_id)
+    .eq('question_id', data.questionId)
+    .in('round_number', [1, 2])
+    .order('created_at', { ascending: false })
+
+  if (error) throw error
+
+  const round2Response = ((rows || []).find((row) => row.round_number === 2) || null) as Response | null
+  const round1Response = ((rows || []).find((row) => row.round_number === 1) || null) as Response | null
+  const displayResponse = round2Response || round1Response || null
+  const displaySource = round2Response ? 'round2' : round1Response ? 'round1' : 'blank'
+
+  console.info(
+    `[student:revision-prefill] session_id=${sessionId} session_participant_id=${participation.session_participant_id} question_id=${data.questionId} round1_found=${Boolean(round1Response)} round2_found=${Boolean(round2Response)} source=${displaySource}`
+  )
+
+  return {
+    sessionParticipantId: participation.session_participant_id,
+    round1Response,
+    round2Response,
+    displayResponse,
+    displaySource,
+  }
+}
+
 export async function getSessionResponses(sessionId: string) {
   await assertTeacherAuthenticated()
   const supabase = await createClient()
