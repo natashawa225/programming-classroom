@@ -143,7 +143,7 @@ export default function CreateSession() {
                     <div className="flex items-center justify-between">
                       <div>
                         <p className="text-sm font-medium text-foreground">Questions</p>
-                        <p className="text-xs text-foreground/60">Add 3–5 open-ended questions. Students see one at a time.</p>
+                        <p className="text-sm text-foreground/60">Add 3–5 open-ended questions. Students see one at a time.</p>
                       </div>
                       <Button type="button" variant="outline" onClick={addQuestion} disabled={formData.questions.length >= 5}>
                         Add Question

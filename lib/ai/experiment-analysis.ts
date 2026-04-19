@@ -3,6 +3,10 @@ import { createHash } from 'crypto'
 import { openaiChatJson } from '@/lib/ai/openai-json'
 import { getUnionFindQuestionContext } from '@/lib/ai/union-find-question-config'
 
+export const BASELINE_ANALYSIS_PROMPT_VERSION = 'baseline_v6_misconception_detector_compact'
+export const TREATMENT_R1_ANALYSIS_PROMPT_VERSION = 'treatment_r1_v1_compact_repair'
+export const TREATMENT_R2_ANALYSIS_PROMPT_VERSION = 'treatment_r2_v1_compact_revision'
+
 export type UnderstandingLevel = 'correct' | 'mostly_correct' | 'partially_correct' | 'incorrect' | 'unclear'
 export type EvaluationCategory =
   | 'fully_correct'
@@ -32,6 +36,8 @@ export type MisconceptionCluster = {
   variant?: string | null
   description?: string | null
   interpretation?: string | null
+  why_students_think_this?: string | null
+  teacher_move?: string | null
   count: number
   hint?: string | null
   example_response_ids?: string[]
@@ -266,6 +272,15 @@ function mean(values: number[]) {
   return values.reduce((a, b) => a + b, 0) / values.length
 }
 
+export function getAnalysisPromptVersion(options: {
+  condition: Session['condition']
+  roundNumber: 1 | 2
+}) {
+  if (options.condition === 'baseline') return BASELINE_ANALYSIS_PROMPT_VERSION
+  if (options.roundNumber === 2) return TREATMENT_R2_ANALYSIS_PROMPT_VERSION
+  return TREATMENT_R1_ANALYSIS_PROMPT_VERSION
+}
+
 function isFixedAnswerQuestion(question: SessionQuestion) {
   const ca = String(question.correct_answer || '').trim()
   if (!ca) return false
@@ -381,7 +396,9 @@ Rules:
   - unclear: too vague / off-topic / unreadable / language barrier
 - If understanding_level is correct, set cluster_id=null and misconception_label=null.
 - Clusters should group semantically similar misunderstandings from incorrect/partial answers.
-- Keep labels short and teacher-friendly.`
+- Keep labels short and teacher-friendly.
+All output (summary, labels, hints, explanations) must be in English, regardless of input language.
+`
 
   const user = `Question prompt:\n${question.prompt}\n\n${reference}\nStudent responses (JSON):\n${JSON.stringify(responseList)}`
 
@@ -448,6 +465,7 @@ type GroupedQuestionResponse = {
   count: number
   response_ids: string[]
   average_confidence: number | null
+  explanation_samples?: string[]
 }
 
 type PerQuestionPromptQuestion = {
@@ -465,6 +483,8 @@ type PerQuestionPromptQuestion = {
     grouped_response_id: string
     answer_text: string
     count: number
+    average_confidence: number | null
+    explanation_samples?: string[]
   }>
 }
 
@@ -487,17 +507,16 @@ type PerQuestionAIResult = {
   question_id: string
   question_no: number
   response_breakdown?: {
-    strong_correct: number
+    fully_correct: number
     partially_correct: number
-    target_misconception: number
-    other_misconception: number
+    relevant_incomplete: number
+    misconception: number
     unclear: number
   }
   top_misconceptions: Array<ReturnType<typeof normalizeTopMisconception>>
   teacher_interpretation?: string
   suggested_teacher_action?: string
   response_labels: SessionAnalysisResponseLabel[]
-  summary?: string
 }
 
 type PerQuestionExecutionResult =
@@ -514,6 +533,7 @@ type PerQuestionExecutionResult =
       ok: false
       error: string
       promptJson?: Record<string, unknown>
+      rawText?: string
       cacheHit: boolean
       aiCalled: boolean
       elapsedMs: number
@@ -553,7 +573,7 @@ async function mapWithConcurrency<T, R>(
 }
 
 function groupResponsesForAnalysis(options: {
-  responses: Array<Pick<Response, 'response_id' | 'answer' | 'confidence'>>
+  responses: Array<Pick<Response, 'response_id' | 'answer' | 'confidence' | 'explanation'>>
 }) {
   const groups = new Map<
     string,
@@ -563,6 +583,7 @@ function groupResponsesForAnalysis(options: {
       count: number
       response_ids: string[]
       confidences: number[]
+      explanation_samples: string[]
     }
   >()
 
@@ -580,6 +601,13 @@ function groupResponsesForAnalysis(options: {
         existing.representative_answer_text = String(response.answer || '')
       }
       if (typeof response.confidence === 'number') existing.confidences.push(response.confidence)
+      if (
+        typeof response.explanation === 'string' &&
+        response.explanation.trim() &&
+        existing.explanation_samples.length < 2
+      ) {
+        existing.explanation_samples.push(response.explanation.trim().slice(0, 180))
+      }
     } else {
       groups.set(key, {
         normalized_answer,
@@ -587,6 +615,10 @@ function groupResponsesForAnalysis(options: {
         count: 1,
         response_ids: [response.response_id],
         confidences: typeof response.confidence === 'number' ? [response.confidence] : [],
+        explanation_samples:
+          typeof response.explanation === 'string' && response.explanation.trim()
+            ? [response.explanation.trim().slice(0, 180)]
+            : [],
       })
     }
   }
@@ -600,6 +632,7 @@ function groupResponsesForAnalysis(options: {
       count: group.count,
       response_ids: group.response_ids,
       average_confidence: mean(group.confidences),
+      explanation_samples: group.explanation_samples,
     }))
 
   return groupedResponses
@@ -615,9 +648,16 @@ function computeQuestionFingerprint(options: {
     position: options.question.position,
     prompt: options.question.prompt,
   })
+  const promptVersion = getAnalysisPromptVersion({
+    condition: options.session.condition,
+    roundNumber: options.roundNumber,
+  })
   return sha256(
     JSON.stringify({
       version: 'per_question_analysis_v2_compact_prompt',
+      prompt_profile: options.session.condition === 'baseline' ? 'baseline_misconception_compact_v3' : 'treatment_compact_v1',
+      schema_mode: options.session.condition === 'baseline' ? 'baseline_misconception_compact' : 'treatment_compact',
+      prompt_version: promptVersion,
       session_id: options.session.id,
       question_id: options.question.question_id,
       round_number: options.roundNumber,
@@ -641,6 +681,10 @@ function buildPerQuestionPrompt(options: {
   roundNumber: 1 | 2
 }): PerQuestionPromptResult {
   const { session, question, groupedResponses, roundNumber } = options
+  const promptVersion = getAnalysisPromptVersion({
+    condition: session.condition,
+    roundNumber,
+  })
   const ctx = getUnionFindQuestionContext({
     position: question.position,
     prompt: question.prompt,
@@ -661,11 +705,16 @@ function buildPerQuestionPrompt(options: {
       grouped_response_id: group.grouped_response_id,
       answer_text: group.representative_answer_text,
       count: group.count,
+      average_confidence: group.average_confidence,
+      explanation_samples: group.explanation_samples && group.explanation_samples.length > 0 ? group.explanation_samples : undefined,
     })),
   }
 
   const promptJson = {
-    version: 'analysis_prompt_per_question_v2_compact',
+    version: 'analysis_prompt_per_question_v3_split_schema',
+    analysis_version: 'analysis_v1',
+    prompt_version: promptVersion,
+    schema_version: session.condition === 'baseline' ? 'baseline_misconception_compact_v2' : 'treatment_compact_v1',
     session: {
       session_id: session.id,
       session_code: session.session_code,
@@ -677,42 +726,40 @@ function buildPerQuestionPrompt(options: {
   }
 
   const isBaseline = session.condition === 'baseline'
-  const modeLine =
-    session.condition === 'baseline'
-      ? 'MODE: BASELINE round 1 diagnostic. Focus on misconception diagnosis; do not over-emphasize grading.'
-      : roundNumber === 1
-        ? 'MODE: TREATMENT round 1 diagnostic + repair prep. Include repair-oriented hints for the top misconceptions.'
-        : 'MODE: TREATMENT round 2 revision analysis. Analyze ONLY the round-2 responses; do not compare to round 1 inside this output.'
+  const treatmentFocus =
+    roundNumber === 2
+      ? 'Treat answers as revised responses. Focus on what still needs repair.'
+      : 'Focus on repair-oriented guidance for the main misconceptions.'
 
   const schemaText = isBaseline
     ? `{
   "question_id": string,
   "question_no": number,
   "response_breakdown": {
-    "strong_correct": number,
+    "fully_correct": number,
     "partially_correct": number,
-    "target_misconception": number,
-    "other_misconception": number,
+    "relevant_incomplete": number,
+    "misconception": number,
     "unclear": number
   },
   "top_misconceptions": [
     {
       "label": string,
       "count": number,
-      "hint": string
+      "description": string,
+      "why_students_think_this": string,
+      "teacher_move": string
     }
   ],
-  "teacher_interpretation": string,
-  "suggested_teacher_action": string,
+  "teacher_interpretation": string | null,
+  "suggested_teacher_action": string | null,
   "response_labels": [
     {
       "grouped_response_id": string,
-      "question_id": string,
-      "category": "strong_correct" | "partially_correct" | "target_misconception" | "other_misconception" | "unclear",
+      "category": "fully_correct" | "partially_correct" | "relevant_incomplete" | "misconception" | "unclear",
       "is_correct": boolean | null,
       "misconception_label": string | null,
-      "reasoning_summary": string | null,
-      "missing_key_idea": string | null
+      "reasoning_summary": string | null
     }
   ]
 }`
@@ -739,7 +786,6 @@ function buildPerQuestionPrompt(options: {
   "response_labels": [
     {
       "grouped_response_id": string,
-      "question_id": string,
       "category": "strong_correct" | "partially_correct" | "target_misconception" | "other_misconception" | "unclear",
       "is_correct": boolean | null,
       "misconception_label": string | null,
@@ -749,57 +795,96 @@ function buildPerQuestionPrompt(options: {
   ]
 }`
 
-  const system = `
-You are an educational analysis assistant helping a teacher interpret open-ended in-class quiz responses for one question at a time.
+  const system = isBaseline
+    ? `You are analyzing short open-ended student responses from a live data structures lesson.
+Your job is to identify misconceptions, not just summarize answer wording.
 
-These are NOT multiple-choice answers and should NOT be graded with a simplistic right/wrong mindset.
+Lesson context:
+- concept being taught
+- target misconception
+- strong answer criteria
+- known misconception variants
 
-You will be given:
-- the question prompt
-- the intended/correct answer
-- the lesson concept
-- the target misconception
-- what a strong answer should include
-- common misconception variants
-- grouped unique student answers with counts and grouped_response_id
+Important distinction:
+- Use misconception when a response shows a wrong rule, wrong mental model, wrong structural interpretation, or wrong complexity claim.
+- Use relevant_incomplete only when the response is on-topic but missing a key idea without stating a false rule.
 
-${modeLine}
+For this lesson, prioritize concept-level misconception labels such as:
+- Direct union only
+- No transitive merge
+- Single-index QuickFind update
+- Parent vs component confusion
+- Root merge confusion
+- O(1) complexity misconception
 
-Return ONLY valid JSON.
+Do not just repeat student wording.
+Do not overuse "relevant_incomplete".
+If a response contains a false claim, classify it as a misconception.
 
-Use this schema:
+Return ONLY valid JSON using this schema:
 ${schemaText}
 
+Requirements:
+- Return exactly one JSON object and nothing else.
+- Do not wrap the JSON in markdown fences.
+- Preserve grouped_response_id exactly.
+- All output must be in English.
+- misconception_label must be null unless category = "misconception".
+- reasoning_summary: max 12 words.
+- teacher_interpretation: one short sentence.
+- suggested_teacher_action: one short sentence.
+- description: one short sentence.
+- why_students_think_this: one short sentence.
+- teacher_move: one short sentence.
+- Return at most 2 top_misconceptions.
+- top_misconceptions should prioritize conceptual importance, not just wording frequency.
+- Merge semantically similar wrong answers into the same misconception label.`
+    : `Analyze one open-ended classroom question. Grade conceptually, not by exact wording.
+${treatmentFocus}
+Return only JSON using this schema:
+${schemaText}
 Rules:
+- Return exactly one JSON object and nothing else.
+- Do not wrap the JSON in markdown fences.
+- Preserve grouped_response_id exactly.
+- Use stable misconception labels when target_misconception or misconception_variants fit.
+- misconception_label: max 4 words.
+- reasoning_summary: max 12 words.
+- missing_key_idea: max 6 words, only for relevant but incomplete answers.
+- hint, description, teacher_interpretation, suggested_teacher_action: each max 1 short sentence.
+- Keep output brief.`
 
-* Do not rely on exact string matching.
-* Do not mark a response wrong just because wording differs from the intended answer.
-* Use "strong_correct" only when the defining idea is clearly present and there is no major conceptual error.
-* Use "partially_correct" when the response contains a correct core idea but is incomplete, weakly justified, or missing an important detail.
-* Use "target_misconception" when the response demonstrates the main misconception this checkpoint is designed to diagnose.
-* Use "other_misconception" when the response is conceptually wrong, but in a way different from the target misconception.
-* Use "unclear" when the answer is too vague, off-topic, contradictory, or not interpretable.
-* Keep misconception labels short, concept-based, and teacher-friendly.
-* Use the target_misconception or a known misconception_variants label when it fits; only invent a new label if none fit.
-* Prefer stable conceptual labels such as "direct-edge-only thinking" over repeating raw student wording.
-* The input answers are deduplicated. Label each grouped answer once, based on the representative answer text, and account for its frequency count in the breakdowns and top misconceptions.
-* Use the provided grouped_response_id exactly in response_labels.
-* Do not invent grouped_response_ids or omit any grouped answer.
-* misconception_label: max 4 words.
-* reasoning_summary: max 12 words.
-* missing_key_idea: max 6 words, only when the answer is relevant but incomplete.
-* teacher_interpretation: max 1 sentence.
-* suggested_teacher_action: max 1 sentence.
-* hint: max 1 sentence.
-* Do not repeat the prompt or correct answer.
-* Do not write long explanations.
-* For baseline: keep outputs as short as possible; prioritize diagnosis over elaboration.
-* For baseline: leave top_misconceptions.description empty unless truly necessary.
-* For treatment round 1: hints MUST be specific, teacher-actionable repair guidance for the top misconceptions, and top_misconceptions.description should briefly explain the misconception.
-* For treatment round 2: treat responses as revised answers and describe what still needs repair, but do NOT compare to round 1 inside this response.
-`
+  const user = isBaseline
+    ? `Analyze this baseline question.
 
-  const user = JSON.stringify(promptJson)
+Question:
+${question.prompt}
+
+Correct answer:
+${question.correct_answer || ''}
+
+Lesson concept:
+${ctx?.lesson_concept ?? ''}
+
+Target misconception:
+${ctx?.target_misconception ?? ''}
+
+Strong answer criteria:
+${JSON.stringify(ctx?.strong_answer_criteria ?? [])}
+
+Known misconception variants:
+${JSON.stringify(ctx?.misconception_variants ?? [])}
+
+Grouped student responses:
+${JSON.stringify(promptQuestion.grouped_responses)}
+
+Your goal:
+- identify the main conceptual misconceptions
+- classify clearly wrong reasoning as misconception
+- use relevant_incomplete only for on-topic but non-false partial answers
+- produce concise teacher-usable misconception summaries
+- keep the JSON compact enough to finish completely`
+    : JSON.stringify(promptJson)
   const messages: Array<{ role: 'system' | 'user'; content: string }> = [
     { role: 'system', content: system },
     { role: 'user', content: user },
@@ -864,7 +949,7 @@ async function analyzeGroupedQuestionWithAI(options: {
   const { promptJson, messages } = buildPerQuestionPrompt(options)
   const result = await openaiChatJson({
     messages,
-    maxTokens: options.session.condition === 'baseline' ? 800 : 1100,
+    maxTokens: options.session.condition === 'baseline' ? 800 : 900,
     timeoutMs: 30000,
   })
 
@@ -873,6 +958,7 @@ async function analyzeGroupedQuestionWithAI(options: {
       ok: false,
       error: result.error,
       promptJson,
+      rawText: result.rawText,
       cacheHit: false,
       aiCalled: true,
       elapsedMs: Date.now() - startedAt,
@@ -886,10 +972,14 @@ async function analyzeGroupedQuestionWithAI(options: {
     response_breakdown:
       json?.response_breakdown && typeof json.response_breakdown === 'object'
         ? {
-            strong_correct: Number(json.response_breakdown.strong_correct || 0),
+            fully_correct: Number(json.response_breakdown.strong_correct ?? json.response_breakdown.fully_correct ?? 0),
             partially_correct: Number(json.response_breakdown.partially_correct || 0),
-            target_misconception: Number(json.response_breakdown.target_misconception || 0),
-            other_misconception: Number(json.response_breakdown.other_misconception || 0),
+            relevant_incomplete: Number(json.response_breakdown.relevant_incomplete || 0),
+            misconception: Number(
+              json.response_breakdown.target_misconception ??
+                json.response_breakdown.misconception ??
+                0
+            ) + Number(json.response_breakdown.other_misconception || 0),
             unclear: Number(json.response_breakdown.unclear || 0),
           }
         : undefined,
@@ -942,12 +1032,16 @@ function normalizeSessionResponseLabel(input: any): SessionAnalysisResponseLabel
   // New shape uses `category` instead of `evaluation_category`.
   const category = typeof input?.category === 'string' ? input.category : null
   const evaluation_category =
-    category === 'strong_correct'
+    category === 'strong_correct' || category === 'fully_correct'
       ? 'fully_correct'
       : category === 'partially_correct'
         ? 'partially_correct'
+        : category === 'relevant_incomplete'
+          ? 'relevant_incomplete'
         : category === 'target_misconception' || category === 'other_misconception'
           ? 'misconception'
+          : category === 'misconception'
+            ? 'misconception'
           : category === 'unclear'
             ? 'unclear'
             : parseEvaluationCategory(input?.evaluation_category)
@@ -988,15 +1082,30 @@ function normalizeTopMisconception(input: any): {
   hint: string
   description: string
   interpretation: string
+  why_students_think_this: string
+  teacher_move: string
   representative_answers: string[]
 } {
   return {
     label: typeof input?.label === 'string' ? input.label.slice(0, 120) : 'Misconception',
     variant: typeof input?.variant === 'string' ? input.variant.slice(0, 120) : '',
     count: typeof input?.count === 'number' ? input.count : 0,
-    hint: typeof input?.hint === 'string' ? input.hint.slice(0, 220) : '',
+    hint:
+      typeof input?.hint === 'string'
+        ? input.hint.slice(0, 220)
+        : typeof input?.teacher_move === 'string'
+          ? input.teacher_move.slice(0, 220)
+          : '',
     description: typeof input?.description === 'string' ? input.description.slice(0, 260) : '',
-    interpretation: typeof input?.interpretation === 'string' ? input.interpretation.slice(0, 260) : '',
+    interpretation:
+      typeof input?.interpretation === 'string'
+        ? input.interpretation.slice(0, 260)
+        : typeof input?.why_students_think_this === 'string'
+          ? input.why_students_think_this.slice(0, 260)
+          : '',
+    why_students_think_this:
+      typeof input?.why_students_think_this === 'string' ? input.why_students_think_this.slice(0, 260) : '',
+    teacher_move: typeof input?.teacher_move === 'string' ? input.teacher_move.slice(0, 220) : '',
     representative_answers: Array.isArray(input?.representative_answers)
       ? input.representative_answers.filter((v: unknown) => typeof v === 'string').slice(0, 4).map((s: string) => s.slice(0, 220))
       : [],
@@ -1015,6 +1124,10 @@ export async function buildRoundAnalysis(options: {
 }> {
   const { session, questions, responses, roundNumber } = options
   const startedAt = Date.now()
+  const promptVersion = getAnalysisPromptVersion({
+    condition: session.condition,
+    roundNumber,
+  })
   const sortedQuestions = questions.slice().sort((a, b) => a.position - b.position)
   const responsesByQuestionId = new Map<string, Response[]>()
   for (const response of responses) {
@@ -1031,10 +1144,10 @@ export async function buildRoundAnalysis(options: {
     string,
     {
       response_breakdown?: {
-        strong_correct: number
+        fully_correct: number
         partially_correct: number
-        target_misconception: number
-        other_misconception: number
+        relevant_incomplete: number
+        misconception: number
         unclear: number
       }
       top_misconceptions: Array<ReturnType<typeof normalizeTopMisconception>>
@@ -1043,10 +1156,9 @@ export async function buildRoundAnalysis(options: {
     }
   >()
 
-  const aiQuestionInsights = new Map<string, Array<{ label: string; variant: string; hint: string; description: string; interpretation: string; representative_answers: string[] }>>()
+  const aiQuestionInsights = new Map<string, Array<{ label: string; variant: string; hint: string; description: string; interpretation: string; why_students_think_this: string; teacher_move: string; representative_answers: string[] }>>()
   const rawPromptByQuestion: Record<string, unknown> = {}
   const rawResponseByQuestion: Record<string, unknown> = {}
-  const questionSummaries: string[] = []
   const concurrencyLimit = 2
   const questionTasks = sortedQuestions.map((question) => {
     const qResponses = responsesByQuestionId.get(question.question_id) || []
@@ -1108,6 +1220,7 @@ export async function buildRoundAnalysis(options: {
         question_id: question.question_id,
         error: errorMessage,
         heuristic_fallback: true,
+        raw_text: groupedAi.rawText || null,
         cache_hit: groupedAi.cacheHit,
         ai_called: groupedAi.aiCalled,
         elapsed_ms: groupedAi.elapsedMs,
@@ -1142,13 +1255,12 @@ export async function buildRoundAnalysis(options: {
         hint: entry.hint || '',
         description: entry.description || '',
         interpretation: entry.interpretation || '',
+        why_students_think_this: entry.why_students_think_this || '',
+        teacher_move: entry.teacher_move || '',
         representative_answers: entry.representative_answers || [],
       }))
     )
 
-    if (groupedAi.aiResult.summary?.trim()) {
-      questionSummaries.push(groupedAi.aiResult.summary.trim())
-    }
   }
 
   const totalsConfidenceBreakdown: SessionRoundAnalysis['totals']['confidence_breakdown'] = {
@@ -1341,9 +1453,9 @@ export async function buildRoundAnalysis(options: {
     }
 
     const answerById = new Map(qResponses.map((r) => [r.response_id, r.answer]))
-    const misconceptionCounts = new Map<string, { label: string; count: number; hint: string; description: string; interpretation: string; reps: string[] }>()
+    const misconceptionCounts = new Map<string, { label: string; count: number; hint: string; description: string; interpretation: string; why_students_think_this: string; teacher_move: string; reps: string[] }>()
     for (const label of fullLabels) {
-      if (label.evaluation_category !== 'misconception' && label.evaluation_category !== 'partially_correct') continue
+      if (label.evaluation_category !== 'misconception') continue
       const misconceptionLabel = String(label.misconception_label || '').trim()
       if (!misconceptionLabel) continue
       const canon = canonicalizeLabel(misconceptionLabel)
@@ -1358,6 +1470,8 @@ export async function buildRoundAnalysis(options: {
         if (!existing.hint && hintMatch?.hint) existing.hint = hintMatch.hint
         if (!existing.description && hintMatch?.description) existing.description = hintMatch.description
         if (!existing.interpretation && hintMatch?.interpretation) existing.interpretation = hintMatch.interpretation
+        if (!existing.why_students_think_this && hintMatch?.why_students_think_this) existing.why_students_think_this = hintMatch.why_students_think_this
+        if (!existing.teacher_move && hintMatch?.teacher_move) existing.teacher_move = hintMatch.teacher_move
         if (existing.reps.length < 3) {
           existing.reps.push(String(answerById.get(label.response_id) || misconceptionLabel).slice(0, 220))
         }
@@ -1368,6 +1482,8 @@ export async function buildRoundAnalysis(options: {
           hint: hintMatch?.hint || (question.correct_answer ? `Contrast with correct answer: ${question.correct_answer}` : ''),
           description: hintMatch?.description || '',
           interpretation: hintMatch?.interpretation || '',
+          why_students_think_this: hintMatch?.why_students_think_this || '',
+          teacher_move: hintMatch?.teacher_move || '',
           reps: [String(answerById.get(label.response_id) || misconceptionLabel).slice(0, 220)],
         })
       }
@@ -1384,8 +1500,10 @@ export async function buildRoundAnalysis(options: {
         variant: entry.variant || null,
         description: entry.description || null,
         interpretation: entry.interpretation || null,
+        why_students_think_this: entry.why_students_think_this || entry.interpretation || null,
+        teacher_move: entry.teacher_move || entry.hint || null,
         count: entry.count,
-        hint: entry.hint || null,
+        hint: entry.hint || entry.teacher_move || null,
         example_response_ids: [] as string[],
         representative_answers: entry.representative_answers || [],
       }))
@@ -1397,8 +1515,10 @@ export async function buildRoundAnalysis(options: {
         label: entry.label,
         description: entry.description || null,
         interpretation: entry.interpretation || null,
+        why_students_think_this: entry.why_students_think_this || entry.interpretation || null,
+        teacher_move: entry.teacher_move || entry.hint || null,
         count: entry.count,
-        hint: entry.hint || null,
+        hint: entry.hint || entry.teacher_move || null,
         example_response_ids: [] as string[],
         representative_answers: entry.reps,
       }))
@@ -1414,8 +1534,10 @@ export async function buildRoundAnalysis(options: {
     const teacher_interpretation =
       typeof modelQ?.teacher_interpretation === 'string' && modelQ.teacher_interpretation.trim()
         ? modelQ.teacher_interpretation.trim()
-        : qualityBreakdown.misconception > 0 && topMisconceptions[0]?.label
-          ? `Many students show a misconception about: ${topMisconceptions[0].label}.`
+        : topMisconceptions[0]?.description
+          ? topMisconceptions[0].description
+          : qualityBreakdown.misconception > 0 && topMisconceptions[0]?.label
+            ? `Many students show a misconception about: ${topMisconceptions[0].label}.`
           : qualityBreakdown.relevant_incomplete > 0
             ? 'Many responses are relevant but incomplete (on-topic, but missing key defining ideas).'
             : qualityBreakdown.partially_correct > 0
@@ -1425,6 +1547,8 @@ export async function buildRoundAnalysis(options: {
     const suggested_teacher_action =
       typeof modelQ?.suggested_teacher_action === 'string' && modelQ.suggested_teacher_action.trim()
         ? modelQ.suggested_teacher_action.trim()
+        : topMisconceptions[0]?.teacher_move
+          ? String(topMisconceptions[0].teacher_move)
         : topMisconceptions[0]?.hint
           ? String(topMisconceptions[0].hint)
           : question.correct_answer
@@ -1434,17 +1558,11 @@ export async function buildRoundAnalysis(options: {
     // If model provides a breakdown, trust it for the main buckets and keep our "relevant_incomplete"
     // heuristic additive (it is a teacher-centric split of partial responses).
     if (modelQ?.response_breakdown) {
-      qualityBreakdown.fully_correct = modelQ.response_breakdown.strong_correct
+      qualityBreakdown.fully_correct = modelQ.response_breakdown.fully_correct
       qualityBreakdown.partially_correct = modelQ.response_breakdown.partially_correct
-      qualityBreakdown.misconception =
-        modelQ.response_breakdown.target_misconception + modelQ.response_breakdown.other_misconception
+      qualityBreakdown.relevant_incomplete = modelQ.response_breakdown.relevant_incomplete
+      qualityBreakdown.misconception = modelQ.response_breakdown.misconception
       qualityBreakdown.unclear = modelQ.response_breakdown.unclear
-      // Keep relevant_incomplete as a split of partially_correct (not an extra bucket).
-      if (qualityBreakdown.relevant_incomplete > 0) {
-        const take = Math.min(qualityBreakdown.relevant_incomplete, qualityBreakdown.partially_correct)
-        qualityBreakdown.relevant_incomplete = take
-        qualityBreakdown.partially_correct = Math.max(0, qualityBreakdown.partially_correct - take)
-      }
     }
 
     const correctNode = {
@@ -1532,12 +1650,11 @@ export async function buildRoundAnalysis(options: {
 
   const teaching_summary = {
     overall_summary:
-      questionSummaries[0] ||
-      (session.condition === 'baseline'
+      session.condition === 'baseline'
         ? 'Baseline round analysis generated.'
         : roundNumber === 1
           ? 'Treatment round 1 analysis generated. Use the top misconceptions to plan instruction, then open revision.'
-          : 'Treatment final analysis generated. Review improvement and remaining misconceptions.'),
+          : 'Treatment final analysis generated. Review improvement and remaining misconceptions.',
     top_class_issues: topClassIssues,
     teaching_suggestions: teachingSuggestions,
   }
@@ -1559,21 +1676,28 @@ export async function buildRoundAnalysis(options: {
   const rawAi = {
     prompt_json: {
       version: 'analysis_prompt_per_question_bundle_v1',
+      analysis_version: 'analysis_v1',
+      prompt_version: promptVersion,
+      schema_version: session.condition === 'baseline' ? 'baseline_misconception_compact_v2' : 'treatment_compact_v1',
       session_id: session.id,
+      condition: session.condition,
       round_number: roundNumber,
       questions: rawPromptByQuestion,
     },
     raw_response_json: {
       version: 'analysis_raw_per_question_bundle_v1',
+      analysis_version: 'analysis_v1',
+      prompt_version: promptVersion,
       session_id: session.id,
       session_code: session.session_code,
+      condition: session.condition,
       round_number: roundNumber,
       questions: rawResponseByQuestion,
     },
   }
 
   console.info(
-    `[analysis] session_id=${session.id} round=${roundNumber} total_questions=${sortedQuestions.length} total_responses=${responses.length} elapsed_ms=${Date.now() - startedAt}`
+    `[analysis] session_id=${session.id} round=${roundNumber} condition=${session.condition} prompt_version=${promptVersion} total_questions=${sortedQuestions.length} total_responses=${responses.length} elapsed_ms=${Date.now() - startedAt}`
   )
 
   return { analysis, labelsByResponseId, rawAi }

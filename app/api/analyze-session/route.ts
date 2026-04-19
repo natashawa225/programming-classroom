@@ -1,4 +1,4 @@
-import { buildRoundAnalysis } from '@/lib/ai/experiment-analysis'
+import { buildRoundAnalysis, getAnalysisPromptVersion } from '@/lib/ai/experiment-analysis'
 import {
   getSession,
   getSessionQuestions,
@@ -105,6 +105,17 @@ function levelScore(level: ReturnType<typeof parseUnderstandingLevel>) {
   return 0
 }
 
+function getStoredAnalysisPromptVersion(promptJson: Record<string, any> | null | undefined) {
+  if (!promptJson || typeof promptJson !== 'object') return null
+  if (typeof promptJson.prompt_version === 'string' && promptJson.prompt_version.trim()) {
+    return promptJson.prompt_version.trim()
+  }
+  const questions = promptJson?.questions
+  if (!questions || typeof questions !== 'object') return null
+  const first = Object.values(questions)[0] as any
+  return typeof first?.prompt_version === 'string' ? first.prompt_version : null
+}
+
 export async function POST(request: NextRequest) {
   try {
     const teacherSession = await getTeacherSession()
@@ -126,6 +137,10 @@ export async function POST(request: NextRequest) {
 
     const rn = Number(roundNumber) === 2 ? 2 : 1
     const responsesData = (allResponses || []).filter(r => (r.round_number ?? 1) === rn)
+    const currentPromptVersion = getAnalysisPromptVersion({
+      condition: session.condition,
+      roundNumber: rn as 1 | 2,
+    })
 
     if (!responsesData || responsesData.length === 0) {
       return NextResponse.json(
@@ -150,8 +165,22 @@ export async function POST(request: NextRequest) {
     // Guard: reuse existing completed analysis unless explicitly forced.
     if (!forceRegenerate) {
       const completed = await getLatestCompletedAnalysisRun(sessionId, rn as 1 | 2)
-      if (completed?.summary_json) {
+      const storedPromptVersion = getStoredAnalysisPromptVersion(
+        completed?.prompt_json as Record<string, any> | null | undefined
+      )
+      const canReuse = Boolean(
+        completed?.summary_json && storedPromptVersion && storedPromptVersion === currentPromptVersion
+      )
+      console.info(
+        `[analysis] session_id=${sessionId} round=${rn} condition=${session.condition} prompt_version=${currentPromptVersion} reuse=${canReuse} stored_prompt_version=${storedPromptVersion || 'none'}`
+      )
+      if (canReuse) {
         return NextResponse.json(completed.summary_json)
+      }
+      if (completed?.summary_json && storedPromptVersion && storedPromptVersion !== currentPromptVersion) {
+        console.info(
+          `[analysis] session_id=${sessionId} round=${rn} condition=${session.condition} prompt_version=${currentPromptVersion} stale_completed_run=true stored_prompt_version=${storedPromptVersion}`
+        )
       }
     }
 

@@ -598,7 +598,7 @@ export default function SessionDetailClient({
                       <p className="text-sm text-foreground/60 mb-2">Answer:</p>
                       <p className="text-foreground">{response.answer}</p>
                     </div>
-                    <p className="text-xs text-foreground/60 mt-3">
+                    <p className="text-sm text-foreground/60 mt-3">
                       Submitted {formatTimestampUtc(response.created_at)}
                     </p>
                   </Card>

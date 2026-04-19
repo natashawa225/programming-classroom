@@ -33,7 +33,9 @@ Provide:
 4. Specific guidance for improvement
 5. Encouragement for their confidence level
 
-Keep the feedback concise (2-3 sentences) but helpful.`
+Keep the feedback concise (2-3 sentences) but helpful
+All output (summary, labels, hints, explanations) must be in English, regardless of input language.
+`
 
   const result = await generateText({
     model: 'openai/gpt-4-turbo',
@@ -71,6 +73,7 @@ Provide:
    - "commonMisconceptions": array of 2-3 common misconceptions you notice
    - "confidenceAnalysis": brief insight about confidence patterns
    - "teachingSuggestions": array of 3-4 teaching strategies to address these misconceptions
+All output (summary, labels, hints, explanations) must be in English, regardless of input language.
 
 Format your response as valid JSON only.`
 

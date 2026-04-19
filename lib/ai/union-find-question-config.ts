@@ -75,32 +75,6 @@ export function getUnionFindQuestionContext(options: {
     }
   }
 
-  // Q3: QuickUnion roots + linking choice
-  if (
-    pos === 3 ||
-    p.includes('quickunion') ||
-    p.includes('root') ||
-    p.includes('smaller') ||
-    p.includes('larger')
-  ) {
-    return {
-      lesson_concept:
-        'QuickUnion: components are trees; a root is a node whose parent is itself; union links root-to-root to merge components.',
-      target_misconception:
-        'Element-only linking: students link p directly to q (not roots), or think union only connects the named elements rather than merging whole components.',
-      strong_answer_criteria: [
-        'Defines/identifies a root (parent[root] = root).',
-        'Describes union as: find root(p) and root(q), then set one root’s parent to the other root.',
-        'States that linking roots merges entire components (all nodes in the trees), not just p and q.',
-      ],
-      misconception_variants: [
-        '“union just sets parent[p]=q” (no root finding).',
-        'Says union connects only p and q, leaving the rest unchanged.',
-        'Misdefines root (e.g., “root is last inserted” / “root is smallest index”).',
-      ],
-    }
-  }
-
   // Q4: Weighted QuickUnion + logarithmic performance
   if (
     pos === 4 ||
@@ -123,6 +97,33 @@ export function getUnionFindQuestionContext(options: {
         'Equates weighting with path compression.',
         'Claims weighting only affects union cost, not find (no effect on height).',
         'Claims worst-case height remains linear even with weighting.',
+      ],
+    }
+  }
+
+  // Q3: QuickUnion roots + linking choice
+  if (
+    pos === 3 ||
+    p.includes('parent array') ||
+    p.includes('parent[') ||
+    p.includes('union(5,2)') ||
+    p.includes('set parent[5] = 2') ||
+    p.includes('find the root')
+  ) {
+    return {
+      lesson_concept:
+        'QuickUnion: components are trees; a root is a node whose parent is itself; union links root-to-root to merge components.',
+      target_misconception:
+        'Element-only linking: students link p directly to q (not roots), or think union only connects the named elements rather than merging whole components.',
+      strong_answer_criteria: [
+        'Defines/identifies a root (parent[root] = root).',
+        'Describes union as: find root(p) and root(q), then set one root’s parent to the other root.',
+        'States that linking roots merges entire components (all nodes in the trees), not just p and q.',
+      ],
+      misconception_variants: [
+        '“union just sets parent[p]=q” (no root finding).',
+        'Says union connects only p and q, leaving the rest unchanged.',
+        'Misdefines root (e.g., “root is last inserted” / “root is smallest index”).',
       ],
     }
   }

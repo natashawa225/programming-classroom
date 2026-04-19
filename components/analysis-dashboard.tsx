@@ -193,16 +193,16 @@ function buildConfidenceData(analysis: AnalysisDashboardAnalysis | null): Confid
 function MetricCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="rounded-lg bg-secondary/20 p-3">
-      <p className="text-xs text-foreground/55 uppercase tracking-wide">{label}</p>
+      <p className="text-sm text-foreground/55 uppercase tracking-wide">{label}</p>
       <p className="mt-1 text-2xl font-semibold text-foreground">{value}</p>
-      {sub && <p className="mt-0.5 text-xs text-foreground/50">{sub}</p>}
+      {sub && <p className="mt-0.5 text-sm text-foreground/50">{sub}</p>}
     </div>
   )
 }
 
 function Swatch({ color, label }: { color: string; label: string }) {
   return (
-    <span className="inline-flex items-center gap-1.5 text-xs text-foreground/55">
+    <span className="inline-flex items-center gap-1.5 text-sm text-foreground/55">
       <span className="inline-block h-2 w-2 rounded-sm" style={{ background: color }} />
       {label}
     </span>
@@ -213,7 +213,7 @@ function StackTooltip({ active, payload }: any) {
   if (!active || !payload?.length) return null
   const row = payload[0]?.payload as StackedQuestionDatum
   return (
-    <div className="rounded-lg border border-border/60 bg-background/95 p-2.5 text-xs shadow-sm backdrop-blur">
+    <div className="rounded-lg border border-border/60 bg-background/95 p-2.5 text-sm shadow-sm backdrop-blur">
       <p className="font-medium text-foreground">{row.label} — {row.prompt}</p>
       <div className="mt-1.5 space-y-0.5 text-foreground/70">
         <p>Correct: {row.correct} · Incorrect: {row.incorrect}</p>
@@ -228,7 +228,7 @@ function BubbleTooltip({ active, payload }: any) {
   const row = payload[0]?.payload as BubbleDatum
   const badgeVariant = row.severity === 'high' ? 'destructive' : row.severity === 'medium' ? 'secondary' : 'outline'
   return (
-    <div className="max-w-[220px] rounded-lg border border-border/60 bg-background/95 p-2.5 text-xs shadow-sm backdrop-blur">
+    <div className="max-w-[220px] rounded-lg border border-border/60 bg-background/95 p-2.5 text-sm shadow-sm backdrop-blur">
       <div className="flex items-center justify-between gap-2">
         <p className="font-medium text-foreground">{row.questionLabel}</p>
         <Badge variant={badgeVariant} className="text-[10px] py-0">
@@ -245,7 +245,7 @@ function ConfidenceTooltip({ active, payload }: any) {
   if (!active || !payload?.length) return null
   const row = payload[0]?.payload as ConfidencePoint
   return (
-    <div className="rounded-lg border border-border/60 bg-background/95 p-2.5 text-xs shadow-sm backdrop-blur">
+    <div className="rounded-lg border border-border/60 bg-background/95 p-2.5 text-sm shadow-sm backdrop-blur">
       <p className="font-medium text-foreground">Confidence {row.confidence}</p>
       <p className="mt-1 text-foreground/70">Q1: {row.q1Accuracy === null ? 'N/A' : `${row.q1Accuracy.toFixed(0)}%`}</p>
       <p className="text-foreground/70">Q2+Q3: {row.q23Accuracy === null ? 'N/A' : `${row.q23Accuracy.toFixed(0)}%`}</p>
@@ -255,7 +255,7 @@ function ConfidenceTooltip({ active, payload }: any) {
 
 function EmptySlate({ label }: { label: string }) {
   return (
-    <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-border/50 text-xs text-foreground/40">
+    <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-border/50 text-sm text-foreground/40">
       {label}
     </div>
   )
@@ -414,7 +414,7 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
           </div>
           {/* detail strip */}
           {selectedQuestion && (
-            <div className="rounded-md border border-border/50 bg-secondary/10 px-3 py-2 text-xs">
+            <div className="rounded-md border border-border/50 bg-secondary/10 px-3 py-2 text-sm">
               <span className="font-medium text-foreground">{selectedQuestion.label}</span>
               <span className="mx-1.5 text-foreground/30">·</span>
               <span className="text-foreground/70">{selectedQuestion.prompt}</span>
@@ -433,18 +433,38 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
           <div className="space-y-2">
             <p className="text-sm font-medium">Top misconceptions</p>
             {analysis?.per_question?.map(q => (
-              <div key={q.question_id} className="text-xs border p-2 rounded">
-                <p className="font-medium">Q{q.position}</p>
-                {q.top_misconceptions?.map((m: any, i: number) => (
-                  <p key={i}>
-                    - {m.label} ({m.count})
-                  </p>
-                ))}
+              <div key={q.question_id} className="rounded-lg border border-border/60 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-medium text-foreground">Q{q.position}</p>
+                  <Badge variant="outline" className="text-xs">
+                    {q.top_misconceptions?.length ?? 0} item(s)
+                  </Badge>
+                </div>
+                <div className="mt-2 space-y-2">
+                  {q.top_misconceptions?.map((m: any, i: number) => (
+                    <div key={i} className="rounded-md bg-secondary/15 p-2.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="text-sm font-medium text-foreground leading-snug">{m.label}</p>
+                        <span className="text-sm text-foreground/55">({m.count})</span>
+                      </div>
+                      {(m.description || m.interpretation) && (
+                        <p className="mt-1 text-sm leading-snug text-foreground/70">
+                          {m.description || m.interpretation}
+                        </p>
+                      )}
+                      {(m.teacher_move || m.hint) && (
+                        <p className="mt-1 text-sm leading-snug text-foreground/60">
+                          {m.teacher_move || m.hint}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
               </div>
             ))}
           </div>
           {selectedBubble && (
-            <div className="rounded-md border border-border/50 bg-secondary/10 px-3 py-2 text-xs">
+            <div className="rounded-md border border-border/50 bg-secondary/10 px-3 py-2 text-sm">
               <span className="font-medium text-foreground">{selectedBubble.questionLabel}</span>
               <span className="mx-1.5 text-foreground/30">·</span>
               <span className="text-foreground/70">{selectedBubble.label}</span>
@@ -501,7 +521,7 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
           )}
         </div>
         {selectedPoint && (
-          <div className="rounded-md border border-border/50 bg-secondary/10 px-3 py-2 text-xs">
+          <div className="rounded-md border border-border/50 bg-secondary/10 px-3 py-2 text-sm">
             <span className="font-medium text-foreground">Confidence level {selectedPoint.confidence}</span>
             <div className="mt-1 flex gap-4 text-foreground/55">
               <span>Q1: <strong className="text-foreground">
@@ -517,7 +537,7 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
 
       {/* ── raw JSON ── */}
       <details className="rounded-lg border border-border/50 bg-secondary/10 p-3">
-        <summary className="cursor-pointer text-xs font-medium text-foreground/60 hover:text-foreground">
+        <summary className="cursor-pointer text-sm font-medium text-foreground/60 hover:text-foreground">
           Show raw analysis JSON
         </summary>
         <pre className="mt-3 max-h-96 overflow-auto rounded-md bg-secondary/20 p-3 text-[11px] text-foreground/70 whitespace-pre-wrap">
@@ -827,9 +847,9 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
 // }) {
 //   return (
 //     <div className="rounded-xl border border-border/60 bg-secondary/20 p-4">
-//       <p className="text-xs uppercase tracking-wide text-foreground/60">{label}</p>
+//       <p className="text-sm uppercase tracking-wide text-foreground/60">{label}</p>
 //       <p className="mt-2 text-2xl font-semibold text-foreground">{value}</p>
-//       {sublabel && <p className="mt-1 text-xs text-foreground/60">{sublabel}</p>}
+//       {sublabel && <p className="mt-1 text-sm text-foreground/60">{sublabel}</p>}
 //     </div>
 //   )
 // }
@@ -842,8 +862,8 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
 //   return (
 //     <div className="rounded-xl border border-border/60 bg-background/95 p-3 shadow-lg backdrop-blur">
 //       <p className="text-sm font-semibold text-foreground">{row.label}</p>
-//       <p className="mt-1 text-xs text-foreground/60">{row.prompt}</p>
-//       <div className="mt-3 space-y-1 text-xs">
+//       <p className="mt-1 text-sm text-foreground/60">{row.prompt}</p>
+//       <div className="mt-3 space-y-1 text-sm">
 //         <p className="text-foreground/80">Correct: {row.correct}</p>
 //         <p className="text-foreground/80">Incorrect: {row.incorrect}</p>
 //         <p className="text-foreground/80">Total: {row.submissionCount}</p>
@@ -865,7 +885,7 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
 //       <div className="flex items-start justify-between gap-3">
 //         <div>
 //           <p className="text-sm font-semibold text-foreground">{row.questionLabel}</p>
-//           <p className="mt-1 text-xs text-foreground/60">{row.prompt}</p>
+//           <p className="mt-1 text-sm text-foreground/60">{row.prompt}</p>
 //         </div>
 //         <Badge variant={tone.badge} className="shrink-0">
 //           {row.severity === 'high' ? 'High severity' : row.severity === 'medium' ? 'Medium severity' : 'Standard'}
@@ -873,7 +893,7 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
 //       </div>
 //       <div className={cn('mt-3 rounded-lg border border-border/50 px-3 py-2', tone.ring)}>
 //         <p className="text-sm font-medium text-foreground">{row.label}</p>
-//         <p className="mt-1 text-xs text-foreground/60">Students in cluster: {row.count}</p>
+//         <p className="mt-1 text-sm text-foreground/60">Students in cluster: {row.count}</p>
 //       </div>
 //     </div>
 //   )
@@ -887,7 +907,7 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
 //   return (
 //     <div className="rounded-xl border border-border/60 bg-background/95 p-3 shadow-lg backdrop-blur">
 //       <p className="text-sm font-semibold text-foreground">Confidence {row.confidence}</p>
-//       <div className="mt-3 space-y-1 text-xs">
+//       <div className="mt-3 space-y-1 text-sm">
 //         <p className="text-foreground/80">Q1 accuracy: {row.q1Accuracy === null ? 'N/A' : `${row.q1Accuracy.toFixed(1)}%`}</p>
 //         <p className="text-foreground/80">Q2 + Q3 accuracy: {row.q23Accuracy === null ? 'N/A' : `${row.q23Accuracy.toFixed(1)}%`}</p>
 //       </div>
@@ -1067,7 +1087,7 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
 //               <h4 className="text-base font-semibold text-foreground">Correct vs Incorrect by Question</h4>
 //               <p className="text-sm text-foreground/60">Stacked totals make drops to 0% immediately visible.</p>
 //             </div>
-//             <div className="flex flex-wrap gap-2 text-xs text-foreground/60">
+//             <div className="flex flex-wrap gap-2 text-sm text-foreground/60">
 //               <span className="inline-flex items-center gap-2">
 //                 <span className="h-2.5 w-2.5 rounded-full bg-primary" />
 //                 Correct
@@ -1147,25 +1167,25 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
 //             {selectedQuestion ? (
 //               <div className="grid gap-2 md:grid-cols-2">
 //                 <div>
-//                   <p className="text-xs uppercase tracking-wide text-foreground/55">Selected question</p>
+//                   <p className="text-sm uppercase tracking-wide text-foreground/55">Selected question</p>
 //                   <p className="mt-1 text-sm font-semibold text-foreground">{selectedQuestion.label}</p>
 //                   <p className="mt-1 text-sm text-foreground/70">{selectedQuestion.prompt}</p>
 //                 </div>
 //                 <div className="grid gap-2 sm:grid-cols-2">
 //                   <div>
-//                     <p className="text-xs text-foreground/55">Correct</p>
+//                     <p className="text-sm text-foreground/55">Correct</p>
 //                     <p className="text-sm font-medium text-foreground">{selectedQuestion.correct}</p>
 //                   </div>
 //                   <div>
-//                     <p className="text-xs text-foreground/55">Incorrect</p>
+//                     <p className="text-sm text-foreground/55">Incorrect</p>
 //                     <p className="text-sm font-medium text-foreground">{selectedQuestion.incorrect}</p>
 //                   </div>
 //                   <div>
-//                     <p className="text-xs text-foreground/55">Total</p>
+//                     <p className="text-sm text-foreground/55">Total</p>
 //                     <p className="text-sm font-medium text-foreground">{selectedQuestion.submissionCount}</p>
 //                   </div>
 //                   <div>
-//                     <p className="text-xs text-foreground/55">Accuracy</p>
+//                     <p className="text-sm text-foreground/55">Accuracy</p>
 //                     <p className="text-sm font-medium text-foreground">{formatPercent(selectedQuestion.percentCorrect)}</p>
 //                   </div>
 //                 </div>
@@ -1242,21 +1262,21 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
 //             {selectedBubble ? (
 //               <div className="grid gap-2 md:grid-cols-[1.4fr_1fr]">
 //                 <div>
-//                   <p className="text-xs uppercase tracking-wide text-foreground/55">Selected misconception</p>
+//                   <p className="text-sm uppercase tracking-wide text-foreground/55">Selected misconception</p>
 //                   <p className="mt-1 text-sm font-semibold text-foreground">{selectedBubble.questionLabel}</p>
 //                   <p className="mt-1 text-sm text-foreground/70">{selectedBubble.prompt}</p>
 //                 </div>
 //                 <div className="grid gap-2 sm:grid-cols-2">
 //                   <div>
-//                     <p className="text-xs text-foreground/55">Label</p>
+//                     <p className="text-sm text-foreground/55">Label</p>
 //                     <p className="text-sm font-medium text-foreground">{selectedBubble.label}</p>
 //                   </div>
 //                   <div>
-//                     <p className="text-xs text-foreground/55">Count</p>
+//                     <p className="text-sm text-foreground/55">Count</p>
 //                     <p className="text-sm font-medium text-foreground">{selectedBubble.count}</p>
 //                   </div>
 //                   <div>
-//                     <p className="text-xs text-foreground/55">Severity</p>
+//                     <p className="text-sm text-foreground/55">Severity</p>
 //                     <p className="text-sm font-medium text-foreground capitalize">{selectedBubble.severity}</p>
 //                   </div>
 //                 </div>
@@ -1275,7 +1295,7 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
 //                 Confidence level on the x-axis, accuracy on the y-axis. This makes overconfidence easier to spot.
 //               </p>
 //             </div>
-//             <div className="flex flex-wrap gap-2 text-xs text-foreground/60">
+//             <div className="flex flex-wrap gap-2 text-sm text-foreground/60">
 //               <span className="inline-flex items-center gap-2">
 //                 <span className="h-2.5 w-2.5 rounded-full bg-primary" />
 //                 Q1
@@ -1367,17 +1387,17 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
 //             {selectedConfidencePoint ? (
 //               <div className="grid gap-2 md:grid-cols-3">
 //                 <div>
-//                   <p className="text-xs uppercase tracking-wide text-foreground/55">Selected confidence</p>
+//                   <p className="text-sm uppercase tracking-wide text-foreground/55">Selected confidence</p>
 //                   <p className="mt-1 text-sm font-semibold text-foreground">Level {selectedConfidencePoint.confidence}</p>
 //                 </div>
 //                 <div>
-//                   <p className="text-xs text-foreground/55">Q1 accuracy</p>
+//                   <p className="text-sm text-foreground/55">Q1 accuracy</p>
 //                   <p className="text-sm font-medium text-foreground">
 //                     {selectedConfidencePoint.q1Accuracy === null ? 'N/A' : `${selectedConfidencePoint.q1Accuracy.toFixed(1)}%`}
 //                   </p>
 //                 </div>
 //                 <div>
-//                   <p className="text-xs text-foreground/55">Q2 + Q3 accuracy</p>
+//                   <p className="text-sm text-foreground/55">Q2 + Q3 accuracy</p>
 //                   <p className="text-sm font-medium text-foreground">
 //                     {selectedConfidencePoint.q23Accuracy === null ? 'N/A' : `${selectedConfidencePoint.q23Accuracy.toFixed(1)}%`}
 //                   </p>
@@ -1392,11 +1412,10 @@ export function AnalysisDashboard({ analysis }: AnalysisDashboardProps) {
 
 //       <details className="mt-6 rounded-xl border border-border/60 bg-secondary/15 p-4">
 //         <summary className="cursor-pointer text-sm font-medium text-primary">Show raw analysis JSON</summary>
-//         <pre className="mt-3 max-h-[420px] overflow-auto whitespace-pre-wrap rounded-lg bg-secondary/30 p-3 text-xs text-foreground/80">
+//         <pre className="mt-3 max-h-[420px] overflow-auto whitespace-pre-wrap rounded-lg bg-secondary/30 p-3 text-sm text-foreground/80">
 //           {JSON.stringify(analysis, null, 2)}
 //         </pre>
 //       </details>
 //     </Card>
 //   )
 // }
-

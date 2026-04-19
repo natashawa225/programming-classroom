@@ -6,11 +6,11 @@ __v0_jsx-dev-runtime.ts
 .v0-trash/
 .vercel/
 next.user-config.*
-
+.env
 # Environment variables
 .env*.local
 
 # Common ignores
 node_modules
 .next/
-.DS_Store
+.DS_Store.env # Make sure .env is in .gitignore
