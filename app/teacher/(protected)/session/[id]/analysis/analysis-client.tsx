@@ -626,12 +626,16 @@ export default function SessionAnalysis() {
   const isTreatmentFinalView = session?.condition === 'treatment' && roundNumber === 2 && canSelectRound2
   const canOpenRevision =
     session?.condition === 'treatment' &&
+    session?.live_phase !== 'session_completed' &&
+    session?.status !== 'closed' &&
     isTreatmentRound1View &&
     analysisStatus === 'completed' &&
     treatmentPhase === 'round1_analysis_ready' &&
     !analysisAvailability.round2Completed
   const canCloseRevision =
     session?.condition === 'treatment' &&
+    session?.live_phase !== 'session_completed' &&
+    session?.status !== 'closed' &&
     isTreatmentRound1View &&
     treatmentPhase === 'revision_open'
   const canGenerateTreatmentRound2 =

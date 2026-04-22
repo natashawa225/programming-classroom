@@ -1,5 +1,13 @@
 export type SessionStatus = 'draft' | 'live' | 'analysis_ready' | 'revision' | 'closed'
+export type SessionLivePhase =
+  | 'not_started'
+  | 'question_initial_open'
+  | 'question_initial_closed'
+  | 'question_revision_open'
+  | 'question_revision_closed'
+  | 'session_completed'
 export type QuestionType = 'main' | 'revision' | 'transfer'
+export type AttemptType = 'initial' | 'revision'
 export type ConfidenceValue = 1 | 2 | 3 | 4 | 5
 
 export interface Participant {
@@ -24,6 +32,10 @@ export interface Session {
   transfer_options: string[] | null
   transfer_correct_answer: string | null
   status: SessionStatus
+  live_phase: SessionLivePhase
+  current_question_position: number
+  current_timer_seconds: number | null
+  timer_started_at: string | null
   created_at: string
 }
 
@@ -53,6 +65,7 @@ export interface Response {
   session_participant_id: string
   question_id: string | null
   question_type: QuestionType
+  attempt_type: AttemptType | null
   round_number: number
   answer: string
   confidence: ConfidenceValue
@@ -74,6 +87,15 @@ export interface AIOutput {
   student_summary: Record<string, unknown> | null
   raw_response: string | null
   created_at: string
+}
+
+export interface LiveQuestionAnalysis {
+  live_question_analysis_id: string
+  session_id: string
+  question_id: string
+  attempt_type: AttemptType
+  analysis_json: Record<string, unknown>
+  generated_at: string
 }
 
 export interface AnalysisRun {

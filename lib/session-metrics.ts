@@ -30,7 +30,10 @@ function clampPercent(value: number) {
 export function inferViewingRound(session?: Session | null, responses: Pick<Response, 'round_number'>[] = []): 1 | 2 {
   if (!session) return 1
   const hasRound2Responses = responses.some((response) => (response.round_number ?? 1) === 2)
-  if (session.condition === 'treatment' && (session.status === 'revision' || hasRound2Responses)) {
+  if (
+    session.condition === 'treatment' &&
+    (session.status === 'revision' || session.live_phase === 'question_revision_open' || session.live_phase === 'question_revision_closed' || hasRound2Responses)
+  ) {
     return 2
   }
   return 1

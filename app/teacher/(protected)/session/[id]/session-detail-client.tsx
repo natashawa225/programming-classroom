@@ -1,480 +1,306 @@
 'use client'
 
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
+import { createClient } from '@/lib/supabase/client'
+import {
+  completeSession,
+  moveToNextQuestion,
+  openQuestionRevision,
+  startCurrentQuestion,
+} from '@/lib/supabase/queries'
+import { teacherLogout } from '@/app/teacher/auth-actions'
+import type {
+  AttemptType,
+  LiveQuestionAnalysis,
+  Response,
+  Session,
+  SessionParticipant,
+  SessionQuestion,
+} from '@/lib/types/database'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import type { Response, Session, SessionParticipant, SessionQuestion } from '@/lib/types/database'
-import { createClient } from '@/lib/supabase/client'
-import { updateSessionStatus } from '@/lib/supabase/queries'
-import { teacherLogout } from '@/app/teacher/auth-actions'
-import { summarizeSessionRoundMetrics } from '@/lib/session-metrics'
+import { Badge } from '@/components/ui/badge'
+import { Input } from '@/components/ui/input'
 
 type Props = {
   initialSession: Session
   initialQuestions: SessionQuestion[]
   initialParticipants: SessionParticipant[]
   initialResponses: Response[]
+  initialLiveQuestionAnalyses: LiveQuestionAnalysis[]
 }
 
-function formatTimestampUtc(isoLike: string) {
-  const date = new Date(isoLike)
-  if (Number.isNaN(date.getTime())) return isoLike
-  return date.toISOString().replace('T', ' ').replace('Z', ' UTC')
+type LiveAnalysisPayload = {
+  version: 'live_question_clusters_v1'
+  question_prompt: string
+  attempt_type: AttemptType
+  total_responses: number
+  cluster_count: number
+  source: 'openai' | 'fallback'
+  clusters: Array<{
+    cluster_id: string
+    label: string
+    summary: string
+    count: number
+    average_confidence: number
+    representative_answers: string[]
+    response_ids: string[]
+  }>
 }
 
-function formatPercent(value: number | null) {
-  if (value === null) return 'N/A'
-  return `${Math.round(value)}%`
-}
-
-function mergeById<T extends Record<string, any>>(
-  items: T[],
-  item: T,
-  idKey: keyof T
-): T[] {
-  const id = item[idKey]
-  if (!id) return items
-  const index = items.findIndex(r => r[idKey] === id)
+function mergeById<T extends Record<string, any>>(items: T[], item: T, idKey: keyof T) {
+  const index = items.findIndex((row) => row[idKey] === item[idKey])
   if (index === -1) return [...items, item]
   const next = items.slice()
-  next[index] = { ...items[index], ...item }
+  next[index] = { ...next[index], ...item }
   return next
 }
 
-const Header = memo(function Header({
-  session,
-  questionCount,
+function mergeByKey<T>(items: T[], item: T, keyOf: (value: T) => string) {
+  const key = keyOf(item)
+  const index = items.findIndex((row) => keyOf(row) === key)
+  if (index === -1) return [...items, item]
+  const next = items.slice()
+  next[index] = item
+  return next
+}
+
+function parseAnalysis(value: LiveQuestionAnalysis | null | undefined): LiveAnalysisPayload | null {
+  const raw = value?.analysis_json
+  if (!raw || typeof raw !== 'object' || !Array.isArray((raw as any).clusters)) return null
+  return raw as unknown as LiveAnalysisPayload
+}
+
+function getPhaseLabel(session: Session) {
+  switch (session.live_phase) {
+    case 'not_started':
+      return 'Not started'
+    case 'question_initial_open':
+      return 'Initial question live'
+    case 'question_initial_closed':
+      return 'Initial question closed'
+    case 'question_revision_open':
+      return 'Revision live'
+    case 'question_revision_closed':
+      return 'Revision closed'
+    case 'session_completed':
+      return 'Session completed'
+    default:
+      return session.live_phase
+  }
+}
+
+function getCurrentAttemptType(session: Session): AttemptType {
+  return session.live_phase === 'question_revision_open' || session.live_phase === 'question_revision_closed'
+    ? 'revision'
+    : 'initial'
+}
+
+function isQuestionOpen(session: Session) {
+  return session.live_phase === 'question_initial_open' || session.live_phase === 'question_revision_open'
+}
+
+function BubbleClusterView({
+  analysis,
+  selectedClusterId,
+  onSelectCluster,
+  title,
 }: {
-  session: Session
-  questionCount: number
+  analysis: LiveAnalysisPayload | null
+  selectedClusterId: string | null
+  onSelectCluster: (clusterId: string) => void
+  title: string
 }) {
-  const subtitle =
-    questionCount > 0
-      ? `${questionCount} question${questionCount === 1 ? '' : 's'} configured`
-      : session.question
+  const selectedCluster =
+    analysis?.clusters.find((cluster) => cluster.cluster_id === selectedClusterId) || analysis?.clusters[0] || null
+
+  if (!analysis || analysis.clusters.length === 0) {
+    return (
+      <Card className="p-6">
+        <p className="font-semibold text-foreground">{title}</p>
+        <p className="mt-2 text-sm text-foreground/60">No cluster result yet.</p>
+      </Card>
+    )
+  }
+
+  const maxCount = Math.max(...analysis.clusters.map((cluster) => cluster.count), 1)
+
   return (
-    <header className="border-b border-border/40 sticky top-0 bg-background/95 backdrop-blur-sm z-10">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-foreground">{session.session_code}</h1>
-          <p className="text-sm text-foreground/60 mt-1">{subtitle}</p>
-        </div>
-        <div className="flex items-center gap-3">
-          <Link href="/teacher/dashboard">
-            <Button variant="outline">Back</Button>
-          </Link>
-          <form action={teacherLogout}>
-            <Button variant="outline" type="submit">Log Out</Button>
-          </form>
-        </div>
-      </div>
-    </header>
-  )
-})
-
-const Overview = memo(function Overview({
-  status,
-  conditionLabel,
-  studentsJoined,
-  studentsResponded,
-  participationRate,
-  totalSubmissions,
-  completionRate,
-}: {
-  status: string
-  conditionLabel: string
-  studentsJoined: number
-  studentsResponded: number
-  participationRate: number | null
-  totalSubmissions: number
-  completionRate: number | null
-}) {
-  const gridClassName = completionRate === null ? 'md:grid-cols-4' : 'md:grid-cols-5'
-
-  return (
-    <div className={`grid gap-4 mb-8 ${gridClassName}`}>
+    <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
       <Card className="p-6">
-        <p className="text-sm text-foreground/60 mb-2">Status</p>
-        <p className="text-2xl font-bold text-primary capitalize">{status}</p>
-      </Card>
-      <Card className="p-6">
-        <p className="text-sm text-foreground/60 mb-2">Condition</p>
-        <p className="text-2xl font-bold text-accent">{conditionLabel}</p>
-      </Card>
-      <Card className="p-6">
-        <p className="text-sm text-foreground/60 mb-2">Students Joined</p>
-        <p className="text-2xl font-bold">{studentsJoined}</p>
-      </Card>
-      <Card className="p-6">
-        <p className="text-sm text-foreground/60 mb-2">Students Responded</p>
-        <p className="text-2xl font-bold">{studentsResponded}</p>
-      </Card>
-      <Card className="p-6">
-        <p className="text-sm text-foreground/60 mb-2">Participation Rate</p>
-        <p className="text-2xl font-bold">{formatPercent(participationRate)}</p>
-      </Card>
-      <Card className="p-6">
-        <p className="text-sm text-foreground/60 mb-2">Total Submissions</p>
-        <p className="text-2xl font-bold">{totalSubmissions}</p>
-      </Card>
-      {completionRate !== null && (
-        <Card className="p-6">
-          <p className="text-sm text-foreground/60 mb-2">Completion Rate</p>
-          <p className="text-2xl font-bold">{formatPercent(completionRate)}</p>
-        </Card>
-      )}
-    </div>
-  )
-})
-
-const Controls = memo(function Controls({
-  sessionId,
-  status,
-  condition,
-  hasRound2Responses,
-  actionLoading,
-  onChangeStatus,
-}: {
-  sessionId: string
-  status: Session['status']
-  condition: Session['condition']
-  hasRound2Responses: boolean
-  actionLoading: boolean
-  onChangeStatus: (next: Session['status']) => void
-}) {
-  const isDraft = status === 'draft'
-  const isLive = status === 'live'
-  const isAnalysisReady = status === 'analysis_ready'
-  const isRevision = status === 'revision'
-  const isClosed = status === 'closed'
-
-  if (isDraft) {
-    return (
-      <Card className="p-6 mb-8">
-        <h2 className="text-lg font-semibold text-foreground mb-4">Session Controls</h2>
-        <Button
-          onClick={() => onChangeStatus('live')}
-          disabled={actionLoading}
-          className="w-full md:w-auto"
-        >
-          {actionLoading ? 'Starting...' : 'Start Session'}
-        </Button>
-      </Card>
-    )
-  }
-
-  if (isLive) {
-    return (
-      <Card className="p-6 mb-8">
-        <h2 className="text-lg font-semibold text-foreground mb-4">Session Controls</h2>
-        <div className="flex flex-col md:flex-row gap-4">
-          <Button disabled variant="secondary" className="flex-1">
-            Session Live
-          </Button>
-          <Button
-            onClick={() => onChangeStatus('analysis_ready')}
-            disabled={actionLoading}
-            variant="outline"
-            className="flex-1"
-          >
-            {actionLoading ? 'Updating...' : 'End Round 1'}
-          </Button>
-          <Button
-            onClick={() => onChangeStatus('closed')}
-            disabled={actionLoading}
-            variant="outline"
-            className="flex-1"
-          >
-            {actionLoading ? 'Closing...' : 'Close'}
-          </Button>
-          <Link href={`/teacher/session/${sessionId}/analysis`} className="flex-1">
-            <Button className="w-full">View AI Analysis</Button>
-          </Link>
-        </div>
-      </Card>
-    )
-  }
-
-  if (isAnalysisReady) {
-    const isRevisionClosed = condition === 'treatment' && hasRound2Responses
-    return (
-      <Card className="p-6 mb-8">
-        <h2 className="text-lg font-semibold text-foreground mb-4">
-          {isRevisionClosed ? 'Revision Closed' : 'Round 1 Closed'}
-        </h2>
-        <div className="flex flex-col md:flex-row gap-4">
-          <Button disabled variant="secondary" className="flex-1">
-            {isRevisionClosed ? 'Ready for Final Analysis' : 'Analysis Ready'}
-          </Button>
-          {condition === 'treatment' && !isRevisionClosed && (
-            <Button
-              onClick={() => onChangeStatus('revision')}
-              disabled={actionLoading}
-              variant="outline"
-              className="flex-1"
-            >
-              {actionLoading ? 'Opening...' : 'Open Revision'}
-            </Button>
-          )}
-          <Button
-            onClick={() => onChangeStatus('closed')}
-            disabled={actionLoading}
-            variant="outline"
-            className="flex-1"
-          >
-            {actionLoading ? 'Closing...' : condition === 'baseline' ? 'End Baseline' : 'Close'}
-          </Button>
-          <Link href={`/teacher/session/${sessionId}/analysis`} className="flex-1">
-            <Button className="w-full">{isRevisionClosed ? 'Generate Final Analysis' : 'Generate Round 1 Analysis'}</Button>
-          </Link>
-        </div>
-      </Card>
-    )
-  }
-
-  if (isRevision) {
-    return (
-      <Card className="p-6 mb-8">
-        <h2 className="text-lg font-semibold text-foreground mb-4">Session Controls</h2>
-        <div className="flex flex-col md:flex-row gap-4">
-          <Button disabled variant="secondary" className="flex-1">
-            Revision Open
-          </Button>
-          <Button
-            onClick={() => onChangeStatus('analysis_ready')}
-            disabled={actionLoading}
-            variant="outline"
-            className="flex-1"
-          >
-            {actionLoading ? 'Updating...' : 'End Revision'}
-          </Button>
-          <Button
-            onClick={() => onChangeStatus('closed')}
-            disabled={actionLoading}
-            variant="outline"
-            className="flex-1"
-          >
-            {actionLoading ? 'Closing...' : 'Close'}
-          </Button>
-          <Link href={`/teacher/session/${sessionId}/analysis`} className="flex-1">
-            <Button className="w-full">View AI Analysis</Button>
-          </Link>
-        </div>
-      </Card>
-    )
-  }
-
-  if (isClosed) {
-    return (
-      <Card className="p-6 mb-8">
-        <h2 className="text-lg font-semibold text-foreground mb-4">Session Closed</h2>
-        <div className="flex flex-col md:flex-row gap-4">
-          <Link href={`/teacher/session/${sessionId}/analysis`} className="flex-1">
-            <Button className="w-full">View AI Analysis</Button>
-          </Link>
-          <Link href={`/teacher/session/${sessionId}/export`} className="flex-1">
-            <Button variant="outline" className="w-full">Export Data</Button>
-          </Link>
-        </div>
-      </Card>
-    )
-  }
-
-  return null
-})
-
-const QuestionSet = memo(function QuestionSet({
-  session,
-  questions,
-}: {
-  session: Session
-  questions: SessionQuestion[]
-}) {
-  const orderedQuestions = questions.slice().sort((a, b) => a.position - b.position)
-  const hasQuestionRows = orderedQuestions.length > 0
-
-  if (!hasQuestionRows) {
-    return (
-      <Card className="p-6 mb-8">
-        <div className="flex items-start justify-between gap-4 mb-4">
+        <div className="flex items-center justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold text-foreground">Question Set</h2>
-            <p className="text-sm text-foreground/60 mt-1">Legacy single-question session</p>
+            <p className="font-semibold text-foreground">{title}</p>
+            <p className="text-sm text-foreground/60">{analysis.cluster_count} clusters</p>
           </div>
-          <div className="text-sm text-foreground/60">1 question</div>
+          <Badge variant="outline">{analysis.source === 'openai' ? 'AI clustered' : 'Fallback clustered'}</Badge>
         </div>
 
-        <div className="rounded-lg border border-border/50 bg-secondary/20 p-4">
-          <p className="text-sm font-medium text-foreground/70 mb-2">Question</p>
-          <p className="text-foreground whitespace-pre-wrap">{session.question}</p>
+        <div className="mt-6 flex flex-wrap gap-4">
+          {analysis.clusters.map((cluster) => {
+            const size = 96 + (cluster.count / maxCount) * 72
+            const opacity = 0.22 + (cluster.average_confidence / 5) * 0.45
+            const isSelected = cluster.cluster_id === (selectedClusterId || analysis.clusters[0]?.cluster_id)
+
+            return (
+              <button
+                key={cluster.cluster_id}
+                type="button"
+                onClick={() => onSelectCluster(cluster.cluster_id)}
+                className={`flex shrink-0 flex-col items-center justify-center rounded-full border text-center transition ${
+                  isSelected ? 'border-primary ring-2 ring-primary/25' : 'border-border/60'
+                }`}
+                style={{
+                  width: `${size}px`,
+                  height: `${size}px`,
+                  backgroundColor: `rgba(59, 130, 246, ${opacity})`,
+                }}
+              >
+                <span className="px-3 text-xs font-semibold text-foreground">{cluster.label}</span>
+                <span className="mt-1 text-lg font-bold text-foreground">{cluster.count}</span>
+                <span className="text-[11px] text-foreground/70">{cluster.average_confidence.toFixed(1)}/5</span>
+              </button>
+            )
+          })}
         </div>
-
-        {session.answer_options.length > 0 && (
-          <div className="mt-4">
-            <p className="text-sm text-foreground/60 mb-2">Answer Options</p>
-            <ul className="space-y-2">
-              {session.answer_options.map((option, idx) => (
-                <li key={idx} className="px-4 py-2 rounded-lg bg-secondary/30 text-foreground">
-                  {option}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {session.correct_answer && (
-          <details className="mt-4 rounded-lg bg-primary/5 p-4">
-            <summary className="cursor-pointer text-sm font-medium text-foreground/70">
-              Teacher reference: correct answer
-            </summary>
-            <p className="mt-3 text-foreground whitespace-pre-wrap">{session.correct_answer}</p>
-          </details>
-        )}
       </Card>
-    )
-  }
 
-  return (
-    <Card className="p-6 mb-8">
-      <div className="flex items-start justify-between gap-4 mb-6">
-        <div>
-          <h2 className="text-lg font-semibold text-foreground">Question Set</h2>
-          <p className="text-sm text-foreground/60 mt-1">
-            Review the full data-collection question set before opening the session.
-          </p>
-        </div>
-        <div className="text-sm text-foreground/60">
-          {orderedQuestions.length} question{orderedQuestions.length === 1 ? '' : 's'}
-        </div>
-      </div>
-
-      <div className="space-y-4">
-        {orderedQuestions.map((question) => (
-          <div key={question.question_id} className="rounded-xl border border-border/50 bg-secondary/20 p-4">
-            <div className="flex items-start justify-between gap-4 mb-3">
-              <div>
-                <p className="text-sm font-semibold text-foreground">Question {question.position}</p>
+      <Card className="p-6">
+        {selectedCluster ? (
+          <>
+            <p className="text-sm text-foreground/60">Selected cluster</p>
+            <h3 className="mt-1 text-xl font-semibold text-foreground">{selectedCluster.label}</h3>
+            <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+              <div className="rounded-lg bg-secondary/25 p-3">
+                <p className="text-foreground/60">Students</p>
+                <p className="mt-1 text-lg font-semibold text-foreground">{selectedCluster.count}</p>
               </div>
-              {typeof question.timer_seconds === 'number' && (
-                <div className="text-sm text-foreground/60">
-                  Timer: {question.timer_seconds}s
-                </div>
-              )}
+              <div className="rounded-lg bg-secondary/25 p-3">
+                <p className="text-foreground/60">Avg confidence</p>
+                <p className="mt-1 text-lg font-semibold text-foreground">
+                  {selectedCluster.average_confidence.toFixed(1)}/5
+                </p>
+              </div>
             </div>
 
-            <p className="text-foreground whitespace-pre-wrap">{question.prompt}</p>
+            <div className="mt-4 rounded-lg bg-secondary/20 p-4">
+              <p className="text-sm font-medium text-foreground">Neutral summary</p>
+              <p className="mt-2 text-sm leading-6 text-foreground/80">{selectedCluster.summary}</p>
+            </div>
 
-            {question.correct_answer && (
-              <details className="mt-4 rounded-lg bg-background/70 p-3">
-                <summary className="cursor-pointer text-sm font-medium text-foreground/70">
-                  Teacher reference
-                </summary>
-                <p className="mt-2 text-sm text-foreground whitespace-pre-wrap">
-                  {question.correct_answer}
-                </p>
-              </details>
-            )}
-          </div>
-        ))}
-      </div>
-    </Card>
+            <div className="mt-4">
+              <p className="text-sm font-medium text-foreground">Representative answers</p>
+              <div className="mt-2 space-y-2">
+                {selectedCluster.representative_answers.map((answer, index) => (
+                  <div key={`${selectedCluster.cluster_id}-${index}`} className="rounded-lg border border-border/60 p-3 text-sm text-foreground/80">
+                    {answer}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-foreground/60">Select a cluster to inspect it.</p>
+        )}
+      </Card>
+    </div>
   )
-})
+}
 
 export default function SessionDetailClient({
   initialSession,
   initialQuestions,
   initialParticipants,
   initialResponses,
+  initialLiveQuestionAnalyses,
 }: Props) {
   const sessionId = initialSession.id
-  const [session, setSession] = useState<Session>(initialSession)
-  const [questions] = useState<SessionQuestion[]>(initialQuestions)
-  const [participants, setParticipants] = useState<SessionParticipant[]>(initialParticipants)
-  const [responses, setResponses] = useState<Response[]>(initialResponses)
+  const [session, setSession] = useState(initialSession)
+  const [participants, setParticipants] = useState(initialParticipants)
+  const [responses, setResponses] = useState(initialResponses)
+  const [liveQuestionAnalyses, setLiveQuestionAnalyses] = useState(initialLiveQuestionAnalyses)
+  const [timerInput, setTimerInput] = useState('')
+  const [secondsRemaining, setSecondsRemaining] = useState<number | null>(null)
+  const [selectedInitialClusterId, setSelectedInitialClusterId] = useState<string | null>(null)
+  const [selectedRevisionClusterId, setSelectedRevisionClusterId] = useState<string | null>(null)
+  const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [actionLoading, setActionLoading] = useState(false)
-  const [recentResponseIds, setRecentResponseIds] = useState<Set<string>>(new Set())
 
+  const questions = useMemo(() => initialQuestions.slice().sort((a, b) => a.position - b.position), [initialQuestions])
   const supabase = useMemo(() => createClient(), [])
-  const recentTimeouts = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
-  const participantsRef = useRef<SessionParticipant[]>(initialParticipants)
 
-  const conditionLabel = session.condition === 'baseline' ? 'Baseline' : 'Treatment'
-  const metrics = useMemo(
-    () =>
-      summarizeSessionRoundMetrics({
-        session,
-        participants,
-        responses,
-        questionCount: questions.length || 1,
-      }),
-    [participants, questions.length, responses, session]
-  )
+  const currentQuestion =
+    questions.find((question) => question.position === session.current_question_position) || questions[0] || null
+  const isLastQuestion = Boolean(currentQuestion && currentQuestion.position === questions.length)
+  const attemptType = getCurrentAttemptType(session)
 
-  useEffect(() => {
-    return () => {
-      recentTimeouts.current.forEach(timeout => clearTimeout(timeout))
-      recentTimeouts.current.clear()
-    }
-  }, [])
+  const currentResponses = useMemo(() => {
+    if (!currentQuestion) return []
+    return responses.filter((response) => {
+      return response.question_id === currentQuestion.question_id && response.attempt_type === attemptType
+    })
+  }, [attemptType, currentQuestion, responses])
 
-  useEffect(() => {
-    participantsRef.current = participants
-  }, [participants])
-
-  useEffect(() => {
-    const channel = supabase.channel(`teacher-session:${sessionId}`)
-
-    channel.on(
-      'postgres_changes',
-      { event: 'INSERT', schema: 'public', table: 'responses', filter: `session_id=eq.${sessionId}` },
-      (payload) => {
-        const inserted = payload.new as Partial<Response> & Record<string, any>
-        const responseId = String(inserted.response_id || '')
-        if (!responseId) return
-
-        const participantId = String(inserted.session_participant_id || '')
-        const label = participantId
-          ? participantsRef.current.find(p => p.session_participant_id === participantId)?.anonymized_label
-          : undefined
-
-        const nextRow = {
-          ...inserted,
-          ...(label
-            ? { session_participants: { session_participant_id: participantId, anonymized_label: label } }
-            : {}),
-        } as Response
-
-        setResponses(prev => mergeById(prev, nextRow, 'response_id'))
-
-        setRecentResponseIds(prev => {
-          const next = new Set(prev)
-          next.add(responseId)
-          return next
-        })
-
-        const timeout = setTimeout(() => {
-          setRecentResponseIds(prev => {
-            const next = new Set(prev)
-            next.delete(responseId)
-            return next
-          })
-          recentTimeouts.current.delete(responseId)
-        }, 1200)
-        recentTimeouts.current.set(responseId, timeout)
-      }
+  const initialAnalysis = useMemo(() => {
+    if (!currentQuestion) return null
+    return parseAnalysis(
+      liveQuestionAnalyses.find((analysis) => {
+        return analysis.question_id === currentQuestion.question_id && analysis.attempt_type === 'initial'
+      }) || null
     )
+  }, [currentQuestion, liveQuestionAnalyses])
+
+  const revisionAnalysis = useMemo(() => {
+    if (!currentQuestion) return null
+    return parseAnalysis(
+      liveQuestionAnalyses.find((analysis) => {
+        return analysis.question_id === currentQuestion.question_id && analysis.attempt_type === 'revision'
+      }) || null
+    )
+  }, [currentQuestion, liveQuestionAnalyses])
+
+  const showSingleInitialCluster =
+    session.live_phase === 'question_initial_closed' ||
+    session.live_phase === 'question_revision_open' ||
+    (session.live_phase === 'session_completed' && (!revisionAnalysis || session.condition === 'baseline'))
+
+  useEffect(() => {
+    setTimerInput(
+      session.current_timer_seconds !== null && session.current_timer_seconds !== undefined
+        ? String(session.current_timer_seconds)
+        : currentQuestion?.timer_seconds
+          ? String(currentQuestion.timer_seconds)
+          : ''
+    )
+  }, [currentQuestion?.question_id, currentQuestion?.timer_seconds, session.current_timer_seconds])
+
+  useEffect(() => {
+    if (!isQuestionOpen(session) || !session.timer_started_at || !session.current_timer_seconds) {
+      setSecondsRemaining(null)
+      return
+    }
+
+    const tick = () => {
+      const elapsed = Math.floor((Date.now() - new Date(session.timer_started_at as string).getTime()) / 1000)
+      const remaining = Math.max(0, session.current_timer_seconds! - elapsed)
+      setSecondsRemaining(remaining)
+    }
+
+    tick()
+    const interval = window.setInterval(tick, 1000)
+    return () => window.clearInterval(interval)
+  }, [session.current_timer_seconds, session.timer_started_at, session.live_phase])
+
+  useEffect(() => {
+    const channel = supabase.channel(`teacher-live-session:${sessionId}`)
 
     channel.on(
       'postgres_changes',
-      { event: 'UPDATE', schema: 'public', table: 'responses', filter: `session_id=eq.${sessionId}` },
+      { event: '*', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` },
       (payload) => {
-        const updated = payload.new as Partial<Response> & Record<string, any>
-        const responseId = String(updated.response_id || '')
-        if (!responseId) return
-        setResponses(prev => mergeById(prev, updated as Response, 'response_id'))
+        const updated = payload.new as Session
+        if (updated?.id) setSession((prev) => ({ ...prev, ...updated }))
       }
     )
 
@@ -482,148 +308,312 @@ export default function SessionDetailClient({
       'postgres_changes',
       { event: 'INSERT', schema: 'public', table: 'session_participants', filter: `session_id=eq.${sessionId}` },
       (payload) => {
-        const inserted = payload.new as Partial<SessionParticipant> & Record<string, any>
-        const participantId = inserted.session_participant_id
-        if (!participantId) return
-        setParticipants(prev => mergeById(prev, inserted as SessionParticipant, 'session_participant_id'))
+        const inserted = payload.new as SessionParticipant
+        if (inserted?.session_participant_id) {
+          setParticipants((prev) => mergeById(prev, inserted, 'session_participant_id'))
+        }
       }
     )
 
     channel.on(
       'postgres_changes',
-      { event: 'UPDATE', schema: 'public', table: 'sessions', filter: `id=eq.${sessionId}` },
+      { event: '*', schema: 'public', table: 'responses', filter: `session_id=eq.${sessionId}` },
       (payload) => {
-        const updated = payload.new as Partial<Session> & Record<string, any>
-        if (!updated || !updated.id) return
-        setSession(prev => ({ ...prev, ...updated }))
+        const next = payload.new as Response
+        if (next?.response_id) {
+          setResponses((prev) => mergeById(prev, next, 'response_id'))
+        }
+      }
+    )
+
+    channel.on(
+      'postgres_changes',
+      { event: '*', schema: 'public', table: 'live_question_analyses', filter: `session_id=eq.${sessionId}` },
+      (payload) => {
+        const next = payload.new as LiveQuestionAnalysis
+        if (next?.live_question_analysis_id) {
+          setLiveQuestionAnalyses((prev) =>
+            mergeByKey(prev, next, (row) => `${row.question_id}:${row.attempt_type}`)
+          )
+        }
       }
     )
 
     channel.subscribe()
-
     return () => {
       void channel.unsubscribe()
       supabase.removeChannel(channel)
     }
-  }, [supabase, sessionId])
+  }, [sessionId, supabase])
 
-  const handleStatusChange = async (newStatus: Session['status']) => {
-    const previousSession = session
+  const runAction = async (label: string, action: () => Promise<void>) => {
     try {
-      setActionLoading(true)
+      setActionLoading(label)
       setError(null)
-      if (newStatus === 'revision') {
-        setSession(prev => (prev ? { ...prev, status: 'revision' } : prev))
-      }
-      const updated = await updateSessionStatus(sessionId, newStatus)
-      setSession(updated)
+      await action()
     } catch (err) {
-      console.error('Error updating session status:', err)
-      if (previousSession) {
-        setSession(previousSession)
-      }
-      setError('Failed to update session status')
+      console.error(err)
+      setError(err instanceof Error ? err.message : 'Action failed.')
     } finally {
-      setActionLoading(false)
+      setActionLoading(null)
     }
   }
 
-  const responsesSorted = useMemo(() => {
-    return [...responses].sort((a, b) => {
-      const at = a.created_at ? new Date(a.created_at).getTime() : 0
-      const bt = b.created_at ? new Date(b.created_at).getTime() : 0
-      if (at !== bt) return at - bt
-      return String(a.response_id).localeCompare(String(b.response_id))
-    })
-  }, [responses])
+  const getTimerValue = () => {
+    const trimmed = timerInput.trim()
+    if (!trimmed) return null
+    return Math.max(0, Math.floor(Number(trimmed) || 0))
+  }
 
-  const hasRound2Responses = useMemo(
-    () => responses.some((response) => (response.round_number ?? 1) === 2),
-    [responses]
-  )
+  const handleAnalyzeAndClose = async (nextAttemptType: AttemptType) => {
+    await runAction(`analyze-${nextAttemptType}`, async () => {
+      const response = await fetch('/api/live-question-analysis', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, attemptType: nextAttemptType }),
+      })
+
+      const payload = await response.json()
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to analyze this question.')
+      }
+
+      setSession((prev) => ({
+        ...prev,
+        live_phase: nextAttemptType === 'revision' ? 'question_revision_closed' : 'question_initial_closed',
+        current_timer_seconds: null,
+        timer_started_at: null,
+      }))
+      if (payload?.saved) {
+        setLiveQuestionAnalyses((prev) =>
+          mergeByKey(prev, payload.saved, (row) => `${row.question_id}:${row.attempt_type}`)
+        )
+      }
+    })
+  }
 
   return (
     <main className="min-h-screen bg-background">
-      <Header session={session} questionCount={questions.length} />
+      <header className="border-b border-border/40 sticky top-0 z-10 bg-background/95 backdrop-blur-sm">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-4 sm:px-6 lg:px-8">
+          <div>
+            <h1 className="text-2xl font-bold text-foreground">{session.session_code}</h1>
+            <p className="mt-1 text-sm text-foreground/60">Live classroom control</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <Link href="/teacher/dashboard">
+              <Button variant="outline">Back</Button>
+            </Link>
+            <form action={teacherLogout}>
+              <Button variant="outline" type="submit">Log Out</Button>
+            </form>
+          </div>
+        </div>
+      </header>
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+      <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
         {error && (
-          <Card className="mb-6 p-4 border-destructive/30 bg-destructive/5">
-            <p className="text-destructive text-sm">{error}</p>
+          <Card className="mb-6 border-destructive/30 bg-destructive/5 p-4">
+            <p className="text-sm text-destructive">{error}</p>
           </Card>
         )}
 
-        <Overview
-          status={session.status}
-          conditionLabel={conditionLabel}
-          studentsJoined={metrics.studentsJoined}
-          studentsResponded={metrics.studentsResponded}
-          participationRate={metrics.participationRate}
-          totalSubmissions={metrics.totalSubmissions}
-          completionRate={metrics.completionRate}
-        />
-
-        <Controls
-          sessionId={sessionId}
-          status={session.status}
-          condition={session.condition}
-          hasRound2Responses={hasRound2Responses}
-          actionLoading={actionLoading}
-          onChangeStatus={handleStatusChange}
-        />
-
-        <QuestionSet session={session} questions={questions} />
-
-        {/* Responses List */}
-        <div className="space-y-4">
-          <h2 className="text-lg font-semibold text-foreground">Student Responses</h2>
-
-          {responsesSorted.length === 0 ? (
-            <Card className="p-6 text-center">
-              <p className="text-foreground/60">No responses yet</p>
-              {session.status === 'draft' && (
-                <p className="text-sm text-foreground/60 mt-2">Start the session to allow students to respond</p>
-              )}
-            </Card>
-          ) : (
-            <div className="grid gap-4">
-              {responsesSorted.map((response, idx) => {
-                const responseId = String(response.response_id)
-                const isRecent = recentResponseIds.has(responseId)
-                return (
-                  <Card
-                    key={responseId}
-                    className={[
-                      'p-6 transition-colors',
-                      isRecent ? 'ring-1 ring-primary/25 bg-primary/5 animate-in fade-in duration-300' : '',
-                    ].join(' ')}
-                  >
-                    <div className="flex items-start justify-between mb-4">
-                      <div>
-                        <p className="font-semibold text-foreground">
-                          {response.session_participants?.anonymized_label || `Participant ${idx + 1}`}
-                        </p>
-                        <p className="text-sm text-foreground/60">
-                          {response.session_questions?.position ? `Q${response.session_questions.position}` : 'Question'} • R{response.round_number}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-sm text-foreground/60">Confidence</p>
-                        <p className="text-lg font-semibold text-accent">{response.confidence}/5</p>
-                      </div>
-                    </div>
-                    <div className="bg-secondary/30 p-3 rounded-lg">
-                      <p className="text-sm text-foreground/60 mb-2">Answer:</p>
-                      <p className="text-foreground">{response.answer}</p>
-                    </div>
-                    <p className="text-sm text-foreground/60 mt-3">
-                      Submitted {formatTimestampUtc(response.created_at)}
-                    </p>
-                  </Card>
-                )
-              })}
+        <div className="grid gap-4 md:grid-cols-5">
+          <Card className="p-5">
+            <p className="text-sm text-foreground/60">Condition</p>
+            <div className="mt-2">
+              <Badge variant="outline" className="capitalize">{session.condition}</Badge>
             </div>
-          )}
+          </Card>
+          <Card className="p-5">
+            <p className="text-sm text-foreground/60">Phase</p>
+            <p className="mt-2 text-lg font-semibold text-foreground">{getPhaseLabel(session)}</p>
+          </Card>
+          <Card className="p-5">
+            <p className="text-sm text-foreground/60">Joined</p>
+            <p className="mt-2 text-3xl font-bold text-foreground">{participants.length}</p>
+          </Card>
+          <Card className="p-5">
+            <p className="text-sm text-foreground/60">
+              {attemptType === 'revision' ? 'Revision submissions' : 'Initial submissions'}
+            </p>
+            <p className="mt-2 text-3xl font-bold text-foreground">{currentResponses.length}</p>
+          </Card>
+          <Card className="p-5">
+            <p className="text-sm text-foreground/60">Timer</p>
+            <p className="mt-2 text-3xl font-bold text-foreground">
+              {secondsRemaining === null ? '—' : `${secondsRemaining}s`}
+            </p>
+          </Card>
+        </div>
+
+        <Card className="mt-6 p-6">
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+            <div className="max-w-4xl">
+              <p className="text-sm font-medium uppercase tracking-wide text-foreground/55">
+                Question {currentQuestion?.position || 1} of {questions.length}
+              </p>
+              <p className="mt-4 text-3xl font-semibold leading-tight text-foreground sm:text-4xl">
+                {currentQuestion?.prompt || 'No question configured.'}
+              </p>
+            </div>
+
+            <div className="w-full max-w-sm space-y-3">
+              <div>
+                <label className="mb-2 block text-sm font-medium text-foreground">Timer for next open state (seconds)</label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={timerInput}
+                  onChange={(event) => setTimerInput(event.target.value)}
+                  placeholder="Optional"
+                />
+              </div>
+
+              {session.live_phase === 'not_started' && (
+                <Button
+                  className="w-full"
+                  disabled={actionLoading !== null}
+                  onClick={() => runAction('start-question', async () => {
+                    const updated = await startCurrentQuestion(sessionId, getTimerValue())
+                    setSession(updated)
+                  })}
+                >
+                  {actionLoading === 'start-question' ? 'Starting...' : 'Start Question'}
+                </Button>
+              )}
+
+              {session.live_phase === 'question_initial_open' && (
+                <Button
+                  className="w-full"
+                  disabled={actionLoading !== null}
+                  onClick={() => void handleAnalyzeAndClose('initial')}
+                >
+                  {actionLoading === 'analyze-initial' ? 'Ending question...' : 'End Question and Cluster'}
+                </Button>
+              )}
+
+              {session.live_phase === 'question_initial_closed' && session.condition === 'treatment' && (
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  disabled={actionLoading !== null}
+                  onClick={() => runAction('open-revision', async () => {
+                    const updated = await openQuestionRevision(sessionId, getTimerValue())
+                    setSession(updated)
+                  })}
+                >
+                  {actionLoading === 'open-revision' ? 'Opening revision...' : 'Open Revision'}
+                </Button>
+              )}
+
+              {session.live_phase === 'question_revision_open' && (
+                <Button
+                  className="w-full"
+                  disabled={actionLoading !== null}
+                  onClick={() => void handleAnalyzeAndClose('revision')}
+                >
+                  {actionLoading === 'analyze-revision' ? 'Ending revision...' : 'End Revision and Cluster'}
+                </Button>
+              )}
+
+              {(session.live_phase === 'question_initial_closed' || session.live_phase === 'question_revision_closed') && !isLastQuestion && (
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  disabled={actionLoading !== null}
+                  onClick={() => runAction('next-question', async () => {
+                    const updated = await moveToNextQuestion(sessionId, getTimerValue())
+                    setSession(updated)
+                  })}
+                >
+                  {actionLoading === 'next-question' ? 'Opening next question...' : 'Next Question'}
+                </Button>
+              )}
+
+              {(session.live_phase === 'question_initial_closed' || session.live_phase === 'question_revision_closed' || session.live_phase === 'session_completed') && (
+                <Button
+                  variant="secondary"
+                  className="w-full"
+                  disabled={actionLoading !== null}
+                  onClick={() => runAction('complete-session', async () => {
+                    const updated = await completeSession(sessionId)
+                    setSession(updated)
+                  })}
+                >
+                  {actionLoading === 'complete-session' ? 'Ending session...' : 'End Session'}
+                </Button>
+              )}
+
+              {session.live_phase === 'session_completed' && (
+                <div className="grid gap-3">
+                  <Link href={`/teacher/session/${sessionId}/analysis`}>
+                    <Button className="w-full">Full Session Analysis</Button>
+                  </Link>
+                  <Link href={`/teacher/session/${sessionId}/export`}>
+                    <Button variant="outline" className="w-full">Export Session Data</Button>
+                  </Link>
+                </div>
+              )}
+            </div>
+          </div>
+        </Card>
+
+        <div className="mt-6 grid gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+          <Card className="p-6">
+            <p className="text-lg font-semibold text-foreground">Current response feed</p>
+            <p className="mt-1 text-sm text-foreground/60">
+              {attemptType === 'revision' ? 'Revision attempts for this question' : 'Initial attempts for this question'}
+            </p>
+            <div className="mt-4 space-y-3">
+              {currentResponses.length === 0 ? (
+                <p className="text-sm text-foreground/60">No submissions yet for this question attempt.</p>
+              ) : (
+                currentResponses
+                  .slice()
+                  .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))
+                  .map((response) => (
+                    <div key={response.response_id} className="rounded-lg border border-border/60 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-medium text-foreground">
+                          {response.session_participants?.anonymized_label || 'Participant'}
+                        </p>
+                        <p className="text-sm text-foreground/60">Confidence {response.confidence}/5</p>
+                      </div>
+                      <p className="mt-2 text-sm leading-6 text-foreground/80">{response.answer}</p>
+                    </div>
+                  ))
+              )}
+            </div>
+          </Card>
+
+          <div className="space-y-6">
+            {showSingleInitialCluster && (
+              <BubbleClusterView
+                analysis={initialAnalysis}
+                selectedClusterId={selectedInitialClusterId}
+                onSelectCluster={setSelectedInitialClusterId}
+                title="Initial clustering"
+              />
+            )}
+
+            {(session.live_phase === 'question_revision_closed' || session.live_phase === 'session_completed') && session.condition === 'treatment' && revisionAnalysis && (
+              <div className="grid gap-6 xl:grid-cols-2">
+                <BubbleClusterView
+                  analysis={initialAnalysis}
+                  selectedClusterId={selectedInitialClusterId}
+                  onSelectCluster={setSelectedInitialClusterId}
+                  title="Initial clustering"
+                />
+                <BubbleClusterView
+                  analysis={revisionAnalysis}
+                  selectedClusterId={selectedRevisionClusterId}
+                  onSelectCluster={setSelectedRevisionClusterId}
+                  title="Revision clustering"
+                />
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </main>

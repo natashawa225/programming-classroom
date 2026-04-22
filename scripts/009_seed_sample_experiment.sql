@@ -15,8 +15,8 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- Baseline session
-INSERT INTO public.sessions (session_code, condition, question, answer_options, correct_answer, status)
-VALUES ('BASELINE-DEMO', 'baseline', 'Demo session (baseline)', '[]'::jsonb, 'N/A', 'live')
+INSERT INTO public.sessions (session_code, condition, question, answer_options, correct_answer, status, live_phase, current_question_position)
+VALUES ('BASELINE-DEMO', 'baseline', 'Demo session (baseline)', '[]'::jsonb, 'N/A', 'closed', 'session_completed', 4)
 ON CONFLICT (session_code) DO UPDATE SET condition=EXCLUDED.condition
 RETURNING id
 \gset
@@ -31,8 +31,8 @@ VALUES
 ON CONFLICT (session_id, position) DO NOTHING;
 
 -- Treatment session
-INSERT INTO public.sessions (session_code, condition, question, answer_options, correct_answer, status)
-VALUES ('TREATMENT-DEMO', 'treatment', 'Demo session (treatment)', '[]'::jsonb, 'N/A', 'live')
+INSERT INTO public.sessions (session_code, condition, question, answer_options, correct_answer, status, live_phase, current_question_position)
+VALUES ('TREATMENT-DEMO', 'treatment', 'Demo session (treatment)', '[]'::jsonb, 'N/A', 'closed', 'session_completed', 4)
 ON CONFLICT (session_code) DO UPDATE SET condition=EXCLUDED.condition
 RETURNING id
 \gset id2
@@ -72,12 +72,13 @@ ON CONFLICT (session_id, participant_id) DO NOTHING;
 
 -- Round 1 responses (union-find misconception patterns)
 -- Q1: transitivity; common wrong: "only direct"
-INSERT INTO public.responses (session_id, session_participant_id, question_id, question_type, round_number, answer, confidence)
+INSERT INTO public.responses (session_id, session_participant_id, question_id, question_type, attempt_type, round_number, answer, confidence)
 SELECT
   s.id,
   sp.session_participant_id,
   q.question_id,
   'main',
+  'initial',
   1,
   CASE
     WHEN (substring(sp.participant_id from 2)::int % 4) = 0 THEN 'A and C are connected only if there is a direct edge between them.'
@@ -93,12 +94,13 @@ WHERE s.session_code IN ('BASELINE-DEMO','TREATMENT-DEMO')
 ON CONFLICT DO NOTHING;
 
 -- Q2: QuickFind id[] meaning; common wrong: parent pointers / tree
-INSERT INTO public.responses (session_id, session_participant_id, question_id, question_type, round_number, answer, confidence)
+INSERT INTO public.responses (session_id, session_participant_id, question_id, question_type, attempt_type, round_number, answer, confidence)
 SELECT
   s.id,
   sp.session_participant_id,
   q.question_id,
   'main',
+  'initial',
   1,
   CASE
     WHEN (substring(sp.participant_id from 2)::int % 4) = 0 THEN 'id[i] stores the parent pointer to build a tree; union just links p to q.'
@@ -114,12 +116,13 @@ WHERE s.session_code IN ('BASELINE-DEMO','TREATMENT-DEMO')
 ON CONFLICT DO NOTHING;
 
 -- Q3: QuickUnion root + union behavior; common wrong: link p to q only
-INSERT INTO public.responses (session_id, session_participant_id, question_id, question_type, round_number, answer, confidence)
+INSERT INTO public.responses (session_id, session_participant_id, question_id, question_type, attempt_type, round_number, answer, confidence)
 SELECT
   s.id,
   sp.session_participant_id,
   q.question_id,
   'main',
+  'initial',
   1,
   CASE
     WHEN (substring(sp.participant_id from 2)::int % 3) = 0 THEN 'Root is the last item added. union connects p directly to q.'
@@ -134,12 +137,13 @@ WHERE s.session_code IN ('BASELINE-DEMO','TREATMENT-DEMO')
 ON CONFLICT DO NOTHING;
 
 -- Q4: Weighted QuickUnion; common wrong: same as path compression / no effect
-INSERT INTO public.responses (session_id, session_participant_id, question_id, question_type, round_number, answer, confidence)
+INSERT INTO public.responses (session_id, session_participant_id, question_id, question_type, attempt_type, round_number, answer, confidence)
 SELECT
   s.id,
   sp.session_participant_id,
   q.question_id,
   'main',
+  'initial',
   1,
   CASE
     WHEN (substring(sp.participant_id from 2)::int % 4) = 0 THEN 'Weighting is the same as path compression.'
@@ -155,11 +159,12 @@ WHERE s.session_code IN ('BASELINE-DEMO','TREATMENT-DEMO')
 ON CONFLICT DO NOTHING;
 
 -- Round 2 revision for treatment: participants 1-15 revise Q2 and Q3 (some improve)
-INSERT INTO public.responses (session_id, session_participant_id, question_id, question_type, round_number, answer, confidence, original_response_id)
+INSERT INTO public.responses (session_id, session_participant_id, question_id, question_type, attempt_type, round_number, answer, confidence, original_response_id)
 SELECT
   s.id,
   sp.session_participant_id,
   q.question_id,
+  'revision',
   'revision',
   2,
   CASE
@@ -180,11 +185,12 @@ WHERE s.session_code = 'TREATMENT-DEMO'
   AND substring(sp.participant_id from 2)::int BETWEEN 101 AND 115
 ON CONFLICT DO NOTHING;
 
-INSERT INTO public.responses (session_id, session_participant_id, question_id, question_type, round_number, answer, confidence, original_response_id)
+INSERT INTO public.responses (session_id, session_participant_id, question_id, question_type, attempt_type, round_number, answer, confidence, original_response_id)
 SELECT
   s.id,
   sp.session_participant_id,
   q.question_id,
+  'revision',
   'revision',
   2,
   CASE

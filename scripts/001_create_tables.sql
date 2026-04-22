@@ -24,6 +24,19 @@ CREATE TABLE IF NOT EXISTS sessions (
   transfer_options JSONB,
   transfer_correct_answer TEXT,
   status TEXT DEFAULT 'draft' CHECK (status IN ('draft', 'live', 'analysis_ready', 'revision', 'closed')),
+  live_phase TEXT NOT NULL DEFAULT 'not_started' CHECK (
+    live_phase IN (
+      'not_started',
+      'question_initial_open',
+      'question_initial_closed',
+      'question_revision_open',
+      'question_revision_closed',
+      'session_completed'
+    )
+  ),
+  current_question_position INT NOT NULL DEFAULT 1,
+  current_timer_seconds INT,
+  timer_started_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -74,6 +87,7 @@ CREATE TABLE IF NOT EXISTS responses (
   session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
   question_id UUID REFERENCES session_questions(question_id) ON DELETE CASCADE,
   question_type TEXT NOT NULL CHECK (question_type IN ('main', 'revision', 'transfer')),
+  attempt_type TEXT NOT NULL DEFAULT 'initial' CHECK (attempt_type IN ('initial', 'revision')),
   round_number INT NOT NULL DEFAULT 1,
   answer TEXT NOT NULL,
   confidence INT NOT NULL CHECK (confidence BETWEEN 1 AND 5),
@@ -97,6 +111,16 @@ CREATE TABLE IF NOT EXISTS ai_outputs (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS live_question_analyses (
+  live_question_analysis_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
+  question_id UUID REFERENCES session_questions(question_id) ON DELETE CASCADE,
+  attempt_type TEXT NOT NULL CHECK (attempt_type IN ('initial', 'revision')),
+  analysis_json JSONB NOT NULL,
+  generated_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(session_id, question_id, attempt_type)
+);
+
 -- Teacher action log (for research analysis)
 CREATE TABLE IF NOT EXISTS teacher_actions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -109,7 +133,9 @@ CREATE TABLE IF NOT EXISTS teacher_actions (
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_responses_session ON responses(session_id);
 CREATE INDEX IF NOT EXISTS idx_responses_participant ON responses(session_participant_id);
+CREATE INDEX IF NOT EXISTS idx_responses_session_question_attempt ON responses(session_id, question_id, attempt_type);
 CREATE INDEX IF NOT EXISTS idx_ai_outputs_session ON ai_outputs(session_id);
+CREATE INDEX IF NOT EXISTS idx_live_question_analyses_session ON live_question_analyses(session_id, generated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_code ON sessions(session_code);
 CREATE INDEX IF NOT EXISTS idx_teacher_actions_session ON teacher_actions(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_participants_session ON session_participants(session_id);

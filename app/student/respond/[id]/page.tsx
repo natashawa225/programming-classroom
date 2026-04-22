@@ -1,218 +1,114 @@
 'use client'
 
-import { useMemo, useRef, useState, useEffect } from 'react'
-import { useParams, useRouter, useSearchParams } from 'next/navigation'
+import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
-import { Button } from '@/components/ui/button'
+import { useParams, useRouter } from 'next/navigation'
 import { Card } from '@/components/ui/card'
-import { getSession, getSessionParticipantForStudent, getSessionQuestions, getStudentResponse, getRevisionPrefillResponse, submitStudentResponse } from '@/lib/supabase/queries'
-import type { Session, SessionQuestion } from '@/lib/types/database'
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
+import { Badge } from '@/components/ui/badge'
+import {
+  getRevisionPrefillResponse,
+  getSession,
+  getSessionParticipantForStudent,
+  getSessionQuestions,
+  getStudentResponse,
+  submitStudentResponse,
+} from '@/lib/supabase/queries'
+import type { AttemptType, Session, SessionQuestion } from '@/lib/types/database'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
 
-export default function StudentRespond() {
+function getAttemptType(session: Session): AttemptType | null {
+  if (session.live_phase === 'question_initial_open' || session.live_phase === 'question_initial_closed') {
+    return 'initial'
+  }
+  if (session.live_phase === 'question_revision_open' || session.live_phase === 'question_revision_closed') {
+    return 'revision'
+  }
+  return null
+}
+
+function getStateCopy(session: Session | null, attemptType: AttemptType | null, submitted: boolean) {
+  if (!session) return { title: 'Loading...', body: '' }
+  if (session.live_phase === 'session_completed' || session.status === 'closed') {
+    return { title: 'Session ended', body: 'Your class session has ended.' }
+  }
+  if (session.live_phase === 'not_started') {
+    return { title: 'Waiting for question', body: 'Your teacher has not opened the first question yet.' }
+  }
+  if (submitted) {
+    return { title: 'Answer submitted', body: attemptType === 'revision' ? 'Your revision has been saved.' : 'Your answer has been saved.' }
+  }
+  if (session.live_phase === 'question_initial_closed') {
+    return { title: 'Waiting for next step', body: 'The question is closed. Wait for your teacher to open the next step.' }
+  }
+  if (session.live_phase === 'question_revision_closed') {
+    return { title: 'Waiting for next question', body: 'Revision is closed. Wait for your teacher to move on.' }
+  }
+  if (session.live_phase === 'question_revision_open') {
+    return { title: 'Revision open', body: 'You may revise your answer for this question now.' }
+  }
+  return { title: 'Question open', body: 'Enter your answer and choose your confidence.' }
+}
+
+export default function StudentRespondPage() {
   const params = useParams()
   const router = useRouter()
-  const searchParams = useSearchParams()
   const sessionId = params.id as string
 
   const [session, setSession] = useState<Session | null>(null)
-  const [anonymizedLabel, setAnonymizedLabel] = useState<string | null>(null)
   const [questions, setQuestions] = useState<SessionQuestion[]>([])
-  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
+  const [anonymizedLabel, setAnonymizedLabel] = useState<string | null>(null)
   const [answer, setAnswer] = useState('')
-  const [confidence, setConfidence] = useState(3)
+  const [confidence, setConfidence] = useState<number | null>(null)
+  const [submitted, setSubmitted] = useState(false)
   const [loading, setLoading] = useState(true)
   const [submitting, setSubmitting] = useState(false)
-  const [submittedServer, setSubmittedServer] = useState(false)
-  const localSubmittedKeysRef = useRef<Set<string>>(new Set())
   const [error, setError] = useState<string | null>(null)
-  const [feedback, setFeedback] = useState<string | null>(null)
-  const [startTimeMs, setStartTimeMs] = useState<number>(() => Date.now())
-  const [nowMs, setNowMs] = useState<number>(() => Date.now())
-  const previousRoundRef = useRef<1 | 2 | null>(null)
-  const [revisionPrefillNote, setRevisionPrefillNote] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+  const [startTimeMs, setStartTimeMs] = useState<number>(Date.now())
+  const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null)
+
+  const currentQuestion = useMemo(() => {
+    if (!session) return null
+    return questions.find((question) => question.position === session.current_question_position) || questions[0] || null
+  }, [questions, session])
+
+  const attemptType = session ? getAttemptType(session) : null
+  const canEdit =
+    session?.live_phase === 'question_initial_open' || session?.live_phase === 'question_revision_open'
+  const realtimeTables = useMemo(
+    () => [{ table: 'sessions', event: 'UPDATE' as const, filter: `id=eq.${sessionId}` }],
+    [sessionId]
+  )
 
   useEffect(() => {
-    const loadSession = async () => {
+    const load = async () => {
       try {
         const [sessionData, participation, sessionQuestions] = await Promise.all([
           getSession(sessionId),
           getSessionParticipantForStudent(sessionId),
           getSessionQuestions(sessionId),
         ])
-        setSession(sessionData)
-        setQuestions(sessionQuestions || [])
+
         if (!participation) {
-          router.push('/student/join')
+          router.replace('/student/join')
           return
         }
+
+        setSession(sessionData)
+        setQuestions(sessionQuestions || [])
         setAnonymizedLabel(participation.anonymized_label)
       } catch (err) {
-        console.error('Error loading session:', err)
-        setError('Failed to load session')
+        console.error(err)
+        setError('Failed to load this session.')
       } finally {
         setLoading(false)
       }
     }
 
-    loadSession()
-  }, [sessionId, router])
-
-  // Keep URL query param (?q=1..N) and internal index in sync.
-  useEffect(() => {
-    if (!questions || questions.length === 0) return
-    const q = searchParams.get('q')
-    const parsed = q ? Number(q) : NaN
-    if (!Number.isFinite(parsed) || parsed < 1) {
-      setCurrentQuestionIndex(0)
-      return
-    }
-    const idx = Math.max(0, Math.min(questions.length - 1, Math.floor(parsed) - 1))
-    setCurrentQuestionIndex(idx)
-  }, [searchParams, questions])
-
-  const roundNumber = session?.status === 'revision' ? 2 : 1
-  const canEdit =
-    session?.status === 'live' ||
-    session?.status === 'revision'
-
-  const currentQuestion = questions[currentQuestionIndex] || null
-  const submissionKey = currentQuestion ? `${currentQuestion.question_id}:${roundNumber}` : ''
-  const hasSubmittedLocal = submissionKey ? localSubmittedKeysRef.current.has(submissionKey) : false
-  const submitted = hasSubmittedLocal || submittedServer
-  const timerSeconds = currentQuestion?.timer_seconds ?? null
-  const elapsedSeconds = Math.max(0, Math.floor((nowMs - startTimeMs) / 1000))
-  const remainingSeconds = timerSeconds ? Math.max(0, timerSeconds - elapsedSeconds) : null
-  const timerExpired = timerSeconds ? remainingSeconds === 0 : false
-
-  useEffect(() => {
-    const previousRound = previousRoundRef.current
-    if (previousRound === null) {
-      previousRoundRef.current = roundNumber
-      return
-    }
-
-    if (previousRound !== roundNumber) {
-      previousRoundRef.current = roundNumber
-      setCurrentQuestionIndex(0)
-      setSubmittedServer(false)
-      setError(null)
-      setFeedback(roundNumber === 2 ? 'Revision round is open. Start again from Question 1.' : null)
-      router.replace(`/student/respond/${sessionId}?q=1`)
-    }
-  }, [roundNumber, router, sessionId])
-
-  useEffect(() => {
-    if (!timerSeconds || submitted || !canEdit) return
-    const t = setInterval(() => setNowMs(Date.now()), 1000)
-    return () => clearInterval(t)
-  }, [timerSeconds, submitted, canEdit, currentQuestion?.question_id])
-
-  // Load existing response state for the current question/round.
-  useEffect(() => {
-    let cancelled = false
-    const loadExisting = async () => {
-      if (!session || !currentQuestion) return
-
-      setError(null)
-      setFeedback(null)
-      setRevisionPrefillNote(null)
-      setSubmitting(false)
-      if (submissionKey && !localSubmittedKeysRef.current.has(submissionKey)) {
-        setSubmittedServer(false)
-      }
-
-      // Reset timer for this question view.
-      setStartTimeMs(Date.now())
-      setNowMs(Date.now())
-
-      try {
-        // If we already submitted locally for this question/round, keep UI locked even if server
-        // reads are momentarily stale (prevents flicker after submit).
-        if (submissionKey && localSubmittedKeysRef.current.has(submissionKey)) {
-          setSubmittedServer(true)
-          setFeedback('Submitted. Editing is locked for this question in this round.')
-          return
-        }
-
-        const currentRoundResponse =
-          roundNumber === 2
-            ? null
-            : await getStudentResponse(sessionId, {
-                questionId: currentQuestion.question_id,
-                roundNumber,
-              })
-
-        const revisionPrefill =
-          roundNumber === 2
-            ? await getRevisionPrefillResponse(sessionId, {
-                questionId: currentQuestion.question_id,
-              })
-            : null
-
-        if (cancelled) return
-
-        if (currentRoundResponse) {
-          console.info(
-            `[student:prefill-ui] session_id=${sessionId} question_id=${currentQuestion.question_id} round=${roundNumber} source=current-round submitted=true`
-          )
-          setSubmittedServer(true)
-          setAnswer(currentRoundResponse.answer)
-          setConfidence(currentRoundResponse.confidence)
-          setFeedback('Submitted. Editing is locked for this question in this round.')
-          if (roundNumber === 2) {
-            setRevisionPrefillNote('Your saved revision answer is shown below.')
-          }
-          return
-        }
-
-        setSubmittedServer(false)
-
-        if (roundNumber === 2) {
-          if (revisionPrefill?.round2Response) {
-            console.info(
-              `[student:prefill-ui] session_id=${sessionId} question_id=${currentQuestion.question_id} round=2 source=round2 submitted=true`
-            )
-            setSubmittedServer(true)
-            setAnswer(revisionPrefill.round2Response.answer)
-            setConfidence(revisionPrefill.round2Response.confidence)
-            setFeedback('Submitted. Editing is locked for this question in this round.')
-            setRevisionPrefillNote('Your saved revision answer is shown below.')
-          } else if (revisionPrefill?.round1Response) {
-            console.info(
-              `[student:prefill-ui] session_id=${sessionId} question_id=${currentQuestion.question_id} round=2 source=round1 submitted=false`
-            )
-            setAnswer(revisionPrefill.round1Response.answer)
-            setConfidence(revisionPrefill.round1Response.confidence)
-            setRevisionPrefillNote('Your previous round 1 answer has been loaded below for editing.')
-          } else {
-            console.info(
-              `[student:prefill-ui] session_id=${sessionId} question_id=${currentQuestion.question_id} round=2 source=blank submitted=false`
-            )
-            setAnswer('')
-            setConfidence(3)
-            setRevisionPrefillNote('No previous answer was found for this question, so you can answer from scratch.')
-          }
-        } else {
-          setAnswer('')
-          setConfidence(3)
-        }
-      } catch (err) {
-        console.error('Error loading existing response:', err)
-        setError('Failed to load your response state')
-      }
-    }
-
-    void loadExisting()
-    return () => {
-      cancelled = true
-    }
-  }, [sessionId, session?.id, currentQuestion?.question_id, roundNumber, submissionKey])
-
-  const realtimeTables = useMemo(
-    () => [{ table: 'sessions', event: 'UPDATE' as const, filter: `id=eq.${sessionId}` }],
-    [sessionId]
-  )
+    void load()
+  }, [router, sessionId])
 
   usePostgresChanges({
     tables: realtimeTables,
@@ -221,42 +117,133 @@ export default function StudentRespond() {
         const updated = await getSession(sessionId)
         setSession(updated)
       } catch (err) {
-        console.error('Error refreshing session status:', err)
+        console.error(err)
       }
     },
     pollMs: 2000,
-    debugLabel: `student-session-${sessionId}`,
+    debugLabel: `student-live-${sessionId}`,
   })
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!session || !currentQuestion) return
-    if (submitted) return
+  useEffect(() => {
+    let cancelled = false
+
+    const loadCurrentState = async () => {
+      if (!session || !currentQuestion) return
+
+      setError(null)
+      setNote(null)
+      setSubmitted(false)
+      setStartTimeMs(Date.now())
+
+      const currentAttemptType = getAttemptType(session)
+      if (!currentAttemptType) {
+        setAnswer('')
+        setConfidence(null)
+        return
+      }
+
+      try {
+        if (currentAttemptType === 'revision') {
+          const prefill = await getRevisionPrefillResponse(sessionId, { questionId: currentQuestion.question_id })
+          if (cancelled) return
+
+          if (prefill.round2Response) {
+            setAnswer(prefill.round2Response.answer)
+            setConfidence(prefill.round2Response.confidence)
+            setSubmitted(true)
+            setNote('Answer submitted')
+            return
+          }
+
+          if (prefill.round1Response) {
+            setAnswer(prefill.round1Response.answer)
+            setConfidence(prefill.round1Response.confidence)
+            setNote('Your original answer has been loaded for revision.')
+            return
+          }
+
+          setAnswer('')
+          setConfidence(null)
+          setNote('No earlier answer was found, so you can answer from scratch.')
+          return
+        }
+
+        const existing = await getStudentResponse(sessionId, {
+          questionId: currentQuestion.question_id,
+          attemptType: currentAttemptType,
+        })
+
+        if (cancelled) return
+
+        if (existing) {
+          setAnswer(existing.answer)
+          setConfidence(existing.confidence)
+          setSubmitted(true)
+          setNote('Answer submitted')
+          return
+        }
+
+        setAnswer('')
+        setConfidence(null)
+      } catch (err) {
+        console.error(err)
+        if (!cancelled) setError('Failed to load your saved answer.')
+      }
+    }
+
+    void loadCurrentState()
+    return () => {
+      cancelled = true
+    }
+  }, [currentQuestion?.question_id, session, sessionId])
+
+  useEffect(() => {
+    if (!session?.timer_started_at || !session.current_timer_seconds || !canEdit || submitted) {
+      setRemainingSeconds(null)
+      return
+    }
+
+    const tick = () => {
+      const elapsed = Math.floor((Date.now() - new Date(session.timer_started_at as string).getTime()) / 1000)
+      setRemainingSeconds(Math.max(0, session.current_timer_seconds! - elapsed))
+    }
+
+    tick()
+    const interval = window.setInterval(tick, 1000)
+    return () => window.clearInterval(interval)
+  }, [canEdit, session?.current_timer_seconds, session?.timer_started_at, submitted])
+
+  const stateCopy = getStateCopy(session, attemptType, submitted)
+
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!session || !currentQuestion || !attemptType || submitted || !canEdit) return
+
+    if (!answer.trim()) {
+      setError('Please enter an answer before submitting.')
+      return
+    }
+    if (confidence === null) {
+      setError('Please choose a confidence score before submitting.')
+      return
+    }
 
     try {
       setSubmitting(true)
       setError(null)
 
-      const timeTakenSeconds = Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000))
-
       await submitStudentResponse(sessionId, {
         questionId: currentQuestion.question_id,
         answerText: answer,
         confidence,
-        roundNumber,
-        questionType: roundNumber === 2 ? 'revision' : 'main',
-        timeTakenSeconds,
+        timeTakenSeconds: Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000)),
       })
 
-      if (submissionKey) {
-        localSubmittedKeysRef.current.add(submissionKey)
-      }
-      setSubmittedServer(true)
-
-      setFeedback('Submitted. Editing is locked for this question in this round.')
+      setSubmitted(true)
+      setNote('Answer submitted')
     } catch (err) {
-      console.error('Error submitting response:', err)
-      setError(err instanceof Error ? err.message : 'Failed to submit response. Please try again.')
+      console.error(err)
+      setError(err instanceof Error ? err.message : 'Failed to submit your answer.')
     } finally {
       setSubmitting(false)
     }
@@ -264,199 +251,109 @@ export default function StudentRespond() {
 
   if (loading) {
     return (
-      <main className="min-h-screen bg-background flex items-center justify-center">
+      <main className="flex min-h-screen items-center justify-center bg-background">
         <p className="text-foreground/60">Loading session...</p>
-      </main>
-    )
-  }
-
-  if (!session) {
-    return (
-      <main className="min-h-screen bg-background">
-        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-          <Card className="p-6 text-center">
-            <p className="text-destructive mb-4">Session not found</p>
-            <Link href="/student/sessions">
-              <Button variant="outline">Back to Sessions</Button>
-            </Link>
-          </Card>
-        </div>
       </main>
     )
   }
 
   return (
     <main className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="border-b border-border/40 sticky top-0 bg-background/95 backdrop-blur-sm z-10">
-          <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
+      <div className="mx-auto max-w-3xl px-4 py-10">
+        <div className="mb-8 flex items-center justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-bold text-foreground">{session.session_code}</h1>
-            <p className="text-sm text-foreground/60 mt-1">
-              Status: <span className="capitalize">{session.status}</span>
-              {anonymizedLabel ? ` • You are: ${anonymizedLabel}` : ''}
-            </p>
-            {remainingSeconds !== null && (
-              <p className="text-sm text-foreground/60 mt-1">
-                Time remaining: {remainingSeconds}s
+            <h1 className="text-3xl font-bold text-foreground">Student View</h1>
+            <p className="mt-1 text-sm text-foreground/60">Session {session?.session_code}</p>
+          </div>
+          {anonymizedLabel && <Badge variant="outline">{anonymizedLabel}</Badge>}
+        </div>
+
+        <Card className="p-6">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium uppercase tracking-wide text-foreground/55">
+                {currentQuestion ? `Question ${currentQuestion.position} of ${questions.length}` : 'Session status'}
               </p>
+              <h2 className="mt-2 text-2xl font-semibold text-foreground">{stateCopy.title}</h2>
+              <p className="mt-2 text-sm text-foreground/65">{stateCopy.body}</p>
+            </div>
+            {remainingSeconds !== null && (
+              <div className="rounded-lg bg-secondary/25 px-4 py-3 text-center">
+                <p className="text-xs uppercase tracking-wide text-foreground/55">Timer</p>
+                <p className="mt-1 text-2xl font-bold text-foreground">{remainingSeconds}s</p>
+              </div>
             )}
           </div>
-          <Link href="/student/sessions">
-            <Button variant="outline">Back</Button>
+
+          {currentQuestion && (
+            <div className="mt-6 rounded-xl bg-secondary/20 p-5">
+              <p className="whitespace-pre-wrap text-lg leading-8 text-foreground">{currentQuestion.prompt}</p>
+            </div>
+          )}
+
+          {note && (
+            <div className="mt-4 rounded-lg border border-border/60 bg-secondary/15 px-4 py-3 text-sm text-foreground/75">
+              {note}
+            </div>
+          )}
+
+          {error && (
+            <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+              {error}
+            </div>
+          )}
+
+          {canEdit && currentQuestion && !submitted && (
+            <form className="mt-6 space-y-6" onSubmit={handleSubmit}>
+              <div>
+                <label className="mb-2 block text-sm font-medium text-foreground">Your answer</label>
+                <Textarea
+                  value={answer}
+                  onChange={(event) => setAnswer(event.target.value)}
+                  rows={7}
+                  placeholder="Type your answer here"
+                />
+              </div>
+
+              <div>
+                <p className="mb-3 text-sm font-medium text-foreground">Confidence</p>
+                <div className="grid grid-cols-5 gap-2">
+                  {[1, 2, 3, 4, 5].map((value) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => setConfidence(value)}
+                      className={`rounded-lg border px-3 py-3 text-sm font-medium transition ${
+                        confidence === value
+                          ? 'border-primary bg-primary text-primary-foreground'
+                          : 'border-border bg-background text-foreground'
+                      }`}
+                    >
+                      {value}
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs text-foreground/55">Choose one score from 1 to 5. No default is selected.</p>
+              </div>
+
+              <Button type="submit" disabled={submitting}>
+                {submitting ? 'Submitting...' : attemptType === 'revision' ? 'Submit Revision' : 'Submit Answer'}
+              </Button>
+            </form>
+          )}
+
+          {!canEdit && session?.live_phase !== 'session_completed' && (
+            <div className="mt-6 text-sm text-foreground/60">
+              Keep this page open. It will update when your teacher opens the next step.
+            </div>
+          )}
+        </Card>
+
+        <div className="mt-6 text-center">
+          <Link href="/student/join" className="text-sm text-foreground/60 transition hover:text-foreground">
+            Back to join page
           </Link>
         </div>
-      </header>
-
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        {error && (
-          <Card className="mb-6 p-4 border-destructive/30 bg-destructive/5">
-            <p className="text-destructive text-sm">{error}</p>
-          </Card>
-        )}
-
-        {(!canEdit || session.status === 'analysis_ready' || timerExpired) && (
-          <Card className="mb-6 p-4 border-border/40 bg-secondary/20">
-            <p className="text-sm text-foreground/70">
-              {session.status === 'draft'
-                ? 'Waiting for your instructor to start the session.'
-                : session.status === 'analysis_ready'
-                  ? 'Round 1 is closed while your instructor reviews and generates analysis.'
-                  : session.status === 'revision'
-                    ? 'Revision is open.'
-                    : timerExpired
-                      ? 'Time is up for this question.'
-                      : 'This session is closed.'}
-            </p>
-          </Card>
-        )}
-
-        {roundNumber === 2 && revisionPrefillNote && !submitted && (
-          <Card className="mb-6 p-4 border-primary/20 bg-primary/5">
-            <p className="text-sm text-foreground/80">
-              <span className="font-medium">Revision Round.</span> {revisionPrefillNote}
-            </p>
-          </Card>
-        )}
-
-        {!currentQuestion ? (
-          <Card className="p-8 text-center">
-            <p className="text-foreground/70">No questions found for this session.</p>
-          </Card>
-        ) : !submitted ? (
-          <form onSubmit={handleSubmit} className="space-y-6">
-            {/* Question */}
-            <Card className="p-8">
-              <h2 className="text-2xl font-bold text-foreground mb-6">
-                Question {currentQuestion.position} of {questions.length} {roundNumber === 2 ? '(Revision)' : ''}
-              </h2>
-              <div className="text-lg text-foreground leading-relaxed">
-                {currentQuestion.prompt}
-              </div>
-            </Card>
-
-            {/* Answer Input */}
-            <Card className="p-8">
-              <label htmlFor="answer" className="block text-lg font-semibold text-foreground mb-4">
-                Your Answer
-              </label>
-              <textarea
-                id="answer"
-                value={answer}
-                onChange={(e) => setAnswer(e.target.value)}
-                placeholder="Type your answer here..."
-                rows={6}
-                className="w-full px-4 py-3 rounded-lg border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                disabled={submitting}
-                required
-              />
-            </Card>
-
-            {/* Confidence Slider */}
-            <Card className="p-8">
-              <label htmlFor="confidence" className="block text-lg font-semibold text-foreground mb-6">
-                How confident are you in your answer?
-              </label>
-              <div className="space-y-4">
-                <input
-                  id="confidence"
-                  type="range"
-                  min="1"
-                  max="5"
-                  value={confidence}
-                  onChange={(e) => setConfidence(Number(e.target.value))}
-                  className="w-full h-2 bg-secondary rounded-lg appearance-none cursor-pointer"
-                  disabled={submitting}
-                />
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-foreground/60">Not confident</span>
-                  <span className="text-2xl font-bold text-accent">{confidence}/5</span>
-                  <span className="text-sm text-foreground/60">Very confident</span>
-                </div>
-              </div>
-            </Card>
-
-            {/* Submit Button */}
-            <Button
-              type="submit"
-              size="lg"
-              className="w-full"
-              disabled={submitting || !answer.trim() || !canEdit || timerExpired}
-            >
-              {submitting ? 'Submitting...' : 'Submit Answer'}
-            </Button>
-          </form>
-        ) : (
-          <div className="space-y-6">
-            {/* Success Message */}
-            <Card className="p-8 bg-primary/5 border-primary/30">
-              <div className="text-center">
-                <div className="text-5xl mb-4">✓</div>
-                <h2 className="text-2xl font-bold text-foreground mb-3">Answer Submitted</h2>
-                <p className="text-lg text-foreground/70 mb-6">
-                  Thank you for your response. Your instructor will review your answer.
-                </p>
-              </div>
-            </Card>
-
-            {feedback && (
-              <Card className="p-6">
-                <p className="text-foreground/70">{feedback}</p>
-              </Card>
-            )}
-
-            <div className="flex gap-3">
-              <Button
-                variant="outline"
-                className="flex-1"
-                onClick={() => {
-                  const prev = Math.max(0, currentQuestionIndex - 1)
-                  router.push(`/student/respond/${sessionId}?q=${prev + 1}`)
-                }}
-                disabled={currentQuestionIndex === 0}
-              >
-                Previous
-              </Button>
-              <Button
-                className="flex-1"
-                onClick={() => {
-                  const next = Math.min(questions.length - 1, currentQuestionIndex + 1)
-                  router.push(`/student/respond/${sessionId}?q=${next + 1}`)
-                }}
-                disabled={currentQuestionIndex >= questions.length - 1}
-              >
-                Next
-              </Button>
-            </div>
-
-            {/* Navigation */}
-            <Link href="/student/sessions" className="block">
-              <Button variant="outline" className="w-full">
-                Back to Sessions
-              </Button>
-            </Link>
-          </div>
-        )}
       </div>
     </main>
   )

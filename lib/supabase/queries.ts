@@ -6,10 +6,13 @@ import { createClient } from './server'
 import type {
   AIOutput,
   AnalysisRun,
+  AttemptType,
   ConfidenceValue,
+  LiveQuestionAnalysis,
   Participant,
   Response,
   Session,
+  SessionLivePhase,
   SessionQuestion,
   SessionParticipant,
   SessionStatus,
@@ -81,6 +84,27 @@ function normalizeArrayValue(value: unknown): string[] {
   return []
 }
 
+function getRoundNumberForAttemptType(attemptType: AttemptType) {
+  return attemptType === 'revision' ? 2 : 1
+}
+
+function getQuestionTypeForAttemptType(attemptType: AttemptType) {
+  return attemptType === 'revision' ? 'revision' : 'main'
+}
+
+function getAllowedAttemptType(session: Session): AttemptType | null {
+  if (session.live_phase === 'question_initial_open') return 'initial'
+  if (session.live_phase === 'question_revision_open') return 'revision'
+  return null
+}
+
+function getLivePhaseForAttemptType(attemptType: AttemptType, isClosed: boolean): SessionLivePhase {
+  if (attemptType === 'revision') {
+    return isClosed ? 'question_revision_closed' : 'question_revision_open'
+  }
+  return isClosed ? 'question_initial_closed' : 'question_initial_open'
+}
+
 // Sessions
 export async function createSession(
   data: {
@@ -148,6 +172,10 @@ export async function createSession(
         transfer_options: data.transferOptions ? normalizeArrayValue(data.transferOptions) : null,
         transfer_correct_answer: data.transferCorrectAnswer?.trim() || null,
         status: 'draft',
+        live_phase: 'not_started',
+        current_question_position: 1,
+        current_timer_seconds: normalizedQuestions[0].timerSeconds,
+        timer_started_at: null,
       })
       .select()
       .single()
@@ -227,6 +255,20 @@ export async function getSessionQuestions(sessionId: string) {
   return (data || []) as SessionQuestion[]
 }
 
+export async function getCurrentSessionQuestion(sessionId: string) {
+  const [session, questions] = await Promise.all([
+    getSession(sessionId),
+    getSessionQuestions(sessionId),
+  ])
+
+  const currentQuestion =
+    questions.find((question) => question.position === session.current_question_position) ||
+    questions[0] ||
+    null
+
+  return currentQuestion
+}
+
 export async function getSessionByCode(sessionCode: string) {
   const supabase = await createClient()
   const normalized = normalizeSessionCode(sessionCode)
@@ -239,6 +281,125 @@ export async function getSessionByCode(sessionCode: string) {
   if (error) throw error
   if (!data) throw new Error('Session code not found')
   return data as Session
+}
+
+async function updateSessionLiveFields(
+  sessionId: string,
+  patch: Partial<Pick<Session, 'status' | 'live_phase' | 'current_question_position' | 'current_timer_seconds' | 'timer_started_at'>>
+) {
+  await assertTeacherAuthenticated()
+  const supabase = await createClient()
+  const { data, error } = await supabase
+    .from('sessions')
+    .update(patch)
+    .eq('id', sessionId)
+    .select('*')
+    .single()
+
+  if (error) throw error
+  return data as Session
+}
+
+export async function startCurrentQuestion(sessionId: string, timerSeconds?: number | null) {
+  const session = await getSession(sessionId)
+  const currentQuestion = await getCurrentSessionQuestion(sessionId)
+
+  if (!currentQuestion) {
+    throw new Error('This session has no questions configured.')
+  }
+  if (session.live_phase === 'session_completed' || session.status === 'closed') {
+    throw new Error('This session has already ended.')
+  }
+
+  const effectiveTimer =
+    timerSeconds === undefined
+      ? currentQuestion.timer_seconds
+      : timerSeconds === null
+        ? null
+        : Math.max(0, Math.floor(Number(timerSeconds)))
+
+  return updateSessionLiveFields(sessionId, {
+    status: 'live',
+    live_phase: 'question_initial_open',
+    current_question_position: currentQuestion.position,
+    current_timer_seconds: effectiveTimer,
+    timer_started_at: new Date().toISOString(),
+  })
+}
+
+export async function openQuestionRevision(sessionId: string, timerSeconds?: number | null) {
+  const session = await getSession(sessionId)
+  if (session.condition !== 'treatment') {
+    throw new Error('Revision is only available for treatment sessions.')
+  }
+  if (session.live_phase !== 'question_initial_closed') {
+    throw new Error('You can only open revision after the initial question has been closed.')
+  }
+
+  const currentQuestion = await getCurrentSessionQuestion(sessionId)
+  const effectiveTimer =
+    timerSeconds === undefined
+      ? currentQuestion?.timer_seconds ?? null
+      : timerSeconds === null
+        ? null
+        : Math.max(0, Math.floor(Number(timerSeconds)))
+
+  return updateSessionLiveFields(sessionId, {
+    status: 'live',
+    live_phase: 'question_revision_open',
+    current_timer_seconds: effectiveTimer,
+    timer_started_at: new Date().toISOString(),
+  })
+}
+
+export async function closeCurrentQuestion(sessionId: string, attemptType: AttemptType) {
+  const session = await getSession(sessionId)
+  const expectedPhase = getLivePhaseForAttemptType(attemptType, false)
+  if (session.live_phase !== expectedPhase) {
+    throw new Error('That question attempt is not currently open.')
+  }
+
+  return updateSessionLiveFields(sessionId, {
+    status: 'live',
+    live_phase: getLivePhaseForAttemptType(attemptType, true),
+    current_timer_seconds: null,
+    timer_started_at: null,
+  })
+}
+
+export async function moveToNextQuestion(sessionId: string, timerSeconds?: number | null) {
+  const session = await getSession(sessionId)
+  const questions = await getSessionQuestions(sessionId)
+  const nextPosition = session.current_question_position + 1
+  const nextQuestion = questions.find((question) => question.position === nextPosition)
+
+  if (!nextQuestion) {
+    throw new Error('There is no next question. End the session instead.')
+  }
+
+  const effectiveTimer =
+    timerSeconds === undefined
+      ? nextQuestion.timer_seconds
+      : timerSeconds === null
+        ? null
+        : Math.max(0, Math.floor(Number(timerSeconds)))
+
+  return updateSessionLiveFields(sessionId, {
+    status: 'live',
+    live_phase: 'question_initial_open',
+    current_question_position: nextPosition,
+    current_timer_seconds: effectiveTimer,
+    timer_started_at: new Date().toISOString(),
+  })
+}
+
+export async function completeSession(sessionId: string) {
+  return updateSessionLiveFields(sessionId, {
+    status: 'closed',
+    live_phase: 'session_completed',
+    current_timer_seconds: null,
+    timer_started_at: null,
+  })
 }
 
 export async function updateSessionStatus(
@@ -300,7 +461,7 @@ export async function joinSessionWithParticipantCredentials(data: {
   if (participantError) throw participantError
   if (!participant) throw new Error('Invalid participant ID or password.')
   if (!participant.is_active) throw new Error('This participant account is inactive.')
-  if (participant.hash_algo && participant.hash_algo !== 'bcrypt') {
+  if (participant.hash_algo && !['bcrypt', 'sha256'].includes(participant.hash_algo)) {
     throw new Error('Unsupported password hashing algorithm.')
   }
 
@@ -470,14 +631,47 @@ export async function submitResponse(
   const supabase = await createClient()
 
   const session = await getSession(sessionId)
-  if (questionType === 'main' && session.status !== 'live') {
-    throw new Error('This session is not live yet.')
-  }
-  if (questionType === 'revision' && session.status !== 'revision') {
-    throw new Error('This session is not in revision yet.')
-  }
-  if (session.status === 'closed') {
+  if (session.status === 'closed' || session.live_phase === 'session_completed') {
     throw new Error('This session is closed.')
+  }
+
+  const requestedAttemptType: AttemptType = questionType === 'revision' || roundNumber === 2 ? 'revision' : 'initial'
+  const allowedAttemptType = getAllowedAttemptType(session)
+  if (!allowedAttemptType) {
+    throw new Error('This question is not accepting responses right now.')
+  }
+  if (requestedAttemptType !== allowedAttemptType) {
+    throw new Error(
+      requestedAttemptType === 'revision'
+        ? 'Revision is not open right now.'
+        : 'The current question is not open for initial responses right now.'
+    )
+  }
+  if (requestedAttemptType === 'revision' && session.condition !== 'treatment') {
+    throw new Error('Revision is only available in treatment sessions.')
+  }
+
+  const trimmedAnswer = String(answerText || '').trim()
+  if (!trimmedAnswer) {
+    throw new Error('Please enter an answer before submitting.')
+  }
+  if (!Number.isFinite(confidence) || confidence < 1 || confidence > 5) {
+    throw new Error('Please select a confidence score from 1 to 5.')
+  }
+
+  const { data: questionRow, error: questionError } = await supabase
+    .from('session_questions')
+    .select('question_id, position')
+    .eq('session_id', session.id)
+    .eq('question_id', questionId)
+    .maybeSingle()
+
+  if (questionError) throw questionError
+  if (!questionRow) {
+    throw new Error('Question not found for this session.')
+  }
+  if (questionRow.position !== session.current_question_position) {
+    throw new Error('This is not the active question right now.')
   }
 
   const { data: existingResponse, error: responseLookupError } = await supabase
@@ -485,14 +679,17 @@ export async function submitResponse(
     .select('response_id')
     .eq('session_id', session.id)
     .eq('session_participant_id', sessionParticipantId)
-     .eq('question_id', questionId)
-    .eq('question_type', questionType)
-    .eq('round_number', roundNumber)
+    .eq('question_id', questionId)
+    .eq('attempt_type', requestedAttemptType)
     .limit(1)
 
   if (responseLookupError) throw responseLookupError
   if (existingResponse && existingResponse.length > 0) {
-    throw new Error('You have already submitted for this session.')
+    throw new Error(
+      requestedAttemptType === 'revision'
+        ? 'You have already submitted your revision for this question.'
+        : 'You have already submitted for this question.'
+    )
   }
 
   const { data: participation, error: participationError } = await supabase
@@ -514,8 +711,9 @@ export async function submitResponse(
       session_participant_id: sessionParticipantId,
       question_id: questionId,
       question_type: questionType,
+      attempt_type: requestedAttemptType,
       round_number: roundNumber,
-      answer: answerText,
+      answer: trimmedAnswer,
       confidence: normalizeConfidence(confidence),
       explanation: null,
       is_correct: null,
@@ -534,8 +732,6 @@ export async function submitStudentResponse(
     answerText: string
     confidence: number
     timeTakenSeconds?: number | null
-    questionType?: 'main' | 'revision' | 'transfer'
-    roundNumber?: number
     originalResponseId?: string | null
   }
 ) {
@@ -545,6 +741,14 @@ export async function submitStudentResponse(
   }
 
   const supabase = await createClient()
+  const session = await getSession(sessionId)
+  const attemptType = getAllowedAttemptType(session)
+
+  if (!attemptType) {
+    throw new Error('This question is not accepting responses right now.')
+  }
+
+  const roundNumber = getRoundNumberForAttemptType(attemptType)
 
   // Server-side duplicate protection per question+round (in addition to DB unique index).
   const { data: existing, error } = await supabase
@@ -553,31 +757,29 @@ export async function submitStudentResponse(
     .eq('session_id', sessionId)
     .eq('session_participant_id', participation.session_participant_id)
     .eq('question_id', data.questionId)
-    .eq('round_number', data.roundNumber ?? 1)
+    .eq('attempt_type', attemptType)
     .limit(1)
 
   if (error) throw error
   if (existing && existing.length > 0) {
-    throw new Error('You have already submitted for this question in this round.')
+    throw new Error('You have already submitted for this question.')
   }
 
   // For revision, link to original round-1 response if present.
   let originalResponseId: string | null = data.originalResponseId || null
-  if (!originalResponseId && (data.roundNumber ?? 1) === 2) {
+  if (!originalResponseId && attemptType === 'revision') {
     const { data: original, error: originalError } = await supabase
       .from('responses')
       .select('response_id')
       .eq('session_id', sessionId)
       .eq('session_participant_id', participation.session_participant_id)
       .eq('question_id', data.questionId)
-      .eq('round_number', 1)
+      .eq('attempt_type', 'initial')
       .maybeSingle()
 
     if (originalError) throw originalError
     originalResponseId = original?.response_id || null
   }
-
-  const questionType = data.questionType ?? ((data.roundNumber ?? 1) === 2 ? 'revision' : 'main')
 
   const inserted = await submitResponse(
     sessionId,
@@ -585,8 +787,8 @@ export async function submitStudentResponse(
     data.questionId,
     data.answerText,
     data.confidence,
-    questionType,
-    data.roundNumber ?? 1
+    getQuestionTypeForAttemptType(attemptType),
+    roundNumber
   )
 
   if (data.timeTakenSeconds !== undefined && data.timeTakenSeconds !== null) {
@@ -609,11 +811,14 @@ export async function submitStudentResponse(
 
 export async function getStudentResponse(
   sessionId: string,
-  data: { questionId: string; roundNumber?: number } 
+  data: { questionId: string; attemptType?: AttemptType; roundNumber?: number } 
 ) {
   const supabase = await createClient()
   const participation = await getSessionParticipantForStudent(sessionId)
   if (!participation) return null
+
+  const attemptType = data.attemptType ?? (Number(data.roundNumber) === 2 ? 'revision' : 'initial')
+  const roundNumber = data.roundNumber ?? getRoundNumberForAttemptType(attemptType)
 
   const { data: response, error } = await supabase
     .from('responses')
@@ -624,6 +829,7 @@ export async function getStudentResponse(
       session_participant_id,
       question_id,
       question_type,
+      attempt_type,
       round_number,
       answer,
       confidence,
@@ -637,7 +843,8 @@ export async function getStudentResponse(
     .eq('session_id', sessionId)
     .eq('session_participant_id', participation.session_participant_id)
     .eq('question_id', data.questionId)
-    .eq('round_number', data.roundNumber ?? 1)
+    .eq('attempt_type', attemptType)
+    .eq('round_number', roundNumber)
     .maybeSingle()
 
   if (error) throw error
@@ -672,6 +879,7 @@ export async function getRevisionPrefillResponse(
       session_participant_id,
       question_id,
       question_type,
+      attempt_type,
       round_number,
       answer,
       confidence,
@@ -685,13 +893,13 @@ export async function getRevisionPrefillResponse(
     .eq('session_id', sessionId)
     .eq('session_participant_id', participation.session_participant_id)
     .eq('question_id', data.questionId)
-    .in('round_number', [1, 2])
+    .in('attempt_type', ['initial', 'revision'])
     .order('created_at', { ascending: false })
 
   if (error) throw error
 
-  const round2Response = ((rows || []).find((row) => row.round_number === 2) || null) as Response | null
-  const round1Response = ((rows || []).find((row) => row.round_number === 1) || null) as Response | null
+  const round2Response = ((rows || []).find((row) => row.attempt_type === 'revision') || null) as Response | null
+  const round1Response = ((rows || []).find((row) => row.attempt_type === 'initial') || null) as Response | null
   const displayResponse = round2Response || round1Response || null
   const displaySource = round2Response ? 'round2' : round1Response ? 'round1' : 'blank'
 
@@ -720,6 +928,7 @@ export async function getSessionResponses(sessionId: string) {
       session_participant_id,
       question_id,
       question_type,
+      attempt_type,
       round_number,
       answer,
       confidence,
@@ -742,7 +951,47 @@ export async function getSessionResponses(sessionId: string) {
     .order('created_at', { ascending: true })
 
   if (error) throw error
-  return data as Response[]
+  return (data || []) as unknown as Response[]
+}
+
+export async function upsertLiveQuestionAnalysis(data: {
+  sessionId: string
+  questionId: string
+  attemptType: AttemptType
+  analysisJson: Record<string, unknown>
+}) {
+  await assertTeacherAuthenticated()
+  const supabase = await createClient()
+  const { data: row, error } = await supabase
+    .from('live_question_analyses')
+    .upsert(
+      {
+        session_id: data.sessionId,
+        question_id: data.questionId,
+        attempt_type: data.attemptType,
+        analysis_json: data.analysisJson,
+        generated_at: new Date().toISOString(),
+      },
+      { onConflict: 'session_id,question_id,attempt_type' }
+    )
+    .select('*')
+    .single()
+
+  if (error) throw error
+  return row as LiveQuestionAnalysis
+}
+
+export async function getLiveQuestionAnalyses(sessionId: string) {
+  await assertTeacherAuthenticated()
+  const supabase = await createClient()
+  const { data, error } = await supabase
+    .from('live_question_analyses')
+    .select('*')
+    .eq('session_id', sessionId)
+    .order('generated_at', { ascending: true })
+
+  if (error) throw error
+  return (data || []) as LiveQuestionAnalysis[]
 }
 
 // AI Outputs

@@ -1,4 +1,5 @@
 import {
+  getLiveQuestionAnalyses,
   getSession,
   getSessionParticipants,
   getSessionResponses,
@@ -21,11 +22,12 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Missing sessionId' }, { status: 400 })
     }
 
-    const [session, participants, responses, aiOutputs] = await Promise.all([
+    const [session, participants, responses, aiOutputs, liveQuestionAnalyses] = await Promise.all([
       getSession(sessionId),
       getSessionParticipants(sessionId),
       getSessionResponses(sessionId),
       getSessionAIOutputs(sessionId),
+      getLiveQuestionAnalyses(sessionId),
     ])
 
     if (format === 'json') {
@@ -34,10 +36,11 @@ export async function GET(request: NextRequest) {
         participants,
         responses,
         aiOutputs,
+        liveQuestionAnalyses,
       })
     }
 
-    const csvData = generateCSV(session, participants, responses, aiOutputs)
+    const csvData = generateCSV(session, participants, responses, aiOutputs, liveQuestionAnalyses)
 
     return new NextResponse(csvData, {
       headers: {
@@ -58,7 +61,8 @@ function generateCSV(
   session: any,
   participants: any[],
   responses: any[],
-  aiOutputs: any[]
+  aiOutputs: any[],
+  liveQuestionAnalyses: any[]
 ): string {
   const lines: string[] = []
 
@@ -74,6 +78,8 @@ function generateCSV(
   lines.push(`Transfer Options,${escapeCSV((session.transfer_options || []).join(' | '))}`)
   lines.push(`Transfer Correct Answer,${escapeCSV(session.transfer_correct_answer || '')}`)
   lines.push(`Status,${session.status}`)
+  lines.push(`Live Phase,${escapeCSV(session.live_phase || '')}`)
+  lines.push(`Current Question Position,${escapeCSV(String(session.current_question_position ?? ''))}`)
   lines.push(`Created,${new Date(session.created_at).toISOString()}`)
   lines.push('')
 
@@ -93,7 +99,7 @@ function generateCSV(
   lines.push('')
 
   lines.push('Student Responses')
-  lines.push('Session Participant ID,Anonymized Label,Question ID,Question Position,Question Type,Round,Answer,Confidence,Explanation,Correct,Time Taken (s),Original Response ID,Submitted At')
+  lines.push('Session Participant ID,Anonymized Label,Question ID,Question Position,Question Type,Attempt Type,Round,Answer,Confidence,Explanation,Correct,Time Taken (s),Original Response ID,Submitted At')
   responses.forEach((response: any) => {
     lines.push(
       [
@@ -102,6 +108,7 @@ function generateCSV(
         escapeCSV(response.question_id || ''),
         escapeCSV(String(response.session_questions?.position ?? '')),
         response.question_type,
+        response.attempt_type || '',
         response.round_number,
         escapeCSV(response.answer),
         response.confidence,
@@ -127,6 +134,22 @@ function generateCSV(
           escapeCSV(JSON.stringify(output.student_summary || {})),
           escapeCSV(output.raw_response || ''),
           output.created_at ? new Date(output.created_at).toISOString() : '',
+        ].join(',')
+      )
+    })
+    lines.push('')
+  }
+
+  if (liveQuestionAnalyses.length > 0) {
+    lines.push('Live Question Analyses')
+    lines.push('Question ID,Attempt Type,Analysis JSON,Generated At')
+    liveQuestionAnalyses.forEach((analysis: any) => {
+      lines.push(
+        [
+          escapeCSV(analysis.question_id),
+          escapeCSV(analysis.attempt_type),
+          escapeCSV(JSON.stringify(analysis.analysis_json || {})),
+          analysis.generated_at ? new Date(analysis.generated_at).toISOString() : '',
         ].join(',')
       )
     })
