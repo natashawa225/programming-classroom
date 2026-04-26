@@ -78,17 +78,6 @@ export interface Response {
   session_questions?: Pick<SessionQuestion, 'question_id' | 'position'> | null
 }
 
-export interface AIOutput {
-  id: string
-  session_id: string
-  round_number: number
-  condition: 'baseline' | 'treatment'
-  teacher_summary: Record<string, unknown> | null
-  student_summary: Record<string, unknown> | null
-  raw_response: string | null
-  created_at: string
-}
-
 export interface LiveQuestionAnalysis {
   live_question_analysis_id: string
   session_id: string
@@ -96,6 +85,15 @@ export interface LiveQuestionAnalysis {
   attempt_type: AttemptType
   analysis_json: Record<string, unknown>
   generated_at: string
+}
+
+export interface SessionSummaryRecord {
+  id: string
+  session_id: string
+  summary_json: Record<string, unknown>
+  source: 'openai' | 'fallback'
+  created_at: string
+  updated_at: string
 }
 
 export interface AnalysisRun {

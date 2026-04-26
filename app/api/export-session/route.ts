@@ -3,7 +3,6 @@ import {
   getSession,
   getSessionParticipants,
   getSessionResponses,
-  getSessionAIOutputs,
 } from '@/lib/supabase/queries'
 import { getTeacherSession } from '@/lib/teacher-auth'
 import { NextRequest, NextResponse } from 'next/server'
@@ -22,11 +21,10 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Missing sessionId' }, { status: 400 })
     }
 
-    const [session, participants, responses, aiOutputs, liveQuestionAnalyses] = await Promise.all([
+    const [session, participants, responses, liveQuestionAnalyses] = await Promise.all([
       getSession(sessionId),
       getSessionParticipants(sessionId),
       getSessionResponses(sessionId),
-      getSessionAIOutputs(sessionId),
       getLiveQuestionAnalyses(sessionId),
     ])
 
@@ -35,12 +33,11 @@ export async function GET(request: NextRequest) {
         session,
         participants,
         responses,
-        aiOutputs,
         liveQuestionAnalyses,
       })
     }
 
-    const csvData = generateCSV(session, participants, responses, aiOutputs, liveQuestionAnalyses)
+    const csvData = generateCSV(session, participants, responses, liveQuestionAnalyses)
 
     return new NextResponse(csvData, {
       headers: {
@@ -61,7 +58,6 @@ function generateCSV(
   session: any,
   participants: any[],
   responses: any[],
-  aiOutputs: any[],
   liveQuestionAnalyses: any[]
 ): string {
   const lines: string[] = []
@@ -121,24 +117,6 @@ function generateCSV(
     )
   })
   lines.push('')
-
-  if (aiOutputs.length > 0) {
-    lines.push('AI Analysis Outputs')
-    lines.push('Condition,Round,Teacher Summary,Student Summary,Raw Response,Created At')
-    aiOutputs.forEach((output: any) => {
-      lines.push(
-        [
-          output.condition,
-          output.round_number,
-          escapeCSV(JSON.stringify(output.teacher_summary || {})),
-          escapeCSV(JSON.stringify(output.student_summary || {})),
-          escapeCSV(output.raw_response || ''),
-          output.created_at ? new Date(output.created_at).toISOString() : '',
-        ].join(',')
-      )
-    })
-    lines.push('')
-  }
 
   if (liveQuestionAnalyses.length > 0) {
     lines.push('Live Question Analyses')

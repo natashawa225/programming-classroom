@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { generateSessionSummary, storeSessionSummary } from '@/lib/session-summary'
 import { getTeacherSession } from '@/lib/teacher-auth'
 import {
   completeSession,
@@ -43,7 +44,15 @@ export async function POST(request: NextRequest) {
 
     if (action === 'complete_session') {
       const session = await completeSession(sessionId)
-      return NextResponse.json({ session })
+      void (async () => {
+        try {
+          const summary = await generateSessionSummary({ sessionId, force: true })
+          await storeSessionSummary(sessionId, summary)
+        } catch (error) {
+          console.error('background session summary generation failed', error)
+        }
+      })()
+      return NextResponse.json({ session, summaryTriggered: true })
     }
 
     return NextResponse.json({ error: 'Unsupported action' }, { status: 400 })

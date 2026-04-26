@@ -99,18 +99,6 @@ CREATE TABLE IF NOT EXISTS responses (
   UNIQUE(session_id, session_participant_id, question_id, round_number)
 );
 
--- AI-generated outputs
-CREATE TABLE IF NOT EXISTS ai_outputs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
-  round_number INT NOT NULL DEFAULT 1,
-  condition TEXT NOT NULL,
-  teacher_summary JSONB, -- misconception cards, suggestions (treatment)
-  student_summary JSONB, -- direct feedback or class summary
-  raw_response TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW()
-);
-
 CREATE TABLE IF NOT EXISTS live_question_analyses (
   live_question_analysis_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
@@ -134,7 +122,6 @@ CREATE TABLE IF NOT EXISTS teacher_actions (
 CREATE INDEX IF NOT EXISTS idx_responses_session ON responses(session_id);
 CREATE INDEX IF NOT EXISTS idx_responses_participant ON responses(session_participant_id);
 CREATE INDEX IF NOT EXISTS idx_responses_session_question_attempt ON responses(session_id, question_id, attempt_type);
-CREATE INDEX IF NOT EXISTS idx_ai_outputs_session ON ai_outputs(session_id);
 CREATE INDEX IF NOT EXISTS idx_live_question_analyses_session ON live_question_analyses(session_id, generated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_code ON sessions(session_code);
 CREATE INDEX IF NOT EXISTS idx_teacher_actions_session ON teacher_actions(session_id);

@@ -1,7 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import {
   getLiveQuestionAnalyses,
   getSession,
@@ -341,13 +342,19 @@ export default function SessionDetailClient({
   initialResponses,
   initialLiveQuestionAnalyses,
 }: Props) {
+  const router = useRouter()
   const sessionId = initialSession.id
+  const initialViewedQuestion =
+    initialQuestions.find((question) => question.position === initialSession.current_question_position) ||
+    initialQuestions[0] ||
+    null
   const [session, setSession] = useState(initialSession)
   const [participants, setParticipants] = useState(initialParticipants)
   const [responses, setResponses] = useState(initialResponses)
   const [liveQuestionAnalyses, setLiveQuestionAnalyses] = useState(initialLiveQuestionAnalyses)
   const [timerInput, setTimerInput] = useState('')
   const [secondsRemaining, setSecondsRemaining] = useState<number | null>(null)
+  const [viewedQuestionId, setViewedQuestionId] = useState<string | null>(initialViewedQuestion?.question_id ?? null)
   const [selectedInitialClusterId, setSelectedInitialClusterId] = useState<string | null>(null)
   const [selectedRevisionClusterId, setSelectedRevisionClusterId] = useState<string | null>(null)
   const [hoveredClusterId, setHoveredClusterId] = useState<string | null>(null)
@@ -370,6 +377,13 @@ export default function SessionDetailClient({
 
   const currentQuestion =
     questions.find((question) => question.position === session.current_question_position) || questions[0] || null
+  const previousCurrentQuestionIdRef = useRef<string | null>(currentQuestion?.question_id ?? null)
+  const viewedQuestion = questions.find((question) => question.question_id === viewedQuestionId) || currentQuestion || null
+  const isViewingCurrentQuestion = Boolean(
+    currentQuestion &&
+      viewedQuestion &&
+      currentQuestion.question_id === viewedQuestion.question_id
+  )
   const isLastQuestion = Boolean(currentQuestion && currentQuestion.position === questions.length)
   const attemptType = getCurrentAttemptType(session)
 
@@ -383,7 +397,7 @@ export default function SessionDetailClient({
       .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))
   }, [attemptType, currentQuestion, responses])
 
-  const initialAnalysis = useMemo(() => {
+  const currentInitialAnalysis = useMemo(() => {
     if (!currentQuestion) return null
     return parseAnalysis(
       liveQuestionAnalyses.find((analysis) => {
@@ -392,7 +406,7 @@ export default function SessionDetailClient({
     )
   }, [currentQuestion, liveQuestionAnalyses])
 
-  const revisionAnalysis = useMemo(() => {
+  const currentRevisionAnalysis = useMemo(() => {
     if (!currentQuestion) return null
     return parseAnalysis(
       liveQuestionAnalyses.find((analysis) => {
@@ -401,18 +415,49 @@ export default function SessionDetailClient({
     )
   }, [currentQuestion, liveQuestionAnalyses])
 
+  const viewedInitialAnalysis = useMemo(() => {
+    if (!viewedQuestion) return null
+    return parseAnalysis(
+      liveQuestionAnalyses.find((analysis) => {
+        return analysis.question_id === viewedQuestion.question_id && analysis.attempt_type === 'initial'
+      }) || null
+    )
+  }, [liveQuestionAnalyses, viewedQuestion])
+
+  const viewedRevisionAnalysis = useMemo(() => {
+    if (!viewedQuestion) return null
+    return parseAnalysis(
+      liveQuestionAnalyses.find((analysis) => {
+        return analysis.question_id === viewedQuestion.question_id && analysis.attempt_type === 'revision'
+      }) || null
+    )
+  }, [liveQuestionAnalyses, viewedQuestion])
+
   const canCompareRevision = Boolean(
     session.condition === 'treatment' &&
-    revisionAnalysis &&
-    (session.live_phase === 'question_revision_closed' || session.live_phase === 'session_completed')
+    viewedRevisionAnalysis
   )
 
-  const activeAnalysis = compareMode === 'revision' && canCompareRevision ? revisionAnalysis : initialAnalysis
-  const currentAttemptAnalysis = attemptType === 'revision' ? revisionAnalysis : initialAnalysis
+  const activeAnalysis = compareMode === 'revision' && canCompareRevision ? viewedRevisionAnalysis : viewedInitialAnalysis
+  const currentAttemptAnalysis = attemptType === 'revision' ? currentRevisionAnalysis : currentInitialAnalysis
   const currentAnalysisKey = currentQuestion ? `${currentQuestion.question_id}:${attemptType}` : null
   const currentAnalysisStatus =
     (currentAnalysisKey ? analysisStatusByKey[currentAnalysisKey] : null) ||
     (currentAttemptAnalysis ? 'success' : 'idle')
+  const viewedAttemptType: AttemptType =
+    compareMode === 'revision' && canCompareRevision ? 'revision' : 'initial'
+  const viewedResponses = useMemo(() => {
+    if (!viewedQuestion) return []
+    return responses
+      .filter((response) => {
+        return response.question_id === viewedQuestion.question_id && getResponseAttemptType(response) === viewedAttemptType
+      })
+      .slice()
+      .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))
+  }, [responses, viewedAttemptType, viewedQuestion])
+  const viewedAnalysisStatus =
+    (viewedQuestion ? analysisStatusByKey[`${viewedQuestion.question_id}:${viewedAttemptType}`] : null) ||
+    (activeAnalysis ? 'success' : 'idle')
   const activeSelectedClusterId =
     compareMode === 'revision' && canCompareRevision ? selectedRevisionClusterId : selectedInitialClusterId
   const setActiveSelectedClusterId =
@@ -421,7 +466,7 @@ export default function SessionDetailClient({
     activeAnalysis?.clusters.find((cluster) => cluster.cluster_id === activeSelectedClusterId) ||
     activeAnalysis?.clusters[0] ||
     null
-  const classSnapshot = getClassSnapshot(activeAnalysis, currentResponses)
+  const classSnapshot = getClassSnapshot(activeAnalysis, viewedResponses)
   const selectedRepresentativeAnswers = getRepresentativeAnswers(selectedCluster)
 
   const refreshLiveData = useCallback(async () => {
@@ -451,6 +496,32 @@ export default function SessionDetailClient({
           : ''
     )
   }, [currentQuestion?.question_id, currentQuestion?.timer_seconds, session.current_timer_seconds])
+
+  useEffect(() => {
+    if (currentQuestion && !viewedQuestionId) {
+      setViewedQuestionId(currentQuestion.question_id)
+    }
+  }, [currentQuestion, viewedQuestionId])
+
+  useEffect(() => {
+    const previousCurrentQuestionId = previousCurrentQuestionIdRef.current
+    const nextCurrentQuestionId = currentQuestion?.question_id ?? null
+
+    if (!nextCurrentQuestionId) return
+
+    setViewedQuestionId((previousViewedQuestionId) => {
+      if (!previousViewedQuestionId) return nextCurrentQuestionId
+      if (!questions.some((question) => question.question_id === previousViewedQuestionId)) {
+        return nextCurrentQuestionId
+      }
+      if (previousViewedQuestionId === previousCurrentQuestionId) {
+        return nextCurrentQuestionId
+      }
+      return previousViewedQuestionId
+    })
+
+    previousCurrentQuestionIdRef.current = nextCurrentQuestionId
+  }, [currentQuestion, questions])
 
   useEffect(() => {
     if (!isQuestionOpen(session) || !session.timer_started_at || !session.current_timer_seconds) {
@@ -586,7 +657,29 @@ export default function SessionDetailClient({
     }
   }
 
-  const responseCountLabel = attemptType === 'revision' ? 'Revision now' : 'Submitted now'
+  const handleCompleteSession = async () => {
+    await postLiveControl('complete_session')
+
+    void fetch('/api/session-summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+      keepalive: true,
+    }).catch((summaryError) => {
+      console.error('session summary prefetch failed', summaryError)
+    })
+
+    router.push(`/teacher/session/${sessionId}/summary`)
+  }
+
+  const visibleResponseCount = isViewingCurrentQuestion ? currentResponses.length : viewedResponses.length
+  const responseCountLabel = isViewingCurrentQuestion
+    ? attemptType === 'revision'
+      ? 'Revision now'
+      : 'Submitted now'
+    : viewedAttemptType === 'revision'
+      ? 'Revision shown'
+      : 'Responses shown'
   const visibleClusters = activeAnalysis?.clusters ?? []
   const bubblePlacements = useMemo(
     () => getClusterMapPlacements(visibleClusters, CHART_VIEWBOX_WIDTH, CHART_VIEWBOX_HEIGHT),
@@ -599,7 +692,7 @@ export default function SessionDetailClient({
         ? 'initial'
         : null
   const canRegenerateClosedAnalysis = Boolean(closedAttemptType && currentQuestion)
-  const showFallbackWarning = currentAnalysisStatus === 'success' && currentAttemptAnalysis?.source === 'fallback'
+  const showFallbackWarning = viewedAnalysisStatus === 'success' && activeAnalysis?.source === 'fallback'
   const primaryAction = (() => {
     if (session.live_phase === 'not_started') {
       return {
@@ -645,7 +738,7 @@ export default function SessionDetailClient({
       return {
         key: 'complete-session',
         label: 'End session',
-        action: () => postLiveControl('complete_session'),
+        action: handleCompleteSession,
       }
     }
 
@@ -657,7 +750,7 @@ export default function SessionDetailClient({
         return {
           key: 'complete-session',
           label: 'End session',
-          action: () => postLiveControl('complete_session'),
+          action: handleCompleteSession,
         }
       }
 
@@ -690,7 +783,7 @@ export default function SessionDetailClient({
           <div className="flex flex-wrap items-start gap-6">
             <MiniStat label="Phase" value={getPhaseLabel(session)} />
             <MiniStat label="Joined" value={String(participants.length)} />
-            <MiniStat label={responseCountLabel} value={String(currentResponses.length)} emphasized />
+            <MiniStat label={responseCountLabel} value={String(visibleResponseCount)} emphasized />
             <MiniStat label="Timer" value={secondsRemaining === null ? '—' : `${secondsRemaining}s`} />
             <div className="flex items-center gap-3 pt-6">
               <Link href="/teacher/dashboard">
@@ -719,83 +812,120 @@ export default function SessionDetailClient({
           <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
             <div className="min-w-0">
               <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">
-                Question {currentQuestion?.position || 1} of {questions.length}
+                Question {viewedQuestion?.position || 1} of {questions.length}
               </p>
               <h2 className="mt-3 max-w-5xl text-[28px] font-semibold leading-[1.45] tracking-tight text-foreground">
-                {currentQuestion?.prompt || 'No question configured.'}
+                {viewedQuestion?.prompt || 'No question configured.'}
               </h2>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                {questions.map((question) => {
+                  const isCurrent = currentQuestion?.question_id === question.question_id
+                  const isViewed = viewedQuestion?.question_id === question.question_id
+                  return (
+                    <button
+                      key={question.question_id}
+                      type="button"
+                      onClick={() => setViewedQuestionId(question.question_id)}
+                      className={[
+                        'rounded-full border px-3 py-1.5 text-sm font-medium transition',
+                        isViewed
+                          ? 'border-[rgba(33,29,42,0.22)] bg-primary text-primary-foreground'
+                          : 'border-[rgba(123,175,212,0.22)] bg-white text-foreground/74 hover:bg-[rgba(248,251,255,0.9)]',
+                      ].join(' ')}
+                    >
+                      Q{question.position}
+                      {isCurrent ? ' • Live' : ''}
+                    </button>
+                  )
+                })}
+              </div>
+              {!isViewingCurrentQuestion && (
+                <div className="mt-4">
+                  <Badge className="rounded-full border border-[rgba(123,175,212,0.22)] bg-[rgba(238,244,249,0.88)] px-3 py-1 text-sm font-medium text-foreground shadow-none">
+                    Viewing previous question
+                  </Badge>
+                </div>
+              )}
             </div>
 
             <div className="flex w-full flex-col gap-3 xl:w-[320px] xl:items-stretch">
-              <div>
-                <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Timer for next open state</p>
-                <div className="mt-3 flex items-center gap-2">
-                  <Input
-                    type="number"
-                    min={0}
-                    value={timerInput}
-                    onChange={(event) => setTimerInput(event.target.value)}
-                    placeholder="Optional"
-                    className="rounded-xl border-[rgba(123,175,212,0.2)] bg-[rgba(238,244,249,0.85)]"
-                  />
-                  <span className="text-sm text-foreground/55">sec</span>
-                </div>
-              </div>
-
               <div className="mt-1 flex flex-col gap-3">
-                {primaryAction && (
-                  <Button
-                    className="rounded-2xl"
-                    disabled={actionLoading !== null}
-                    onClick={() => runAction(primaryAction.key, primaryAction.action)}
-                  >
-                    {actionLoading === primaryAction.key
-                      ? primaryAction.key === 'next-question'
-                        ? 'Opening next question...'
-                        : primaryAction.key === 'complete-session'
-                          ? 'Ending session...'
-                          : primaryAction.key === 'start-question'
-                            ? 'Starting...'
-                            : primaryAction.key === 'open-revision'
-                              ? 'Opening revision...'
-                              : 'Generating analysis...'
-                      : primaryAction.label}
-                  </Button>
+                {isViewingCurrentQuestion ? (
+                  <>
+                    <div>
+                      <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Timer for next open state</p>
+                      <div className="mt-3 flex items-center gap-2">
+                        <Input
+                          type="number"
+                          min={0}
+                          value={timerInput}
+                          onChange={(event) => setTimerInput(event.target.value)}
+                          placeholder="Optional"
+                          className="rounded-xl border-[rgba(123,175,212,0.2)] bg-[rgba(238,244,249,0.85)]"
+                        />
+                        <span className="text-sm text-foreground/55">sec</span>
+                      </div>
+                    </div>
+
+                    {primaryAction && (
+                      <Button
+                        className="rounded-2xl"
+                        disabled={actionLoading !== null}
+                        onClick={() => runAction(primaryAction.key, primaryAction.action)}
+                      >
+                        {actionLoading === primaryAction.key
+                          ? primaryAction.key === 'next-question'
+                            ? 'Opening next question...'
+                            : primaryAction.key === 'complete-session'
+                              ? 'Ending session...'
+                              : primaryAction.key === 'start-question'
+                                ? 'Starting...'
+                                : primaryAction.key === 'open-revision'
+                                  ? 'Opening revision...'
+                                  : 'Generating analysis...'
+                          : primaryAction.label}
+                      </Button>
+                    )}
+
+                    {secondaryAction && (
+                      <Button
+                        variant="outline"
+                        className="rounded-2xl border-[rgba(123,175,212,0.22)] bg-white"
+                        disabled={actionLoading !== null}
+                        onClick={() => runAction(secondaryAction.key, secondaryAction.action)}
+                      >
+                        {actionLoading === secondaryAction.key
+                          ? secondaryAction.key === 'complete-session'
+                            ? 'Ending session...'
+                            : 'Opening next question...'
+                          : secondaryAction.label}
+                      </Button>
+                    )}
+
+                    {canRegenerateClosedAnalysis && (
+                      <Button
+                        variant="outline"
+                        className="rounded-2xl border-[rgba(123,175,212,0.22)] bg-white"
+                        disabled={actionLoading !== null}
+                        onClick={() => runAction(`analyze-${closedAttemptType}`, () => handleAnalyzeAndClose(closedAttemptType!))}
+                      >
+                        {actionLoading === `analyze-${closedAttemptType}` ? 'Regenerating analysis...' : 'Regenerate analysis'}
+                      </Button>
+                    )}
+                  </>
+                ) : (
+                  <div className="rounded-2xl border border-[rgba(123,175,212,0.18)] bg-[rgba(238,244,249,0.7)] px-4 py-4 text-sm text-foreground/70">
+                    Switch back to the live question to run analysis or advance the session.
+                  </div>
                 )}
 
-                {secondaryAction && (
-                  <Button
-                    variant="outline"
-                    className="rounded-2xl border-[rgba(123,175,212,0.22)] bg-white"
-                    disabled={actionLoading !== null}
-                    onClick={() => runAction(secondaryAction.key, secondaryAction.action)}
-                  >
-                    {actionLoading === secondaryAction.key
-                      ? secondaryAction.key === 'complete-session'
-                        ? 'Ending session...'
-                        : 'Opening next question...'
-                      : secondaryAction.label}
-                  </Button>
-                )}
-
-                {canRegenerateClosedAnalysis && (
-                  <Button
-                    variant="outline"
-                    className="rounded-2xl border-[rgba(123,175,212,0.22)] bg-white"
-                    disabled={actionLoading !== null}
-                    onClick={() => runAction(`analyze-${closedAttemptType}`, () => handleAnalyzeAndClose(closedAttemptType!))}
-                  >
-                    {actionLoading === `analyze-${closedAttemptType}` ? 'Regenerating analysis...' : 'Regenerate analysis'}
-                  </Button>
-                )}
-
-                {currentAnalysisStatus === 'loading' && (
+                {isViewingCurrentQuestion && currentAnalysisStatus === 'loading' && (
                   <p className="rounded-2xl border border-[rgba(123,175,212,0.18)] bg-[rgba(238,244,249,0.7)] px-4 py-3 text-sm text-foreground/70">
                     Generating analysis now. Please wait before moving to the next step.
                   </p>
                 )}
 
-                {currentAnalysisStatus === 'failed' && (
+                {isViewingCurrentQuestion && currentAnalysisStatus === 'failed' && (
                   <div className="rounded-2xl border border-destructive/20 bg-destructive/5 px-4 py-3 text-sm text-destructive">
                     Analysis failed. Please try again.
                   </div>
@@ -809,8 +939,13 @@ export default function SessionDetailClient({
 
                 {session.live_phase === 'session_completed' && (
                   <div className="grid gap-3">
+                    <Link href={`/teacher/session/${sessionId}/summary`}>
+                      <Button className="w-full rounded-2xl">View session summary</Button>
+                    </Link>
                     <Link href={`/teacher/session/${sessionId}/analysis`}>
-                      <Button className="w-full rounded-2xl">Generate final analysis</Button>
+                      <Button variant="outline" className="w-full rounded-2xl border-[rgba(123,175,212,0.22)] bg-white">
+                        Generate final analysis
+                      </Button>
                     </Link>
                     <Link href={`/teacher/session/${sessionId}/export`}>
                       <Button variant="outline" className="w-full rounded-2xl border-[rgba(123,175,212,0.22)] bg-white">
@@ -926,9 +1061,11 @@ export default function SessionDetailClient({
                 <div className="relative h-[420px] w-full overflow-hidden rounded-[28px] bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.96),rgba(242,248,252,0.92)_58%,rgba(234,243,250,0.82)_100%)] md:h-[480px] xl:h-[520px]">
                   {visibleClusters.length === 0 ? (
                     <div className="flex h-full items-center justify-center rounded-[28px] border border-dashed border-[rgba(123,175,212,0.24)] bg-white/65 text-sm text-foreground/55">
-                      {currentAnalysisStatus === 'failed'
+                      {viewedAnalysisStatus === 'failed'
                         ? 'Analysis failed for this question. Retry analysis to generate cluster visualization.'
-                        : 'End the question to generate cluster visualization.'}
+                        : isViewingCurrentQuestion
+                          ? 'No analysis generated yet.'
+                          : 'No analysis generated yet for this question.'}
                     </div>
                   ) : (
                     <svg
@@ -991,11 +1128,26 @@ export default function SessionDetailClient({
                           const radius = placement?.radius ?? 78
                           const compact = radius * 2 < 170
                           const tiny = radius * 2 < 128
-                          const labelLines = wrapBubbleLabel(cluster.label, tiny ? 12 : compact ? 16 : 18)
-                          const lineHeight = tiny ? 16 : compact ? 18 : 21
-                          const labelStartY = -Math.max(12, (labelLines.length - 1) * (lineHeight / 2)) - (tiny ? 2 : 10)
-                          const countY = tiny ? radius * 0.24 : radius * 0.18
-                          const confidenceY = radius * 0.42
+                          const showSecondaryText = !tiny
+                          const labelLines = showSecondaryText
+                            ? wrapBubbleLabel(cluster.label, compact ? 14 : 18, compact ? 2 : 3)
+                            : []
+                          const labelLineHeight = compact ? 13 : 15
+                          const countLineHeight = tiny ? 16 : compact ? 18 : 20
+                          const confidenceLineHeight = compact ? 12 : 14
+                          const gapAfterLabel = labelLines.length > 0 ? (compact ? 5 : 7) : 0
+                          const gapAfterCount = showSecondaryText ? (compact ? 5 : 7) : 0
+                          const labelBlockHeight = labelLines.length > 0 ? labelLineHeight * labelLines.length : 0
+                          const totalTextHeight =
+                            labelBlockHeight +
+                            gapAfterLabel +
+                            countLineHeight +
+                            gapAfterCount +
+                            (showSecondaryText ? confidenceLineHeight : 0)
+                          const blockStartY = -totalTextHeight / 2
+                          const labelCenterY = blockStartY + labelBlockHeight / 2
+                          const countY = blockStartY + labelBlockHeight + gapAfterLabel + countLineHeight / 2
+                          const confidenceY = countY + countLineHeight / 2 + gapAfterCount + confidenceLineHeight / 2
 
                           return (
                             <g
@@ -1032,31 +1184,23 @@ export default function SessionDetailClient({
                                 filter="url(#bubble-shadow)"
                                 opacity={hovered && !selected ? 0.96 : 1}
                               />
-                              <text
-                                textAnchor="middle"
-                                fill="#211d2a"
-                                style={{ fontSize: tiny ? 13 : compact ? 15 : 18, fontWeight: 700 }}
-                              >
-                                {labelLines.map((line, index) => (
-                                  <tspan key={`${cluster.cluster_id}-label-${index}`} x="0" y={labelStartY + index * lineHeight}>
-                                    {line}
-                                  </tspan>
-                                ))}
-                              </text>
+                             
                               <text
                                 x="0"
-                                y={countY}
+                                y={showSecondaryText ? -confidenceY / 2 : 0}  // ← shift count UP by half the gap
                                 textAnchor="middle"
+                                dominantBaseline="middle"
                                 fill="#211d2a"
-                                style={{ fontSize: tiny ? 14 : 15, fontWeight: 700 }}
+                                style={{ fontSize: tiny ? 14 : compact ? 15 : 17, fontWeight: 700 }}
                               >
                                 {tiny ? `${cluster.count}` : formatResponsesLabel(cluster.count)}
                               </text>
-                              {!tiny && (
+                              {showSecondaryText && (
                                 <text
                                   x="0"
-                                  y={confidenceY}
+                                  y={confidenceY / 2}   // ← shift confidence DOWN by same amount
                                   textAnchor="middle"
+                                  dominantBaseline="middle"
                                   fill="rgba(33,29,42,0.72)"
                                   style={{ fontSize: compact ? 12 : 14, fontWeight: 500 }}
                                 >
@@ -1138,7 +1282,7 @@ export default function SessionDetailClient({
                           <span className="mt-1 h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: palette.dot }} />
                           <div className="min-w-0">
                             <p className="truncate text-[17px] font-semibold text-foreground">
-                              {index + 1} {cluster.label}
+                              {cluster.label}
                             </p>
                             <p className="mt-2 text-sm text-foreground/58">
                               {formatResponsesLabel(cluster.count)}
@@ -1212,7 +1356,7 @@ export default function SessionDetailClient({
                 onClick={() => setShowRawResponses((value) => !value)}
                 className="mt-6 w-full rounded-2xl border border-[rgba(123,175,212,0.22)] bg-white px-4 py-3 text-sm font-medium text-foreground/74"
               >
-                {showRawResponses ? 'Hide Responses' : 'View Responses'}
+                  {showRawResponses ? 'Hide Responses' : 'View Responses'}
               </button>
             </section>
 
@@ -1220,10 +1364,10 @@ export default function SessionDetailClient({
               <section className="rounded-3xl bg-white p-5 shadow-[0_10px_28px_rgba(28,26,36,0.05)]">
                 <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Raw student responses</p>
                 <div className="mt-4 max-h-[360px] space-y-3 overflow-y-auto pr-1">
-                  {currentResponses.length === 0 ? (
+                  {viewedResponses.length === 0 ? (
                     <p className="text-sm text-foreground/55">No submissions yet for this question attempt.</p>
                   ) : (
-                    currentResponses.map((response) => (
+                    viewedResponses.map((response) => (
                       <div key={response.response_id} className="rounded-2xl bg-[rgba(238,244,249,0.92)] px-4 py-3">
                         <div className="flex items-center justify-between gap-3">
                           <p className="text-sm font-medium text-foreground">

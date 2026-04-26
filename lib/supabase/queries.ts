@@ -4,7 +4,6 @@ import { cookies } from 'next/headers'
 import { createHash, randomBytes } from 'crypto'
 import { createClient } from './server'
 import type {
-  AIOutput,
   AnalysisRun,
   AttemptType,
   ConfidenceValue,
@@ -14,6 +13,7 @@ import type {
   Session,
   SessionLivePhase,
   SessionQuestion,
+  SessionSummaryRecord,
   SessionParticipant,
   SessionStatus,
   ResponseAiLabel,
@@ -1003,46 +1003,41 @@ export async function getLiveQuestionAnalyses(sessionId: string) {
   return (data || []) as LiveQuestionAnalysis[]
 }
 
-// AI Outputs
-export async function createAIOutput(
-  sessionId: string,
-  condition: 'baseline' | 'treatment',
-  outputType: 'feedback' | 'misconception_card' | 'confidence_matrix' | 'teaching_suggestion',
-  content: Record<string, unknown>,
-  roundNumber = 1
-) {
+export async function getSessionSummaryRecord(sessionId: string) {
   await assertTeacherAuthenticated()
   const supabase = await createClient()
   const { data, error } = await supabase
-    .from('ai_outputs')
-    .insert({
-      session_id: sessionId,
-      round_number: roundNumber,
-      condition,
-      teacher_summary:
-        outputType === 'feedback' ? null : { type: outputType, ...content },
-      student_summary:
-        outputType === 'feedback' ? { type: outputType, ...content } : null,
-      raw_response: JSON.stringify({ type: outputType, content }),
-    })
-    .select()
+    .from('session_summaries')
+    .select('*')
+    .eq('session_id', sessionId)
+    .maybeSingle()
+
+  if (error) throw error
+  return (data as SessionSummaryRecord) || null
+}
+
+export async function upsertSessionSummaryRecord(data: {
+  sessionId: string
+  summaryJson: Record<string, unknown>
+  source: 'openai' | 'fallback'
+}) {
+  await assertTeacherAuthenticated()
+  const supabase = await createClient()
+  const { data: row, error } = await supabase
+    .from('session_summaries')
+    .upsert(
+      {
+        session_id: data.sessionId,
+        summary_json: data.summaryJson,
+        source: data.source,
+      },
+      { onConflict: 'session_id' }
+    )
+    .select('*')
     .single()
 
   if (error) throw error
-  return data as AIOutput
-}
-
-export async function getSessionAIOutputs(sessionId: string) {
-  await assertTeacherAuthenticated()
-  const supabase = await createClient()
-  const { data, error } = await supabase
-    .from('ai_outputs')
-    .select('*')
-    .eq('session_id', sessionId)
-    .order('created_at', { ascending: true })
-
-  if (error) throw error
-  return data as AIOutput[]
+  return row as SessionSummaryRecord
 }
 
 export async function createAnalysisRun(data: {
