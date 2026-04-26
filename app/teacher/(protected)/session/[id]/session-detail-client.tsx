@@ -230,6 +230,17 @@ function getAxisLabel(category: ClusterMapCategory) {
   }
 }
 
+function getClusterDisplayLabel(label: string) {
+  return String(label || '').replace(/^(True|False|Uncertain):\s*/i, '').trim() || 'Response pattern'
+}
+
+function getClusterCategoryBadgeLabel(label: string) {
+  const category = getClusterMapCategory(label)
+  if (category === 'correct') return 'Target-answer cluster'
+  if (category === 'incorrect') return 'Misconception cluster'
+  return 'Needs interpretation'
+}
+
 function getClusterMapPlacements(
   clusters: LiveAnalysisPayload['clusters'],
   width: number,
@@ -650,10 +661,25 @@ export default function SessionDetailClient({
       current_timer_seconds: null,
       timer_started_at: null,
     }))
-    if (payload?.saved) {
+    const savedOrEphemeralAnalysis = payload?.saved || (
+      payload?.analysis && currentQuestion
+        ? {
+            live_question_analysis_id: `ephemeral-${currentQuestion.question_id}-${nextAttemptType}-${Date.now()}`,
+            session_id: sessionId,
+            question_id: currentQuestion.question_id,
+            attempt_type: nextAttemptType,
+            analysis_json: payload.analysis,
+            generated_at: new Date().toISOString(),
+          }
+        : null
+    )
+    if (savedOrEphemeralAnalysis) {
       setLiveQuestionAnalyses((prev) =>
-        mergeByKey(prev, payload.saved, (row) => `${row.question_id}:${row.attempt_type}`)
+        mergeByKey(prev, savedOrEphemeralAnalysis, (row) => `${row.question_id}:${row.attempt_type}`)
       )
+    }
+    if (payload?.persistenceWarning) {
+      setError(payload.persistenceWarning)
     }
   }
 
@@ -1208,7 +1234,7 @@ export default function SessionDetailClient({
                                 </text>
                               )}
                               <title>
-                                {cluster.label} - {formatResponsesLabel(cluster.count)} - avg confidence{' '}
+                                {getClusterDisplayLabel(cluster.label)} - {formatResponsesLabel(cluster.count)} - avg confidence{' '}
                                 {cluster.average_confidence.toFixed(1)}/5
                               </title>
                             </g>
@@ -1222,7 +1248,9 @@ export default function SessionDetailClient({
               <div className="mt-5 grid gap-4 rounded-3xl border border-[rgba(123,175,212,0.14)] bg-white px-5 py-5 md:grid-cols-3">
                 <div>
                   <p className="text-xs uppercase tracking-[0.18em] text-foreground/42">Most common understanding</p>
-                  <p className="mt-3 text-xl font-semibold text-foreground">{visibleClusters[0]?.label || '—'}</p>
+                  <p className="mt-3 text-xl font-semibold text-foreground">
+                    {visibleClusters[0] ? getClusterDisplayLabel(visibleClusters[0].label) : '—'}
+                  </p>
                   <p className="mt-2 text-lg text-foreground/76">
                     {visibleClusters[0] ? formatResponsesLabel(visibleClusters[0].count) : '—'}
                   </p>
@@ -1230,7 +1258,9 @@ export default function SessionDetailClient({
                 <div>
                   <p className="text-xs uppercase tracking-[0.18em] text-foreground/42">Highest confidence</p>
                   <p className="mt-3 text-xl font-semibold text-foreground">
-                    {visibleClusters.slice().sort((a, b) => b.average_confidence - a.average_confidence)[0]?.label || '—'}
+                    {visibleClusters.length > 0
+                      ? getClusterDisplayLabel(visibleClusters.slice().sort((a, b) => b.average_confidence - a.average_confidence)[0].label)
+                      : '—'}
                   </p>
                   <p className="mt-2 text-lg text-foreground/76">
                     {visibleClusters.length > 0
@@ -1241,7 +1271,9 @@ export default function SessionDetailClient({
                 <div>
                   <p className="text-xs uppercase tracking-[0.18em] text-foreground/42">Lowest confidence</p>
                   <p className="mt-3 text-xl font-semibold text-foreground">
-                    {visibleClusters.slice().sort((a, b) => a.average_confidence - b.average_confidence)[0]?.label || '—'}
+                    {visibleClusters.length > 0
+                      ? getClusterDisplayLabel(visibleClusters.slice().sort((a, b) => a.average_confidence - b.average_confidence)[0].label)
+                      : '—'}
                   </p>
                   <p className="mt-2 text-lg text-foreground/76">
                     {visibleClusters.length > 0
@@ -1282,7 +1314,7 @@ export default function SessionDetailClient({
                           <span className="mt-1 h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: palette.dot }} />
                           <div className="min-w-0">
                             <p className="truncate text-[17px] font-semibold text-foreground">
-                              {cluster.label}
+                              {getClusterDisplayLabel(cluster.label)}
                             </p>
                             <p className="mt-2 text-sm text-foreground/58">
                               {formatResponsesLabel(cluster.count)}
@@ -1322,7 +1354,14 @@ export default function SessionDetailClient({
                           }}
                         />
                         <div>
-                          <h3 className="text-[28px] font-semibold leading-tight text-foreground">{selectedCluster.label}</h3>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-[28px] font-semibold leading-tight text-foreground">
+                              {getClusterDisplayLabel(selectedCluster.label)}
+                            </h3>
+                            <Badge className="rounded-full border border-[rgba(123,175,212,0.22)] bg-white/80 px-3 py-1 text-xs font-medium text-foreground shadow-none">
+                              {getClusterCategoryBadgeLabel(selectedCluster.label)}
+                            </Badge>
+                          </div>
                           <p className="mt-2 text-sm text-foreground/62">{formatResponsesLabel(selectedCluster.count)}</p>
                         </div>
                       </div>
@@ -1339,7 +1378,7 @@ export default function SessionDetailClient({
                   </div>
 
                   <div className="mt-6">
-                    <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Reasoning pattern</p>
+                    <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Cluster summary</p>
                     <p className="mt-3 rounded-2xl bg-[rgba(248,251,255,0.92)] px-4 py-4 text-[16px] leading-8 text-foreground/74">
                       {selectedCluster.summary}
                     </p>
@@ -1356,13 +1395,13 @@ export default function SessionDetailClient({
                 onClick={() => setShowRawResponses((value) => !value)}
                 className="mt-6 w-full rounded-2xl border border-[rgba(123,175,212,0.22)] bg-white px-4 py-3 text-sm font-medium text-foreground/74"
               >
-                  {showRawResponses ? 'Hide Responses' : 'View Responses'}
+                  {showRawResponses ? 'Hide Example Responses' : 'View Example Responses'}
               </button>
             </section>
 
             {showRawResponses && (
               <section className="rounded-3xl bg-white p-5 shadow-[0_10px_28px_rgba(28,26,36,0.05)]">
-                <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Raw student responses</p>
+                <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Student responses</p>
                 <div className="mt-4 max-h-[360px] space-y-3 overflow-y-auto pr-1">
                   {viewedResponses.length === 0 ? (
                     <p className="text-sm text-foreground/55">No submissions yet for this question attempt.</p>

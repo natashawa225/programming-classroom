@@ -56,6 +56,15 @@ function normalizeAnswer(answer: string) {
     .replace(/\s+/g, ' ')
 }
 
+function summarizeAnswerStem(answer: string) {
+  const normalized = normalizeAnswer(answer)
+  if (!normalized) return 'Students expressed a similar idea with overlapping wording.'
+  const words = normalized.split(' ').filter(Boolean).slice(0, 8)
+  return words.length > 0
+    ? `Students used similar wording around "${words.join(' ')}".`
+    : 'Students expressed a similar idea with overlapping wording.'
+}
+
 function buildClusterFromResponses(
   label: string,
   summary: string,
@@ -131,6 +140,64 @@ function sanitizeModelClusters(
   return sanitized.slice(0, 5)
 }
 
+function buildFallbackClusters(
+  responses: InputResponse[],
+  fallbackReason: string,
+  rawExcerpt?: string | null
+): LiveQuestionClusterAnalysis {
+  const grouped = new Map<string, InputResponse[]>()
+
+  for (const response of responses) {
+    const key = normalizeAnswer(response.answer) || response.response_id
+    const existing = grouped.get(key)
+    if (existing) {
+      existing.push(response)
+    } else {
+      grouped.set(key, [response])
+    }
+  }
+
+  const sortedGroups = Array.from(grouped.values()).sort((a, b) => {
+    if (b.length !== a.length) return b.length - a.length
+    return b.reduce((sum, row) => sum + row.confidence, 0) - a.reduce((sum, row) => sum + row.confidence, 0)
+  })
+
+  const targetClusterCount = responses.length === 1 ? 1 : clampClusterCount(sortedGroups.length || 1)
+  const limitedGroups =
+    sortedGroups.length <= targetClusterCount
+      ? sortedGroups
+      : [
+          ...sortedGroups.slice(0, targetClusterCount - 1),
+          sortedGroups.slice(targetClusterCount - 1).flat(),
+        ]
+
+  const clusters = limitedGroups.map((rows, index) => {
+    const isMixedGroup = sortedGroups.length > targetClusterCount && index === limitedGroups.length - 1
+    const label = isMixedGroup
+      ? 'Uncertain: Mixed response patterns'
+      : `Uncertain: Similar response pattern ${index + 1}`
+    const summary = isMixedGroup
+      ? 'Students gave varied answers that could not be separated further without AI clustering.'
+      : summarizeAnswerStem(rows[0]?.answer || '')
+    return buildClusterFromResponses(label, summary, rows, index)
+  })
+
+  return {
+    version: 'live_question_clusters_v1',
+    question_prompt: '',
+    attempt_type: 'initial',
+    total_responses: responses.length,
+    cluster_count: clusters.length,
+    source: 'fallback',
+    fallback_reason: fallbackReason,
+    fallback_debug: {
+      error: fallbackReason,
+      raw_excerpt: rawExcerpt ? rawExcerpt.slice(0, 280) : null,
+    },
+    clusters,
+  }
+}
+
 export async function clusterLiveQuestionResponses(input: {
   questionPrompt: string
   attemptType: AttemptType
@@ -186,22 +253,25 @@ export async function clusterLiveQuestionResponses(input: {
   })
 
   if (!result.ok) {
-    console.error('[live-clustering] openai failure:', result.error)
-    throw new LiveClusteringError(
-      'openai_request_failed',
+    const fallbackReason =
       typeof result.error === 'string' && result.error.trim()
         ? result.error
         : 'OpenAI clustering request failed.'
-    )
+    console.error('[live-clustering] openai failure:', fallbackReason)
+    const fallback = buildFallbackClusters(cleanedResponses, fallbackReason, result.rawText || null)
+    fallback.question_prompt = input.questionPrompt
+    fallback.attempt_type = input.attemptType
+    return fallback
   }
 
   const rawClusters = Array.isArray(result.json?.clusters) ? result.json.clusters : []
   const clusters = sanitizeModelClusters(rawClusters, cleanedResponses)
   if (clusters.length === 0) {
-    throw new LiveClusteringError(
-      'openai_returned_no_usable_clusters',
-      'OpenAI returned cluster JSON, but it could not be mapped to the submitted responses.'
-    )
+    const fallbackReason = 'OpenAI returned cluster JSON, but it could not be mapped to the submitted responses.'
+    const fallback = buildFallbackClusters(cleanedResponses, fallbackReason, result.rawText || null)
+    fallback.question_prompt = input.questionPrompt
+    fallback.attempt_type = input.attemptType
+    return fallback
   }
 
   return {

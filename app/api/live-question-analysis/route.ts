@@ -10,6 +10,23 @@ import {
 } from '@/lib/supabase/queries'
 import type { AttemptType } from '@/lib/types/database'
 
+async function retryOperation<T>(operation: () => Promise<T>, attempts = 3, delayMs = 250): Promise<T> {
+  let lastError: unknown
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation()
+    } catch (error) {
+      lastError = error
+      if (attempt < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs * (attempt + 1)))
+      }
+    }
+  }
+
+  throw lastError
+}
+
 function inferAttemptType(session: Awaited<ReturnType<typeof getSession>>): AttemptType | null {
   if (session.live_phase === 'question_initial_open' || session.live_phase === 'question_initial_closed') {
     return 'initial'
@@ -34,8 +51,8 @@ export async function POST(request: NextRequest) {
     }
 
     const [session, questions] = await Promise.all([
-      getSession(sessionId),
-      getSessionQuestions(sessionId),
+      retryOperation(() => getSession(sessionId)),
+      retryOperation(() => getSessionQuestions(sessionId)),
     ])
     const question =
       questions.find((entry) => entry.position === session.current_question_position) ||
@@ -54,10 +71,10 @@ export async function POST(request: NextRequest) {
       (attemptType === 'initial' && session.live_phase === 'question_initial_open') ||
       (attemptType === 'revision' && session.live_phase === 'question_revision_open')
     ) {
-      await closeCurrentQuestion(sessionId, attemptType)
+      await retryOperation(() => closeCurrentQuestion(sessionId, attemptType))
     }
 
-    const responses = (await getSessionResponses(sessionId)).filter((response) => {
+    const responses = (await retryOperation(() => getSessionResponses(sessionId))).filter((response) => {
       return response.question_id === question.question_id && response.attempt_type === attemptType
     })
     if (responses.length === 0) {
@@ -74,18 +91,28 @@ export async function POST(request: NextRequest) {
       })),
     })
 
-    const saved = await upsertLiveQuestionAnalysis({
-      sessionId,
-      questionId: question.question_id,
-      attemptType,
-      analysisJson: analysis,
-    })
+    let saved = null
+    let persistenceWarning: string | null = null
+    try {
+      saved = await retryOperation(() =>
+        upsertLiveQuestionAnalysis({
+          sessionId,
+          questionId: question.question_id,
+          attemptType,
+          analysisJson: analysis,
+        })
+      )
+    } catch (storageError) {
+      console.error('live-question-analysis storage warning', storageError)
+      persistenceWarning = 'Analysis was generated, but saving it failed. It is available for this view only until storage recovers.'
+    }
 
     return NextResponse.json({
       question,
       attemptType,
       analysis,
       saved,
+      persistenceWarning,
     })
   } catch (error) {
     console.error('live-question-analysis error', error)

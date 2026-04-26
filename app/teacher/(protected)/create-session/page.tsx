@@ -151,7 +151,6 @@ export default function CreateSession() {
                     <div className="flex items-center justify-between">
                       <div>
                         <p className="text-sm font-medium text-foreground">Questions</p>
-                        <p className="text-sm text-foreground/60">Add 1–5 open-ended questions. Students see one at a time.</p>
                       </div>
                       <Button type="button" variant="outline" onClick={addQuestion} disabled={formData.questions.length >= 5}>
                         Add Question
@@ -222,7 +221,7 @@ export default function CreateSession() {
 
             {/* Condition Selection */}
             <Card className="p-6">
-              <h2 className="text-xl font-semibold text-foreground mb-6">Research Condition</h2>
+              <h2 className="text-xl font-semibold text-foreground mb-1">Condition</h2>
               
               <div className="space-y-4">
                 <div className="flex items-center">
@@ -236,10 +235,7 @@ export default function CreateSession() {
                     className="w-4 h-4 cursor-pointer"
                   />
                   <label htmlFor="baseline" className="ml-3 cursor-pointer">
-                    <span className="font-medium text-foreground">Baseline (Control)</span>
-                    <p className="text-sm text-foreground/60 mt-1">
-                      Students receive direct AI-generated feedback on their response immediately
-                    </p>
+                    <span className="font-medium text-foreground">Baseline</span>
                   </label>
                 </div>
 
@@ -254,10 +250,7 @@ export default function CreateSession() {
                     className="w-4 h-4 cursor-pointer mt-1"
                   />
                   <label htmlFor="treatment" className="ml-3 cursor-pointer flex-1">
-                    <span className="font-medium text-foreground">Treatment (Experimental)</span>
-                    <p className="text-sm text-foreground/60 mt-1">
-                      You receive misconception cards and teaching suggestions. Students see a confidence matrix instead
-                    </p>
+                    <span className="font-medium text-foreground">Treatment</span>
                   </label>
                 </div>
               </div>
