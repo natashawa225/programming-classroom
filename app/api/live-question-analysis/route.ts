@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getTeacherSession } from '@/lib/teacher-auth'
-import { clusterLiveQuestionResponses } from '@/lib/ai/live-question-clustering'
+import { clusterLiveQuestionResponses, LiveClusteringError } from '@/lib/ai/live-question-clustering'
 import {
   closeCurrentQuestion,
-  getCurrentSessionQuestion,
   getSession,
+  getSessionQuestions,
   getSessionResponses,
   upsertLiveQuestionAnalysis,
 } from '@/lib/supabase/queries'
@@ -33,8 +33,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing sessionId' }, { status: 400 })
     }
 
-    const session = await getSession(sessionId)
-    const question = await getCurrentSessionQuestion(sessionId)
+    const [session, questions] = await Promise.all([
+      getSession(sessionId),
+      getSessionQuestions(sessionId),
+    ])
+    const question =
+      questions.find((entry) => entry.position === session.current_question_position) ||
+      questions[0] ||
+      null
     const attemptType = (body?.attemptType as AttemptType | undefined) || inferAttemptType(session)
 
     if (!question) {
@@ -54,6 +60,9 @@ export async function POST(request: NextRequest) {
     const responses = (await getSessionResponses(sessionId)).filter((response) => {
       return response.question_id === question.question_id && response.attempt_type === attemptType
     })
+    if (responses.length === 0) {
+      return NextResponse.json({ error: 'No responses found for this question attempt.' }, { status: 400 })
+    }
 
     const analysis = await clusterLiveQuestionResponses({
       questionPrompt: question.prompt,
@@ -80,6 +89,12 @@ export async function POST(request: NextRequest) {
     })
   } catch (error) {
     console.error('live-question-analysis error', error)
+    if (error instanceof LiveClusteringError) {
+      return NextResponse.json(
+        { error: error.message, code: error.code },
+        { status: error.code === 'no_responses' ? 400 : 502 }
+      )
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Failed to analyze live question.' },
       { status: 500 }

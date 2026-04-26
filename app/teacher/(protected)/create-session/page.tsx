@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
@@ -12,13 +12,13 @@ export default function CreateSession() {
   const router = useRouter()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const submitLockedRef = useRef(false)
+  const createdSessionIdRef = useRef<string | null>(null)
 
   const [formData, setFormData] = useState({
     title: '',
     condition: 'baseline' as 'baseline' | 'treatment',
     questions: [
-      { prompt: '', correctAnswer: '', timerSeconds: '' },
-      { prompt: '', correctAnswer: '', timerSeconds: '' },
       { prompt: '', correctAnswer: '', timerSeconds: '' },
     ] as Array<{ prompt: string; correctAnswer: string; timerSeconds: string }>,
   })
@@ -48,13 +48,18 @@ export default function CreateSession() {
 
   const removeQuestion = (index: number) => {
     setFormData(prev => {
-      if (prev.questions.length <= 3) return prev
+      if (prev.questions.length <= 1) return prev
       return { ...prev, questions: prev.questions.filter((_, i) => i !== index) }
     })
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (submitLockedRef.current || createdSessionIdRef.current) {
+      return
+    }
+
+    submitLockedRef.current = true
     setLoading(true)
     setError(null)
 
@@ -67,8 +72,8 @@ export default function CreateSession() {
         }))
         .filter(q => q.prompt.length > 0)
 
-      if (normalized.length < 3) {
-        throw new Error('Please enter at least 3 questions.')
+      if (normalized.length < 1) {
+        throw new Error('Please enter at least 1 question.')
       }
       if (normalized.length > 5) {
         throw new Error('Please enter no more than 5 questions.')
@@ -86,13 +91,16 @@ export default function CreateSession() {
         })),
       })
 
-      // Redirect to session page
-      router.push(`/teacher/session/${session.id}`)
+      createdSessionIdRef.current = session.id
+      router.replace(`/teacher/session/${session.id}`)
     } catch (err) {
       console.error('Error creating session:', err)
       setError(err instanceof Error ? err.message : 'Failed to create session')
+      submitLockedRef.current = false
     } finally {
-      setLoading(false)
+      if (!createdSessionIdRef.current) {
+        setLoading(false)
+      }
     }
   }
 
@@ -143,7 +151,7 @@ export default function CreateSession() {
                     <div className="flex items-center justify-between">
                       <div>
                         <p className="text-sm font-medium text-foreground">Questions</p>
-                        <p className="text-sm text-foreground/60">Add 3–5 open-ended questions. Students see one at a time.</p>
+                        <p className="text-sm text-foreground/60">Add 1–5 open-ended questions. Students see one at a time.</p>
                       </div>
                       <Button type="button" variant="outline" onClick={addQuestion} disabled={formData.questions.length >= 5}>
                         Add Question
@@ -158,7 +166,7 @@ export default function CreateSession() {
                             type="button"
                             variant="ghost"
                             onClick={() => removeQuestion(idx)}
-                            disabled={formData.questions.length <= 3}
+                            disabled={formData.questions.length <= 1}
                           >
                             Remove
                           </Button>
@@ -167,14 +175,14 @@ export default function CreateSession() {
                         <div className="space-y-3">
                           <div>
                             <label className="block text-sm font-medium text-foreground mb-2">
-                              Prompt
+                            Question
                             </label>
                             <textarea
                               value={q.prompt}
                               onChange={(e) => updateQuestion(idx, { prompt: e.target.value })}
-                              placeholder="Enter the prompt"
+                              placeholder="Enter the question"
                               rows={3}
-                              required={idx < 3}
+                              required={idx === 0}
                               className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                             />
                           </div>
@@ -258,6 +266,14 @@ export default function CreateSession() {
             {error && (
               <Card className="p-4 border-destructive/30 bg-destructive/5">
                 <p className="text-destructive text-sm">{error}</p>
+              </Card>
+            )}
+
+            {loading && !error && (
+              <Card className="p-4 border-primary/20 bg-primary/5">
+                <p className="text-sm text-foreground/80">
+                  Creating session… This can take a few seconds. Please do not click again.
+                </p>
               </Card>
             )}
 

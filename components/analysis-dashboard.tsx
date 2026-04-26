@@ -9,12 +9,9 @@ import {
   Line,
   LineChart,
   ReferenceLine,
-  Scatter,
-  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
-  ZAxis,
 } from 'recharts'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'

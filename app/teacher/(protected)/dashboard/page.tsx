@@ -116,37 +116,45 @@ export default function TeacherDashboard() {
           {!loading && sessions.length > 0 && (
             <div className="grid gap-6">
               {sessions.map((session) => (
-                <Link key={session.id} href={`/teacher/session/${session.id}`}>
-                  <Card className="p-6 hover:border-primary/50 transition-colors cursor-pointer">
-                    <div className="flex items-start justify-between mb-4">
-                      <div>
-                        <h3 className="text-xl font-semibold text-foreground">{session.session_code}</h3>
-                        <p className="text-sm text-foreground/60 mt-1">{session.question}</p>
-                      </div>
-                      <span className={`px-3 py-1 rounded-full text-sm font-medium ${getStatusBadge(session.status)}`}>
-                        {session.status.charAt(0).toUpperCase() + session.status.slice(1)}
-                      </span>
+                <Card key={session.id} className="p-6 transition-colors hover:border-primary/50">
+                  <div className="flex items-start justify-between mb-4">
+                    <div>
+                      <Link
+                        href={`/teacher/session/${session.id}`}
+                        className="inline-block text-xl font-semibold text-foreground transition-colors hover:text-primary"
+                      >
+                        {session.session_code}
+                      </Link>
+                      <p className="text-sm text-foreground/60 mt-1">{session.question}</p>
                     </div>
+                    <span className={`px-3 py-1 rounded-full text-sm font-medium ${getStatusBadge(session.status)}`}>
+                      {session.status.charAt(0).toUpperCase() + session.status.slice(1)}
+                    </span>
+                  </div>
 
-                    <div className="space-y-2 text-sm text-foreground/70 mb-4">
-                      <p>
-                        <span className="font-medium">Answer Options:</span> {' '}
-                        {session.answer_options.length > 0 ? session.answer_options.join(', ') : 'Free response'}
-                      </p>
-                      <p>
-                        <span className="font-medium">Condition:</span> {' '}
-                        {session.condition === 'baseline' ? 'Baseline (Direct Feedback)' : 'Treatment (Misconception Analysis)'}
-                      </p>
-                    </div>
+                  <div className="space-y-2 text-sm text-foreground/70 mb-4">
+                    <p>
+                      <span className="font-medium">Answer Options:</span> {' '}
+                      {session.answer_options.length > 0 ? session.answer_options.join(', ') : 'Free response'}
+                    </p>
+                    <p>
+                      <span className="font-medium">Condition:</span> {' '}
+                      {session.condition === 'baseline' ? 'Baseline (Direct Feedback)' : 'Treatment (Misconception Analysis)'}
+                    </p>
+                  </div>
 
-                    <div className="flex items-center justify-between text-sm">
-                      <p className="text-foreground/60">
-                        Created {formatDateUtc(session.created_at)}
-                      </p>
-                      <span className="text-primary font-medium">View Details →</span>
-                    </div>
-                  </Card>
-                </Link>
+                  <div className="flex items-center justify-between text-sm">
+                    <p className="text-foreground/60">
+                      Created {formatDateUtc(session.created_at)}
+                    </p>
+                    <Link
+                      href={`/teacher/session/${session.id}`}
+                      className="font-medium text-primary transition-colors hover:text-primary/80"
+                    >
+                      View Details →
+                    </Link>
+                  </div>
+                </Card>
               ))}
             </div>
           )}

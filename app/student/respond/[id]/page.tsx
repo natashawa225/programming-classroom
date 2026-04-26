@@ -120,7 +120,7 @@ export default function StudentRespondPage() {
         console.error(err)
       }
     },
-    pollMs: 2000,
+    pollMs: 15000,
     debugLabel: `student-live-${sessionId}`,
   })
 
@@ -291,11 +291,70 @@ export default function StudentRespondPage() {
             </div>
           )}
 
-          {note && (
-            <div className="mt-4 rounded-lg border border-border/60 bg-secondary/15 px-4 py-3 text-sm text-foreground/75">
-              {note}
-            </div>
-          )}
+{submitted && currentQuestion && (
+  <div className="mt-6 rounded-xl border border-border/60 bg-background p-5 flex flex-col gap-5">
+    
+    {/* Header */}
+    <div className="flex items-center gap-3">
+      <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-green-50 dark:bg-green-950">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <path d="M4 10.5L8 14.5L16 6" stroke="#3B6D11" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </div>
+      <div>
+        <p className="text-base font-medium text-foreground">
+          {attemptType === 'revision' ? 'Revision submitted' : 'Answer submitted'}
+        </p>
+        <p className="text-sm text-foreground/60">Your answer has been saved.</p>
+      </div>
+    </div>
+
+    {/* Answer */}
+    <div className="border-t border-border/60 pt-4 flex flex-col gap-2">
+      <p className="text-xs font-medium uppercase tracking-wide text-foreground/50">Your answer</p>
+      <p className="rounded-lg bg-secondary/20 px-4 py-3 text-sm leading-relaxed text-foreground whitespace-pre-wrap">
+        {answer}
+      </p>
+    </div>
+
+    {/* Confidence */}
+    {confidence !== null && (
+      <div className="flex flex-col gap-2">
+        <p className="text-xs font-medium uppercase tracking-wide text-foreground/50">Confidence</p>
+        <div className="flex items-center gap-3">
+          <div className="flex gap-1.5">
+            {[1, 2, 3, 4, 5].map((v) => (
+              <div
+                key={v}
+                className={`flex h-7 w-7 items-center justify-center rounded-md text-xs font-medium ${
+                  v === confidence
+                    ? 'bg-green-600 text-white'
+                    : v < confidence
+                    ? 'bg-green-50 border border-green-200 text-green-800 dark:bg-green-950 dark:border-green-800 dark:text-green-300'
+                    : 'bg-secondary/30 border border-border/40 text-foreground/40'
+                }`}
+              >
+                {v}
+              </div>
+            ))}
+          </div>
+          <span className="text-sm text-foreground/60">{confidence} of 5</span>
+        </div>
+      </div>
+    )}
+
+    {/* Wait hint */}
+    <div className="flex items-center gap-2 rounded-lg bg-secondary/20 px-3 py-2.5">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" className="shrink-0">
+        <circle cx="7" cy="7" r="6" stroke="currentColor" strokeWidth="1" className="text-foreground/40" fill="none"/>
+        <rect x="6.5" y="3.5" width="1" height="4" rx="0.5" fill="currentColor" className="text-foreground/40"/>
+        <circle cx="7" cy="10" r="0.75" fill="currentColor" className="text-foreground/40"/>
+      </svg>
+      <p className="text-xs text-foreground/55">It will update automatically when your teacher opens the next step.</p>
+    </div>
+
+  </div>
+)}
 
           {error && (
             <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
@@ -348,12 +407,6 @@ export default function StudentRespondPage() {
             </div>
           )}
         </Card>
-
-        <div className="mt-6 text-center">
-          <Link href="/student/join" className="text-sm text-foreground/60 transition hover:text-foreground">
-            Back to join page
-          </Link>
-        </div>
       </div>
     </main>
   )

@@ -364,6 +364,17 @@ export default function SessionAnalysis() {
     round1InProgress: false,
     round2InProgress: false,
   })
+  const responseRealtimeTables = useMemo(
+    () => [
+      { table: 'responses', event: 'INSERT' as const, filter: `session_id=eq.${sessionId}` },
+      { table: 'responses', event: 'UPDATE' as const, filter: `session_id=eq.${sessionId}` },
+    ],
+    [sessionId]
+  )
+  const participantRealtimeTables = useMemo(
+    () => [{ table: 'session_participants', event: '*' as const, filter: `session_id=eq.${sessionId}` }],
+    [sessionId]
+  )
   const analysisRealtimeTables = useMemo(
     () => [{ table: 'analysis_runs', event: '*' as const, filter: `session_id=eq.${sessionId}` }],
     [sessionId]
@@ -407,9 +418,11 @@ export default function SessionAnalysis() {
     loadData()
   }, [sessionId])
 
-  const loadStoredAnalysis = async (rn: 1 | 2) => {
+  const loadStoredAnalysis = async (rn: 1 | 2, options?: { silent?: boolean }) => {
     try {
-      setLoadingStoredAnalysis(true)
+      if (!options?.silent) {
+        setLoadingStoredAnalysis(true)
+      }
       setError(null)
       const [completed, inProgress, completedRound1, completedRound2, inProgressRound1, inProgressRound2] = await Promise.all([
         getLatestCompletedAnalysisRun(sessionId, rn),
@@ -458,7 +471,9 @@ export default function SessionAnalysis() {
       setAnalysisStatus('none')
       setAnalysisRunMeta(null)
     } finally {
-      setLoadingStoredAnalysis(false)
+      if (!options?.silent) {
+        setLoadingStoredAnalysis(false)
+      }
     }
   }
 
@@ -486,10 +501,7 @@ export default function SessionAnalysis() {
   }, [sessionId, session?.id, roundNumber])
 
   usePostgresChanges({
-    tables: [
-      { table: 'responses', event: 'INSERT' as const, filter: `session_id=eq.${sessionId}` },
-      { table: 'responses', event: 'UPDATE' as const, filter: `session_id=eq.${sessionId}` },
-    ],
+    tables: responseRealtimeTables,
     onChange: async () => {
       try {
         const responsesData = await getSessionResponses(sessionId)
@@ -503,7 +515,7 @@ export default function SessionAnalysis() {
   })
 
   usePostgresChanges({
-    tables: [{ table: 'session_participants', event: '*' as const, filter: `session_id=eq.${sessionId}` }],
+    tables: participantRealtimeTables,
     onChange: async () => {
       try {
         const participantsData = await getSessionParticipants(sessionId)
@@ -519,9 +531,9 @@ export default function SessionAnalysis() {
   usePostgresChanges({
     tables: analysisRealtimeTables,
     onChange: async () => {
-      await loadStoredAnalysis(roundNumber)
+      await loadStoredAnalysis(roundNumber, { silent: true })
     },
-    pollMs: 3000,
+    pollMs: 10000,
     debugLabel: `teacher-analysis-run-${sessionId}-r${roundNumber}`,
   })
 

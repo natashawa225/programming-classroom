@@ -11,7 +11,7 @@ interface UsePostgresChangesOptions {
     event?: PostgresChangeEvent
     filter?: string
   }>
-  onChange: () => void
+  onChange: () => void | Promise<void>
   schema?: string
   debounceMs?: number
   pollMs?: number
@@ -28,6 +28,7 @@ export function usePostgresChanges({
 }: UsePostgresChangesOptions) {
   const callbackRef = useRef(onChange)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const inFlightRef = useRef(false)
 
   useEffect(() => {
     callbackRef.current = onChange
@@ -40,13 +41,30 @@ export function usePostgresChanges({
     let pollTimer: ReturnType<typeof setInterval> | null = null
     let subscribed = false
 
+    const runRefresh = async () => {
+      if (inFlightRef.current) {
+        if (debugLabel) {
+          // eslint-disable-next-line no-console
+          console.debug(`[realtime:${debugLabel}] skipped refresh while previous refresh is still running`)
+        }
+        return
+      }
+
+      inFlightRef.current = true
+      try {
+        await callbackRef.current()
+      } finally {
+        inFlightRef.current = false
+      }
+    }
+
     const scheduleRefresh = () => {
       if (timerRef.current) {
         clearTimeout(timerRef.current)
       }
 
       timerRef.current = setTimeout(() => {
-        callbackRef.current()
+        void runRefresh()
       }, debounceMs)
     }
 
@@ -71,11 +89,13 @@ export function usePostgresChanges({
 
       if (status === 'SUBSCRIBED') {
         subscribed = true
-        scheduleRefresh()
       }
 
       if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && pollMs > 0 && !pollTimer) {
-        pollTimer = setInterval(() => callbackRef.current(), pollMs)
+        pollTimer = setInterval(() => {
+          if (document.visibilityState !== 'visible') return
+          void runRefresh()
+        }, pollMs)
       }
     })
 
@@ -83,15 +103,20 @@ export function usePostgresChanges({
       pollMs > 0
         ? setTimeout(() => {
             if (!subscribed && !pollTimer) {
-              pollTimer = setInterval(() => callbackRef.current(), pollMs)
+              pollTimer = setInterval(() => {
+                if (document.visibilityState !== 'visible') return
+                void runRefresh()
+              }, pollMs)
             }
-          }, 2500)
+          }, Math.max(2500, Math.min(pollMs, 15000)))
         : null
 
     const onVisibilityChange =
       pollMs > 0
         ? () => {
-            if (document.visibilityState === 'visible') callbackRef.current()
+            if (document.visibilityState === 'visible') {
+              void runRefresh()
+            }
           }
         : null
 

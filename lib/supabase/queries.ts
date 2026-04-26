@@ -232,15 +232,24 @@ export async function getActiveSessions() {
 
 export async function getSession(sessionId: string) {
   const supabase = await createClient()
-  const { data, error } = await supabase
-    .from('sessions')
-    .select('*')
-    .eq('id', sessionId)
-    .maybeSingle()
+  const attempts = 3
 
-  if (error) throw error
-  if (!data) throw new Error('Session not found')
-  return data as Session
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const { data, error } = await supabase
+      .from('sessions')
+      .select('*')
+      .eq('id', sessionId)
+      .maybeSingle()
+
+    if (error) throw error
+    if (data) return data as Session
+
+    if (attempt < attempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)))
+    }
+  }
+
+  throw new Error('Session not found')
 }
 
 export async function getSessionQuestions(sessionId: string) {

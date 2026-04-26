@@ -279,7 +279,7 @@ export async function POST(request: NextRequest) {
       condition: session.condition,
       sessionStatus: session.status,
       roundNumber: rn as 1 | 2,
-      model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
+      model: 'gpt-4.1-mini',
       status: 'running',
     })
 

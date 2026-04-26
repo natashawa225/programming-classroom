@@ -1032,7 +1032,7 @@ async function analyzeGroupedQuestionWithAI(options: {
   const result = await openaiChatJson({
     messages,
     maxTokens: options.session.condition === 'baseline' ? 800 : 900,
-    timeoutMs: 30000,
+    timeoutMs: 100000,
   })
 
   if (!result.ok) {

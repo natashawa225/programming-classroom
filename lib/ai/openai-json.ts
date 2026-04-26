@@ -1,3 +1,5 @@
+import { ProxyAgent, request } from 'undici'
+
 type ChatMessage = { role: 'system' | 'user'; content: string }
 
 export type OpenAIJsonResult =
@@ -67,7 +69,7 @@ function parseModelJson(text: string) {
 }
 
 function getOpenAIConfig() {
-  const apiKey = process.env.OPENAI_API_KEY || process.env.OPENAI_APIKEY || ''
+  const apiKey = process.env.OPENAI_API_KEY
   if (!apiKey) {
     throw new Error('OPENAI_API_KEY is missing')
   }
@@ -76,6 +78,51 @@ function getOpenAIConfig() {
     apiKey,
     model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
   }
+}
+
+function formatFetchError(error: unknown) {
+  if (!error || typeof error !== 'object') {
+    return 'OpenAI request failed'
+  }
+
+  const err = error as {
+    name?: string
+    message?: string
+    cause?: { name?: string; message?: string; code?: string }
+  }
+
+  const message = typeof err.message === 'string' ? err.message.trim() : ''
+  const causeName = typeof err.cause?.name === 'string' ? err.cause.name.trim() : ''
+  const causeMessage = typeof err.cause?.message === 'string' ? err.cause.message.trim() : ''
+  const causeCode = typeof err.cause?.code === 'string' ? err.cause.code.trim() : ''
+
+  const parts = [
+    message,
+    causeName,
+    causeCode,
+    causeMessage,
+  ].filter(Boolean)
+
+  return parts.length > 0 ? `OpenAI request failed: ${parts.join(' | ')}` : 'OpenAI request failed'
+}
+
+let cachedProxyUrl: string | null = null
+let cachedProxyAgent: ProxyAgent | undefined
+
+function getProxyDispatcher() {
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || null
+  if (!proxyUrl) {
+    cachedProxyUrl = null
+    cachedProxyAgent = undefined
+    return undefined
+  }
+
+  if (!cachedProxyAgent || cachedProxyUrl !== proxyUrl) {
+    cachedProxyUrl = proxyUrl
+    cachedProxyAgent = new ProxyAgent(proxyUrl)
+  }
+
+  return cachedProxyAgent
 }
 
 export async function openaiChatJson(options: {
@@ -95,15 +142,19 @@ export async function openaiChatJson(options: {
   }
 
   const model = options.model || config.model
-  const timeoutMs = options.timeoutMs ?? 25000
+  const timeoutMs = options.timeoutMs ?? 45000
   const maxTokens = options.maxTokens ?? 900
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
+    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || 'none'
+    console.log('[openai-json] proxy =', proxyUrl)
+    const dispatcher = getProxyDispatcher()
+    const { statusCode, body } = await request('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
+      dispatcher,
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${config.apiKey}`,
@@ -118,9 +169,9 @@ export async function openaiChatJson(options: {
       signal: controller.signal,
     })
 
-    const raw = await resp.text()
-    if (!resp.ok) {
-      return { ok: false, error: `OpenAI error: ${resp.status}`, rawText: raw }
+    const raw = await body.text()
+    if (statusCode < 200 || statusCode >= 300) {
+      return { ok: false, error: `OpenAI error: ${statusCode}`, rawText: raw }
     }
 
     const parsed = JSON.parse(raw)
@@ -140,7 +191,7 @@ export async function openaiChatJson(options: {
     }
   } catch (err: any) {
     if (err?.name === 'AbortError') return { ok: false, error: 'OpenAI request timed out' }
-    return { ok: false, error: 'OpenAI request failed' }
+    return { ok: false, error: formatFetchError(err) }
   } finally {
     clearTimeout(timer)
   }

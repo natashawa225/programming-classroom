@@ -18,6 +18,11 @@ export type LiveQuestionClusterAnalysis = {
   total_responses: number
   cluster_count: number
   source: 'openai' | 'fallback'
+  fallback_reason?: string | null
+  fallback_debug?: {
+    error?: string | null
+    raw_excerpt?: string | null
+  } | null
   clusters: LiveCluster[]
 }
 
@@ -71,35 +76,14 @@ function buildClusterFromResponses(
   }
 }
 
-function fallbackClusterResponses(responses: InputResponse[]): LiveCluster[] {
-  const groups = new Map<string, InputResponse[]>()
+export class LiveClusteringError extends Error {
+  code: string
 
-  for (const response of responses) {
-    const key = normalizeAnswer(response.answer) || response.response_id
-    const bucket = groups.get(key) || []
-    bucket.push(response)
-    groups.set(key, bucket)
+  constructor(code: string, message: string) {
+    super(message)
+    this.name = 'LiveClusteringError'
+    this.code = code
   }
-
-  const sortedGroups = [...groups.values()].sort((a, b) => b.length - a.length)
-  const desired = Math.min(clampClusterCount(sortedGroups.length || 1), Math.max(1, responses.length))
-  const selected = sortedGroups.slice(0, desired)
-  const overflow = sortedGroups.slice(desired).flat()
-
-  if (overflow.length > 0) {
-    selected[selected.length - 1] = [...selected[selected.length - 1], ...overflow]
-  }
-
-  return selected.map((rows, index) => {
-    const sample = rows[0]?.answer || ''
-    const label = sample.split(/\s+/).slice(0, 5).join(' ') || `Cluster ${index + 1}`
-    return buildClusterFromResponses(
-      label,
-      'Students in this cluster gave closely related responses.',
-      rows,
-      index
-    )
-  })
 }
 
 function sanitizeModelClusters(
@@ -133,9 +117,7 @@ function sanitizeModelClusters(
 
   const unassigned = responses.filter((response) => !assigned.has(response.response_id))
   if (unassigned.length > 0) {
-    if (sanitized.length === 0) {
-      return fallbackClusterResponses(responses)
-    }
+    if (sanitized.length === 0) return []
     const targetIndex = sanitized.reduce((bestIndex, cluster, index, array) => {
       return cluster.count < array[bestIndex].count ? index : bestIndex
     }, 0)
@@ -163,15 +145,7 @@ export async function clusterLiveQuestionResponses(input: {
     .filter((response) => response.response_id && response.answer)
 
   if (cleanedResponses.length === 0) {
-    return {
-      version: 'live_question_clusters_v1',
-      question_prompt: input.questionPrompt,
-      attempt_type: input.attemptType,
-      total_responses: 0,
-      cluster_count: 0,
-      source: 'fallback',
-      clusters: [],
-    }
+    throw new LiveClusteringError('no_responses', 'No responses are available for this question attempt.')
   }
 
   const numberedResponses = cleanedResponses
@@ -182,11 +156,12 @@ export async function clusterLiveQuestionResponses(input: {
 
   const result = await openaiChatJson({
     maxTokens: 1400,
+    timeoutMs: 100000,
     messages: [
       {
         role: 'system',
         content:
-          'You cluster short student answers for one open-ended classroom question. Return concise JSON only. Keep 2 to 5 clusters. Use neutral language. Do not grade, do not label answers correct or incorrect, and do not mention misconceptions.',
+          'You cluster short student answers for one open-ended classroom question. Return concise JSON only. Keep 2 to 5 clusters. Use classroom-safe language. Separate responses by distinct reasoning patterns, not just broad answer polarity. Avoid junk-drawer clusters that mix different misconceptions. Label each cluster with one of these prefixes: "True:", "False:", or "Uncertain:" so the visualization can place it on a correctness map.',
       },
       {
         role: 'user',
@@ -200,39 +175,44 @@ export async function clusterLiveQuestionResponses(input: {
           'Rules:',
           '- Every response_id must appear in exactly one cluster.',
           '- Use 2 to 5 clusters unless there is only 1 response.',
-          '- Labels should be short and descriptive.',
-          '- Summaries should neutrally describe the shared idea.',
+          '- Labels should be short and descriptive and must start with "True:", "False:", or "Uncertain:".',
+          '- Split different lines of reasoning into separate clusters even when they reach the same final answer.',
+          '- Do not combine directional-union confusion, root/order confusion, implementation-dependence, and simple uncertainty into one broad cluster.',
+          '- Summaries should neutrally describe the shared reasoning pattern.',
           '- Keep summaries concise and classroom-safe.',
         ].join('\n\n'),
       },
     ],
   })
 
-  const fallback = fallbackClusterResponses(cleanedResponses)
-
   if (!result.ok) {
-    return {
-      version: 'live_question_clusters_v1',
-      question_prompt: input.questionPrompt,
-      attempt_type: input.attemptType,
-      total_responses: cleanedResponses.length,
-      cluster_count: fallback.length,
-      source: 'fallback',
-      clusters: fallback,
-    }
+    console.error('[live-clustering] openai failure:', result.error)
+    throw new LiveClusteringError(
+      'openai_request_failed',
+      typeof result.error === 'string' && result.error.trim()
+        ? result.error
+        : 'OpenAI clustering request failed.'
+    )
   }
 
   const rawClusters = Array.isArray(result.json?.clusters) ? result.json.clusters : []
   const clusters = sanitizeModelClusters(rawClusters, cleanedResponses)
-  const finalClusters = clusters.length > 0 ? clusters : fallback
+  if (clusters.length === 0) {
+    throw new LiveClusteringError(
+      'openai_returned_no_usable_clusters',
+      'OpenAI returned cluster JSON, but it could not be mapped to the submitted responses.'
+    )
+  }
 
   return {
     version: 'live_question_clusters_v1',
     question_prompt: input.questionPrompt,
     attempt_type: input.attemptType,
     total_responses: cleanedResponses.length,
-    cluster_count: finalClusters.length,
-    source: clusters.length > 0 ? 'openai' : 'fallback',
-    clusters: finalClusters,
+    cluster_count: clusters.length,
+    source: 'openai',
+    fallback_reason: null,
+    fallback_debug: null,
+    clusters,
   }
 }
