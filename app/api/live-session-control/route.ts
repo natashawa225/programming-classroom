@@ -3,10 +3,26 @@ import { generateSessionSummary, storeSessionSummary } from '@/lib/session-summa
 import { getTeacherSession } from '@/lib/teacher-auth'
 import {
   completeSession,
+  getCurrentSessionQuestion,
+  getSession,
+  logSessionEvent,
   moveToNextQuestion,
   openQuestionRevision,
   startCurrentQuestion,
 } from '@/lib/supabase/queries'
+
+async function logEventSafely(data: {
+  sessionId: string
+  eventType: 'session_started' | 'question_opened' | 'revision_opened'
+  questionId?: string | null
+  roundNumber?: 1 | 2
+}) {
+  try {
+    await logSessionEvent(data)
+  } catch (error) {
+    console.error('session event logging warning', error)
+  }
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -28,17 +44,49 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'start') {
+      const [currentSession, currentQuestion] = await Promise.all([
+        getSession(sessionId),
+        getCurrentSessionQuestion(sessionId),
+      ])
       const session = await startCurrentQuestion(sessionId, timerSeconds)
+      if (currentSession.live_phase === 'not_started') {
+        await logEventSafely({
+          sessionId,
+          eventType: 'session_started',
+          questionId: currentQuestion?.question_id ?? null,
+          roundNumber: 1,
+        })
+      }
+      await logEventSafely({
+        sessionId,
+        eventType: 'question_opened',
+        questionId: currentQuestion?.question_id ?? null,
+        roundNumber: 1,
+      })
       return NextResponse.json({ session })
     }
 
     if (action === 'open_revision') {
+      const currentQuestion = await getCurrentSessionQuestion(sessionId)
       const session = await openQuestionRevision(sessionId, timerSeconds)
+      await logEventSafely({
+        sessionId,
+        eventType: 'revision_opened',
+        questionId: currentQuestion?.question_id ?? null,
+        roundNumber: 2,
+      })
       return NextResponse.json({ session })
     }
 
     if (action === 'next_question') {
       const session = await moveToNextQuestion(sessionId, timerSeconds)
+      const nextQuestion = await getCurrentSessionQuestion(sessionId)
+      await logEventSafely({
+        sessionId,
+        eventType: 'question_opened',
+        questionId: nextQuestion?.question_id ?? null,
+        roundNumber: 1,
+      })
       return NextResponse.json({ session })
     }
 

@@ -123,3 +123,42 @@
     @apply bg-background text-foreground;
   }
 }
+
+@media print {
+  body {
+    background: white !important;
+    color: black !important;
+  }
+
+  body * {
+    visibility: hidden;
+  }
+
+  .student-summary-print-root,
+  .student-summary-print-root * {
+    visibility: visible;
+  }
+
+  .student-summary-print-root {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+  }
+
+  .student-summary-print-hide {
+    display: none !important;
+  }
+
+  .student-summary-question {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  @page {
+    margin: 0.5in;
+    size: auto;
+  }
+}

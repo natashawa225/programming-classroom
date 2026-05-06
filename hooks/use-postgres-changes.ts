@@ -15,6 +15,7 @@ interface UsePostgresChangesOptions {
   schema?: string
   debounceMs?: number
   pollMs?: number
+  pollStrategy?: 'fallback' | 'always'
   debugLabel?: string
 }
 
@@ -24,6 +25,7 @@ export function usePostgresChanges({
   schema = 'public',
   debounceMs = 150,
   pollMs = 0,
+  pollStrategy = 'fallback',
   debugLabel,
 }: UsePostgresChangesOptions) {
   const callbackRef = useRef(onChange)
@@ -91,7 +93,12 @@ export function usePostgresChanges({
         subscribed = true
       }
 
-      if ((status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') && pollMs > 0 && !pollTimer) {
+      if (
+        (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') &&
+        pollMs > 0 &&
+        pollStrategy === 'fallback' &&
+        !pollTimer
+      ) {
         pollTimer = setInterval(() => {
           if (document.visibilityState !== 'visible') return
           void runRefresh()
@@ -102,7 +109,7 @@ export function usePostgresChanges({
     const startPollIfNotSubscribed =
       pollMs > 0
         ? setTimeout(() => {
-            if (!subscribed && !pollTimer) {
+            if ((pollStrategy === 'always' || !subscribed) && !pollTimer) {
               pollTimer = setInterval(() => {
                 if (document.visibilityState !== 'visible') return
                 void runRefresh()
@@ -144,5 +151,5 @@ export function usePostgresChanges({
       void subscription.unsubscribe()
       supabase.removeChannel(channel)
     }
-  }, [tables, schema, debounceMs, pollMs, debugLabel])
+  }, [tables, schema, debounceMs, pollMs, pollStrategy, debugLabel])
 }

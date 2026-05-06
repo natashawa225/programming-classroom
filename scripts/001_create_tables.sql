@@ -109,6 +109,24 @@ CREATE TABLE IF NOT EXISTS live_question_analyses (
   UNIQUE(session_id, question_id, attempt_type)
 );
 
+CREATE TABLE IF NOT EXISTS session_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  question_id UUID REFERENCES session_questions(question_id) ON DELETE CASCADE,
+  event_type TEXT NOT NULL CHECK (
+    event_type IN (
+      'session_started',
+      'question_opened',
+      'question_closed',
+      'revision_opened',
+      'revision_closed',
+      'analysis_generated'
+    )
+  ),
+  round_number INT NOT NULL DEFAULT 1 CHECK (round_number IN (1, 2)),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Teacher action log (for research analysis)
 CREATE TABLE IF NOT EXISTS teacher_actions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -123,6 +141,8 @@ CREATE INDEX IF NOT EXISTS idx_responses_session ON responses(session_id);
 CREATE INDEX IF NOT EXISTS idx_responses_participant ON responses(session_participant_id);
 CREATE INDEX IF NOT EXISTS idx_responses_session_question_attempt ON responses(session_id, question_id, attempt_type);
 CREATE INDEX IF NOT EXISTS idx_live_question_analyses_session ON live_question_analyses(session_id, generated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_events_session ON session_events(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_session_events_session_question ON session_events(session_id, question_id, round_number, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_code ON sessions(session_code);
 CREATE INDEX IF NOT EXISTS idx_teacher_actions_session ON teacher_actions(session_id);
 CREATE INDEX IF NOT EXISTS idx_session_participants_session ON session_participants(session_id);

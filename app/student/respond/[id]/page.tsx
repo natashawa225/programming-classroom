@@ -1,12 +1,13 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
+import { StudentSessionSummary } from '@/components/student-session-summary'
 import {
   getRevisionPrefillResponse,
   getSession,
@@ -31,7 +32,7 @@ function getAttemptType(session: Session): AttemptType | null {
 function getStateCopy(session: Session | null, attemptType: AttemptType | null, submitted: boolean) {
   if (!session) return { title: 'Loading...', body: '' }
   if (session.live_phase === 'session_completed' || session.status === 'closed') {
-    return { title: 'Session ended', body: 'Your class session has ended.' }
+    return { title: 'Session ended', body: 'Your class session has ended. Your end-of-session summary is ready below.' }
   }
   if (session.live_phase === 'not_started') {
     return { title: 'Waiting for question', body: 'Your teacher has not opened the first question yet.' }
@@ -68,6 +69,7 @@ export default function StudentRespondPage() {
   const [note, setNote] = useState<string | null>(null)
   const [startTimeMs, setStartTimeMs] = useState<number>(Date.now())
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null)
+  const activeStepKeyRef = useRef<string | null>(null)
 
   const currentQuestion = useMemo(() => {
     if (!session) return null
@@ -77,6 +79,7 @@ export default function StudentRespondPage() {
   const attemptType = session ? getAttemptType(session) : null
   const canEdit =
     session?.live_phase === 'question_initial_open' || session?.live_phase === 'question_revision_open'
+  const activeStepKey = currentQuestion && attemptType ? `${currentQuestion.question_id}:${attemptType}` : null
   const realtimeTables = useMemo(
     () => [{ table: 'sessions', event: 'UPDATE' as const, filter: `id=eq.${sessionId}` }],
     [sessionId]
@@ -130,16 +133,37 @@ export default function StudentRespondPage() {
     const loadCurrentState = async () => {
       if (!session || !currentQuestion) return
 
+      const nextStepKey = activeStepKey
+      const previousStepKey = activeStepKeyRef.current
+      const stepChanged = previousStepKey !== nextStepKey
+      const previousQuestionId = previousStepKey?.split(':')[0] ?? null
+      const nextQuestionId = currentQuestion.question_id
+      const questionChanged = previousQuestionId !== nextQuestionId
+
       setError(null)
-      setNote(null)
-      setSubmitted(false)
-      setStartTimeMs(Date.now())
 
       const currentAttemptType = getAttemptType(session)
       if (!currentAttemptType) {
-        setAnswer('')
-        setConfidence(null)
+        if (stepChanged) {
+          setAnswer('')
+          setConfidence(null)
+          setSubmitted(false)
+          setNote(null)
+          setStartTimeMs(Date.now())
+          activeStepKeyRef.current = nextStepKey
+        }
         return
+      }
+
+      if (stepChanged) {
+        if (questionChanged) {
+          setAnswer('')
+          setConfidence(null)
+        }
+        setNote(null)
+        setSubmitted(false)
+        setStartTimeMs(Date.now())
+        activeStepKeyRef.current = nextStepKey
       }
 
       try {
@@ -156,15 +180,19 @@ export default function StudentRespondPage() {
           }
 
           if (prefill.round1Response) {
-            setAnswer(prefill.round1Response.answer)
-            setConfidence(prefill.round1Response.confidence)
-            setNote('Your original answer has been loaded for revision.')
+            if (stepChanged || !submitted) {
+              setAnswer(prefill.round1Response.answer)
+              setConfidence(prefill.round1Response.confidence)
+              setNote('Your original answer has been loaded for revision.')
+            }
             return
           }
 
-          setAnswer('')
-          setConfidence(null)
-          setNote('No earlier answer was found, so you can answer from scratch.')
+          if (stepChanged) {
+            setAnswer('')
+            setConfidence(null)
+            setNote('No earlier answer was found, so you can answer from scratch.')
+          }
           return
         }
 
@@ -183,8 +211,10 @@ export default function StudentRespondPage() {
           return
         }
 
-        setAnswer('')
-        setConfidence(null)
+        if (questionChanged) {
+          setAnswer('')
+          setConfidence(null)
+        }
       } catch (err) {
         console.error(err)
         if (!cancelled) setError('Failed to load your saved answer.')
@@ -195,7 +225,7 @@ export default function StudentRespondPage() {
     return () => {
       cancelled = true
     }
-  }, [currentQuestion?.question_id, session, sessionId])
+  }, [activeStepKey, currentQuestion, session, sessionId, submitted])
 
   useEffect(() => {
     if (!session?.timer_started_at || !session.current_timer_seconds || !canEdit || submitted) {
@@ -239,6 +269,9 @@ export default function StudentRespondPage() {
         timeTakenSeconds: Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000)),
       })
 
+      if (activeStepKey) {
+        activeStepKeyRef.current = activeStepKey
+      }
       setSubmitted(true)
       setNote('Answer submitted')
     } catch (err) {
@@ -392,7 +425,7 @@ export default function StudentRespondPage() {
                     </button>
                   ))}
                 </div>
-                <p className="mt-2 text-xs text-foreground/55">Choose one score from 1 to 5. No default is selected.</p>
+                <p className="mt-2 text-xs text-foreground/55">Choose one score from 1 to 5.</p>
               </div>
 
               <Button type="submit" disabled={submitting}>
@@ -407,6 +440,10 @@ export default function StudentRespondPage() {
             </div>
           )}
         </Card>
+
+        {session && (session.live_phase === 'session_completed' || session.status === 'closed') && (
+          <StudentSessionSummary sessionId={sessionId} />
+        )}
       </div>
     </main>
   )

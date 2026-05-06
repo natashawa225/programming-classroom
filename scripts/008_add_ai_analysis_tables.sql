@@ -8,12 +8,15 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE TABLE IF NOT EXISTS public.analysis_runs (
   analysis_run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_id UUID REFERENCES public.sessions(id) ON DELETE CASCADE,
+  question_id UUID REFERENCES public.session_questions(question_id) ON DELETE CASCADE,
   round_number INT NOT NULL CHECK (round_number IN (1, 2)),
   model TEXT,
+  model_name TEXT,
   status TEXT NOT NULL DEFAULT 'completed' CHECK (status IN ('queued', 'running', 'completed', 'failed')),
   error_message TEXT,
   prompt_json JSONB,
   raw_response_json JSONB,
+  analysis_json JSONB,
   summary_json JSONB,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   UNIQUE(session_id, round_number, created_at)
@@ -21,6 +24,9 @@ CREATE TABLE IF NOT EXISTS public.analysis_runs (
 
 CREATE INDEX IF NOT EXISTS idx_analysis_runs_session_round
 ON public.analysis_runs(session_id, round_number, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_session_question_round
+ON public.analysis_runs(session_id, question_id, round_number, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS public.response_ai_labels (
   response_ai_label_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

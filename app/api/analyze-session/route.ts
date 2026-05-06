@@ -755,6 +755,7 @@ export async function POST(request: NextRequest) {
         status: 'completed',
         promptJson: rawAi?.prompt_json as any,
         rawResponseJson: rawAi?.raw_response_json as any,
+        analysisJson: analysis as any,
         summaryJson: analysis as any,
       })
     } catch {}

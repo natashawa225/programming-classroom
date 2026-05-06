@@ -22,9 +22,15 @@ export async function studentLogout() {
         path: '/student',
         maxAge: 0,
       })
+      cookieStore.set(c.name, '', {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/',
+        maxAge: 0,
+      })
     }
   }
 
   redirect('/student/join')
 }
-

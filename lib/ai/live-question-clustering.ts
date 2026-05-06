@@ -1,5 +1,6 @@
 import type { AttemptType } from '@/lib/types/database'
 import { openaiChatJson } from '@/lib/ai/openai-json'
+import type { UnionFindQuestionContext } from '@/lib/ai/union-find-question-config'
 
 export type LiveCluster = {
   cluster_id: string
@@ -199,7 +200,11 @@ function buildFallbackClusters(
 }
 
 export async function clusterLiveQuestionResponses(input: {
+  questionId: string
+  questionPosition: number
   questionPrompt: string
+  correctAnswer?: string | null
+  lessonContext?: UnionFindQuestionContext | null
   attemptType: AttemptType
   responses: InputResponse[]
 }): Promise<LiveQuestionClusterAnalysis> {
@@ -233,7 +238,14 @@ export async function clusterLiveQuestionResponses(input: {
       {
         role: 'user',
         content: [
+          `Question id: ${input.questionId}`,
+          `Question position: ${input.questionPosition}`,
           `Question prompt:\n${input.questionPrompt}`,
+          `Reference answer:\n${input.correctAnswer || ''}`,
+          `Lesson concept:\n${input.lessonContext?.lesson_concept || ''}`,
+          `Target misconception:\n${input.lessonContext?.target_misconception || ''}`,
+          `Strong answer criteria:\n${JSON.stringify(input.lessonContext?.strong_answer_criteria ?? [])}`,
+          `Known misconception variants:\n${JSON.stringify(input.lessonContext?.misconception_variants ?? [])}`,
           `Attempt type: ${input.attemptType}`,
           'Student responses:',
           numberedResponses,

@@ -2,7 +2,7 @@
 
 import { cookies } from 'next/headers'
 import { createHash, randomBytes } from 'crypto'
-import { createClient } from './server'
+import { createAdminClient, createClient } from './server'
 import type {
   AnalysisRun,
   AttemptType,
@@ -17,6 +17,8 @@ import type {
   SessionParticipant,
   SessionStatus,
   ResponseAiLabel,
+  SessionEvent,
+  StudentSessionSummaryRecord,
   TeacherAction,
 } from '@/lib/types/database'
 import { formatAnonymizedLabel, generateSessionCode } from '@/lib/utils/codes'
@@ -411,6 +413,42 @@ export async function completeSession(sessionId: string) {
   })
 }
 
+export async function getSessionEvents(sessionId: string) {
+  await assertTeacherAuthenticated()
+  const supabase = await createClient()
+  const { data, error } = await supabase
+    .from('session_events')
+    .select('*')
+    .eq('session_id', sessionId)
+    .order('created_at', { ascending: true })
+
+  if (error) throw error
+  return (data || []) as SessionEvent[]
+}
+
+export async function logSessionEvent(data: {
+  sessionId: string
+  eventType: SessionEvent['event_type']
+  questionId?: string | null
+  roundNumber?: 1 | 2
+}) {
+  await assertTeacherAuthenticated()
+  const supabase = await createClient()
+  const { data: inserted, error } = await supabase
+    .from('session_events')
+    .insert({
+      session_id: data.sessionId,
+      question_id: data.questionId ?? null,
+      event_type: data.eventType,
+      round_number: data.roundNumber ?? 1,
+    })
+    .select()
+    .single()
+
+  if (error) throw error
+  return inserted as SessionEvent
+}
+
 export async function updateSessionStatus(
   sessionId: string,
   status: SessionStatus
@@ -452,6 +490,7 @@ export async function joinSessionWithParticipantCredentials(data: {
   password: string
 }) {
   const supabase = await createClient()
+  const adminSupabase = createAdminClient()
   const session = await getSessionByCode(normalizeSessionCode(data.sessionCode))
   if (session.status === 'closed') {
     throw new Error('This session is closed.')
@@ -486,7 +525,7 @@ export async function joinSessionWithParticipantCredentials(data: {
   const cookieName = sessionParticipantCookieName(session.id)
   const existingToken = cookieStore.get(cookieName)?.value
   if (existingToken) {
-    const { data: existingByToken, error } = await supabase
+    const { data: existingByToken, error } = await adminSupabase
       .from('session_participants')
       .select('session_participant_id, session_id, participant_id, student_name, student_id, anonymized_label, joined_at')
       .eq('session_id', session.id)
@@ -499,7 +538,7 @@ export async function joinSessionWithParticipantCredentials(data: {
         httpOnly: true,
         sameSite: 'lax',
         secure: process.env.NODE_ENV === 'production',
-        path: '/student',
+        path: '/',
         maxAge: 60 * 60 * 24 * 7, // 7 days
       })
       return { session, participation: existingByToken as SessionParticipant, participant: participant as Participant }
@@ -511,7 +550,7 @@ export async function joinSessionWithParticipantCredentials(data: {
   const joinTokenHash = hashJoinToken(joinToken)
 
   // 2) If already joined for this session by participant_id, reuse row and rotate join token.
-  const { data: existingJoin, error: existingJoinError } = await supabase
+  const { data: existingJoin, error: existingJoinError } = await adminSupabase
     .from('session_participants')
     .select('session_participant_id, session_id, participant_id, student_name, student_id, anonymized_label, joined_at')
     .eq('session_id', session.id)
@@ -520,7 +559,7 @@ export async function joinSessionWithParticipantCredentials(data: {
 
   if (existingJoinError) throw existingJoinError
   if (existingJoin) {
-    const { error: updateError } = await supabase
+    const { error: updateError } = await adminSupabase
       .from('session_participants')
       .update({ join_token_hash: joinTokenHash })
       .eq('session_participant_id', existingJoin.session_participant_id)
@@ -531,7 +570,7 @@ export async function joinSessionWithParticipantCredentials(data: {
       httpOnly: true,
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
-      path: '/student',
+      path: '/',
       maxAge: 60 * 60 * 24 * 7,
     })
 
@@ -541,7 +580,7 @@ export async function joinSessionWithParticipantCredentials(data: {
   // Allocate anonymized label P01, P02, ... in join order.
   let participation: any = null
   for (let attempt = 0; attempt < 6; attempt++) {
-    const { count, error: countError } = await supabase
+    const { count, error: countError } = await adminSupabase
       .from('session_participants')
       .select('*', { count: 'exact', head: true })
       .eq('session_id', session.id)
@@ -549,7 +588,7 @@ export async function joinSessionWithParticipantCredentials(data: {
     if (countError) throw countError
     const anonymizedLabel = formatAnonymizedLabel((count ?? 0) + 1 + attempt)
 
-    const { data: inserted, error: insertError } = await supabase
+    const { data: inserted, error: insertError } = await adminSupabase
       .from('session_participants')
       .insert({
         session_id: session.id,
@@ -576,7 +615,7 @@ export async function joinSessionWithParticipantCredentials(data: {
     httpOnly: true,
     sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',
-    path: '/student',
+    path: '/',
     maxAge: 60 * 60 * 24 * 7,
   })
 
@@ -588,7 +627,7 @@ export async function joinSessionWithParticipantCredentials(data: {
 }
 
 export async function getSessionParticipantForStudent(sessionId: string) {
-  const supabase = await createClient()
+  const supabase = createAdminClient()
   const cookieStore = await cookies()
   const token = cookieStore.get(sessionParticipantCookieName(sessionId))?.value
   if (!token) return null
@@ -638,6 +677,7 @@ export async function submitResponse(
   roundNumber = 1
 ) {
   const supabase = await createClient()
+  const adminSupabase = createAdminClient()
 
   const session = await getSession(sessionId)
   if (session.status === 'closed' || session.live_phase === 'session_completed') {
@@ -683,7 +723,7 @@ export async function submitResponse(
     throw new Error('This is not the active question right now.')
   }
 
-  const { data: existingResponse, error: responseLookupError } = await supabase
+  const { data: existingResponse, error: responseLookupError } = await adminSupabase
     .from('responses')
     .select('response_id')
     .eq('session_id', session.id)
@@ -701,7 +741,7 @@ export async function submitResponse(
     )
   }
 
-  const { data: participation, error: participationError } = await supabase
+  const { data: participation, error: participationError } = await adminSupabase
     .from('session_participants')
     .select('session_participant_id')
     .eq('session_id', session.id)
@@ -713,7 +753,7 @@ export async function submitResponse(
     throw new Error('Join not found for this session. Please re-join using the session code.')
   }
 
-  const { data, error } = await supabase
+  const { data, error } = await adminSupabase
     .from('responses')
     .insert({
       session_id: sessionId,
@@ -750,6 +790,7 @@ export async function submitStudentResponse(
   }
 
   const supabase = await createClient()
+  const adminSupabase = createAdminClient()
   const session = await getSession(sessionId)
   const attemptType = getAllowedAttemptType(session)
 
@@ -760,7 +801,7 @@ export async function submitStudentResponse(
   const roundNumber = getRoundNumberForAttemptType(attemptType)
 
   // Server-side duplicate protection per question+round (in addition to DB unique index).
-  const { data: existing, error } = await supabase
+  const { data: existing, error } = await adminSupabase
     .from('responses')
     .select('response_id')
     .eq('session_id', sessionId)
@@ -777,7 +818,7 @@ export async function submitStudentResponse(
   // For revision, link to original round-1 response if present.
   let originalResponseId: string | null = data.originalResponseId || null
   if (!originalResponseId && attemptType === 'revision') {
-    const { data: original, error: originalError } = await supabase
+    const { data: original, error: originalError } = await adminSupabase
       .from('responses')
       .select('response_id')
       .eq('session_id', sessionId)
@@ -801,7 +842,7 @@ export async function submitStudentResponse(
   )
 
   if (data.timeTakenSeconds !== undefined && data.timeTakenSeconds !== null) {
-    await supabase
+    await adminSupabase
       .from('responses')
       .update({
         time_taken_seconds: Math.max(0, Math.floor(Number(data.timeTakenSeconds))),
@@ -809,7 +850,7 @@ export async function submitStudentResponse(
       })
       .eq('response_id', inserted.response_id)
   } else if (originalResponseId) {
-    await supabase
+    await adminSupabase
       .from('responses')
       .update({ original_response_id: originalResponseId })
       .eq('response_id', inserted.response_id)
@@ -1016,6 +1057,22 @@ export async function getSessionSummaryRecord(sessionId: string) {
   return (data as SessionSummaryRecord) || null
 }
 
+export async function getStudentSessionSummaryRecord(sessionId: string) {
+  const supabase = await createClient()
+  const participation = await getSessionParticipantForStudent(sessionId)
+  if (!participation) return null
+
+  const { data, error } = await supabase
+    .from('student_session_summaries')
+    .select('*')
+    .eq('session_id', sessionId)
+    .eq('session_participant_id', participation.session_participant_id)
+    .maybeSingle()
+
+  if (error) throw error
+  return (data as StudentSessionSummaryRecord) || null
+}
+
 export async function upsertSessionSummaryRecord(data: {
   sessionId: string
   summaryJson: Record<string, unknown>
@@ -1040,16 +1097,50 @@ export async function upsertSessionSummaryRecord(data: {
   return row as SessionSummaryRecord
 }
 
+export async function upsertStudentSessionSummaryRecord(data: {
+  sessionId: string
+  inputHash: string
+  summaryJson: Record<string, unknown>
+  source: 'local' | 'mixed'
+}) {
+  const supabase = await createClient()
+  const participation = await getSessionParticipantForStudent(data.sessionId)
+  if (!participation) {
+    throw new Error('Not joined for this session. Please join using the session code.')
+  }
+
+  const { data: row, error } = await supabase
+    .from('student_session_summaries')
+    .upsert(
+      {
+        session_id: data.sessionId,
+        session_participant_id: participation.session_participant_id,
+        input_hash: data.inputHash,
+        summary_json: data.summaryJson,
+        source: data.source,
+      },
+      { onConflict: 'session_id,session_participant_id' }
+    )
+    .select('*')
+    .single()
+
+  if (error) throw error
+  return row as StudentSessionSummaryRecord
+}
+
 export async function createAnalysisRun(data: {
   sessionId: string
+  questionId?: string | null
   condition?: Session['condition'] | null
   sessionStatus?: Session['status'] | null
   roundNumber: 1 | 2
   model?: string | null
+  modelName?: string | null
   status: AnalysisRun['status']
   errorMessage?: string | null
   promptJson?: Record<string, unknown> | null
   rawResponseJson?: Record<string, unknown> | null
+  analysisJson?: Record<string, unknown> | null
   summaryJson?: Record<string, unknown> | null
 }) {
   await assertTeacherAuthenticated()
@@ -1058,14 +1149,17 @@ export async function createAnalysisRun(data: {
     .from('analysis_runs')
     .insert({
       session_id: data.sessionId,
+      question_id: data.questionId ?? null,
       condition: data.condition ?? null,
       session_status: data.sessionStatus ?? null,
       round_number: data.roundNumber,
       model: data.model ?? null,
+      model_name: data.modelName ?? data.model ?? null,
       status: data.status,
       error_message: data.errorMessage ?? null,
       prompt_json: data.promptJson ?? null,
       raw_response_json: data.rawResponseJson ?? null,
+      analysis_json: data.analysisJson ?? null,
       summary_json: data.summaryJson ?? null,
     })
     .select()
@@ -1081,6 +1175,7 @@ export async function updateAnalysisRun(data: {
   errorMessage?: string | null
   promptJson?: Record<string, unknown> | null
   rawResponseJson?: Record<string, unknown> | null
+  analysisJson?: Record<string, unknown> | null
   summaryJson?: Record<string, unknown> | null
 }) {
   await assertTeacherAuthenticated()
@@ -1092,6 +1187,7 @@ export async function updateAnalysisRun(data: {
       ...(data.errorMessage !== undefined ? { error_message: data.errorMessage } : {}),
       ...(data.promptJson !== undefined ? { prompt_json: data.promptJson } : {}),
       ...(data.rawResponseJson !== undefined ? { raw_response_json: data.rawResponseJson } : {}),
+      ...(data.analysisJson !== undefined ? { analysis_json: data.analysisJson } : {}),
       ...(data.summaryJson !== undefined ? { summary_json: data.summaryJson } : {}),
     })
     .eq('analysis_run_id', data.analysisRunId)
@@ -1161,9 +1257,45 @@ export async function getLatestAnalysisRun(sessionId: string, roundNumber: 1 | 2
   return (data as AnalysisRun) || null
 }
 
+export async function getLatestQuestionAnalysisRun(sessionId: string, questionId: string, roundNumber: 1 | 2) {
+  await assertTeacherAuthenticated()
+  const supabase = await createClient()
+  const { data, error } = await supabase
+    .from('analysis_runs')
+    .select('*')
+    .eq('session_id', sessionId)
+    .eq('question_id', questionId)
+    .eq('round_number', roundNumber)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) throw error
+  return (data as AnalysisRun) || null
+}
+
 export async function getLatestCompletedAnalysisRun(sessionId: string, roundNumber: 1 | 2) {
   await assertTeacherAuthenticated()
   const supabase = await createClient()
+  const { data, error } = await supabase
+    .from('analysis_runs')
+    .select('*')
+    .eq('session_id', sessionId)
+    .eq('round_number', roundNumber)
+    .eq('status', 'completed')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (error) throw error
+  return (data as AnalysisRun) || null
+}
+
+export async function getLatestCompletedAnalysisRunForStudent(sessionId: string, roundNumber: 1 | 2) {
+  const supabase = await createClient()
+  const participation = await getSessionParticipantForStudent(sessionId)
+  if (!participation) return null
+
   const { data, error } = await supabase
     .from('analysis_runs')
     .select('*')
@@ -1206,6 +1338,43 @@ export async function getResponseAiLabels(sessionId: string, roundNumber: 1 | 2)
 
   if (error) throw error
   return (data || []) as ResponseAiLabel[]
+}
+
+export async function getSessionResponsesForStudentSummary(sessionId: string) {
+  const supabase = await createClient()
+  const participation = await getSessionParticipantForStudent(sessionId)
+  if (!participation) {
+    throw new Error('Not joined for this session. Please join using the session code.')
+  }
+
+  const { data, error } = await supabase
+    .from('responses')
+    .select(
+      `
+      response_id,
+      session_id,
+      session_participant_id,
+      question_id,
+      question_type,
+      attempt_type,
+      round_number,
+      answer,
+      confidence,
+      explanation,
+      is_correct,
+      time_taken_seconds,
+      original_response_id,
+      created_at
+    `
+    )
+    .eq('session_id', sessionId)
+    .order('created_at', { ascending: true })
+
+  if (error) throw error
+  return {
+    participation,
+    responses: (data || []) as Response[],
+  }
 }
 
 // Teacher Actions (logging)

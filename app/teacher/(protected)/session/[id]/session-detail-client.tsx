@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
+import { CONFIDENCE_BINS, getConfidenceLevel } from '@/lib/confidence'
 
 type Props = {
   initialSession: Session
@@ -127,8 +128,9 @@ function isQuestionOpen(session: Session) {
 
 function getConfidencePalette(score: number): ConfidencePalette {
   const intensity = Math.max(0.32, Math.min(0.9, 0.28 + ((score - 1) / 4) * 0.62))
+  const level = getConfidenceLevel(score)
 
-  if (score >= 4.5) {
+  if (level === 'high') {
     return {
       fill: `rgba(255, 228, 144, ${intensity})`,
       border: 'rgba(255, 199, 84, 0.88)',
@@ -138,7 +140,7 @@ function getConfidencePalette(score: number): ConfidencePalette {
     }
   }
 
-  if (score >= 3.5) {
+  if (level === 'mid') {
     return {
       fill: `rgba(216, 232, 243, ${intensity})`,
       border: 'rgba(123, 175, 212, 0.92)',
@@ -192,7 +194,7 @@ function getClusterMapCategory(label: string) {
 
   if (
     normalized.startsWith('true:') ||
-    normalized.includes('target understanding') ||
+    normalized.includes('correct understanding') ||
     normalized.includes('correct answer') ||
     normalized.includes('correct reasoning')
   ) {
@@ -224,7 +226,7 @@ function getAxisLabel(category: ClusterMapCategory) {
     case 'incorrect':
       return 'Misconception'
     case 'correct':
-      return 'Target understanding'
+      return 'Correct understanding'
     default:
       return 'Uncertain'
   }
@@ -575,7 +577,8 @@ export default function SessionDetailClient({
   usePostgresChanges({
     tables: realtimeTables,
     onChange: refreshLiveData,
-    pollMs: 15000,
+    pollMs: 3000,
+    pollStrategy: 'always',
     debugLabel: `teacher-live-session-${sessionId}`,
   })
 
@@ -1013,33 +1016,36 @@ export default function SessionDetailClient({
                 <p>Bubble size = number of students</p>
                 <p>Bubble color = average confidence</p>
                 <div className="grid grid-cols-3 gap-2 text-xs text-foreground/55">
-                  <div className="rounded-2xl bg-[rgba(243,236,255,1)] px-3 py-3 text-center">
-                    <div className="mx-auto h-3 w-3 rounded-full bg-[#A977FF]" />
-                    <p className="mt-2 font-medium text-[#8A57FF]">Low</p>
-                    <p>1.0-3.4</p>
-                  </div>
-                  <div className="rounded-2xl bg-[rgba(238,244,249,1)] px-3 py-3 text-center">
-                    <div className="mx-auto h-3 w-3 rounded-full bg-[#7BAFD4]" />
-                    <p className="mt-2 font-medium text-[#4E7FA2]">Mid</p>
-                    <p>3.5-4.4</p>
-                  </div>
-                  <div className="rounded-2xl bg-[rgba(255,246,220,1)] px-3 py-3 text-center">
-                    <div className="mx-auto h-3 w-3 rounded-full bg-[#F0B93B]" />
-                    <p className="mt-2 font-medium text-[#A97800]">High</p>
-                    <p>4.5-5.0</p>
-                  </div>
+                  {CONFIDENCE_BINS.map((bin) => {
+                    const palette = getConfidencePalette(bin.min)
+                    return (
+                      <div
+                        key={bin.level}
+                        className="rounded-2xl px-3 py-3 text-center"
+                        style={{ backgroundColor: palette.badgeBg }}
+                      >
+                        <div className="mx-auto h-3 w-3 rounded-full" style={{ backgroundColor: palette.dot }} />
+                        <p className="mt-2 font-medium" style={{ color: palette.badgeText }}>
+                          {bin.label}
+                        </p>
+                        <p>{bin.min.toFixed(1)}-{bin.max.toFixed(1)}</p>
+                      </div>
+                    )
+                  })}
                 </div>
                 <div className="flex items-start gap-3 rounded-2xl bg-[rgba(238,244,249,0.9)] px-3 py-3">
                   <span className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-dashed border-[rgba(123,175,212,0.6)] text-[10px] text-foreground/60">
                     ↕
                   </span>
-                  <p className="leading-6">Position shows correctness and confidence. Bubble size shows number of students.</p>
+                  <p className="leading-6">Vertical position = average confidence
+                  (bottom = lower confidence, top = higher confidence)</p>
                 </div>
                 <div className="flex items-start gap-3 rounded-2xl bg-[rgba(255,246,220,0.72)] px-3 py-3">
                   <span className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-[rgba(255,199,84,0.55)] text-[10px] text-foreground/60">
                     ~
                   </span>
-                  <p className="leading-6">Left-to-right indicates misconception to target understanding; bottom-to-top indicates confidence.</p>
+                  <p className="leading-6">Horizontal position = reasoning pattern
+                  (left = common misconception, right = Correct understanding)</p>
                 </div>
               </div>
             </section>

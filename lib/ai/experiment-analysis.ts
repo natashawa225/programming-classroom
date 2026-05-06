@@ -972,6 +972,10 @@ Your goal:
     { role: 'user', content: user },
   ]
 
+  console.info(
+    `[analysis:prompt] question_id=${question.question_id} position=${question.position} prompt_included=${Boolean(question.prompt && question.prompt.trim())} correct_answer_included=${Boolean(question.correct_answer && question.correct_answer.trim())} lesson_context_included=${Boolean(ctx)} round_number=${roundNumber} attempt_type=${roundNumber === 2 ? 'revision' : 'initial'} response_count=${promptQuestion.total_response_count}`
+  )
+
   return { promptJson, messages }
 }
 

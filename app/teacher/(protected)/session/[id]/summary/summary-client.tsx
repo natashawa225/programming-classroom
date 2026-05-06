@@ -197,49 +197,81 @@ export default function SummaryClient({
   return (
     <main className="min-h-screen bg-slate-50 px-6 py-6 text-slate-900 lg:px-8">
       <div className="mx-auto max-w-6xl space-y-6">
-        <header className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-4">
-            <div className="flex size-12 items-center justify-center rounded-2xl bg-sky-100 text-sky-700">
-              <ClipboardList className="size-6" />
-            </div>
-            <div>
-              <p className="text-sm font-semibold text-slate-900">Classroom Response System</p>
-              <div className="mt-1 flex flex-wrap items-center gap-2">
-                <Badge className="rounded-full border border-slate-200 bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700 shadow-none">
-                  Teacher session summary
-                </Badge>
-                <Badge className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-600 shadow-none">
-                  {isBaseline ? 'Baseline' : 'Treatment'}
-                </Badge>
-              </div>
-            </div>
-          </div>
+      <header className="flex flex-col gap-5 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+  {/* Row 1: Branding + Regenerate action */}
+  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+    <div className="flex items-center gap-4">
+      <div className="flex size-12 items-center justify-center rounded-2xl bg-sky-100 text-sky-700">
+        <ClipboardList className="size-6" />
+      </div>
+      <div>
+        <p className="text-sm font-semibold text-slate-900">Classroom Response System</p>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <Badge className="rounded-full border border-slate-200 bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700 shadow-none">
+            Teacher session summary
+          </Badge>
+          <Badge className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-600 shadow-none">
+            {isBaseline ? 'Baseline' : 'Treatment'}
+          </Badge>
+        </div>
+      </div>
+    </div>
 
-          <div className="flex flex-col items-start gap-3 lg:items-end">
-            <div className="flex flex-wrap gap-3">
-              <Button type="button" onClick={handleRegenerate} disabled={isRegenerating} className="rounded-full px-5">
-                {isRegenerating ? (
-                  <>
-                    <Spinner className="size-4" />
-                    Regenerating...
-                  </>
-                ) : (
-                  <>
-                    <RefreshCcw className="size-4" />
-                    Regenerate summary
-                  </>
-                )}
-              </Button>
-              <Link href={`/teacher/session/${sessionId}`}>
-                <Button variant="outline" className="rounded-full border-slate-200 px-5">
-                  Back to session
-                </Button>
-              </Link>
-            </div>
-            {statusMessage ? <p className="text-sm text-slate-500">{statusMessage}</p> : null}
-            {error ? <p className="text-sm text-destructive">{error}</p> : null}
-          </div>
-        </header>
+    <div className="flex flex-col items-start gap-1.5 lg:items-end">
+      <Button
+        type="button"
+        onClick={handleRegenerate}
+        disabled={isRegenerating}
+        className="rounded-full px-5"
+      >
+        {isRegenerating ? (
+          <>
+            <Spinner className="size-4" />
+            Regenerating...
+          </>
+        ) : (
+          <>
+            <RefreshCcw className="size-4" />
+            Regenerate summary
+          </>
+        )}
+      </Button>
+      {statusMessage && <p className="text-sm text-slate-500">{statusMessage}</p>}
+      {error && <p className="text-sm text-destructive">{error}</p>}
+    </div>
+  </div>
+
+  {/* Divider */}
+  <div className="border-t border-slate-100" />
+
+  {/* Row 2: Next step prompt + nav buttons */}
+  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+
+    <div className="flex flex-wrap gap-3">
+      <Link href={`/teacher/session/${sessionId}/export`}>
+        <Button variant="outline" className="rounded-full border-slate-200 px-5">
+          <Download className="size-4" />
+          Export report
+        </Button>
+      </Link>
+      <Link href={`/teacher/session/${sessionId}`}>
+        <Button variant="outline" className="rounded-full border-slate-200 px-5">
+          Back to session
+        </Button>
+      </Link>
+      <Link href="/teacher/create-session">
+        <Button variant="outline" className="rounded-full border-slate-200 px-5">
+          Start new session
+        </Button>
+      </Link>
+      <Link href="/teacher/dashboard">
+        <Button variant="outline" className="rounded-full border-slate-200 px-5">
+          Back to dashboard
+        </Button>
+      </Link>
+    </div>
+  </div>
+</header>
 
         <section className="rounded-2xl border border-slate-200 bg-white p-7 shadow-sm">
         <div className="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between min-w-0">
@@ -326,7 +358,7 @@ export default function SummaryClient({
                     <TrendingUp className="size-5" />
                   </div>
                 </div>
-                <div className="mt-5 grid gap-4 md:grid-cols-2">
+                <div className="mt-5 grid gap-5 2xl:grid-cols-2">
                   <MetricTile label="Initial responses" value={String(summary.metrics.initialResponses)} icon={ClipboardList} />
                   <MetricTile label="Revision responses" value={String(summary.metrics.revisionResponses)} icon={CheckCircle2} />
                   <MetricTile label="Confidence change" value={formatDelta(summary.metrics.avgConfidenceChange)} icon={TrendingUp} />
@@ -346,7 +378,7 @@ export default function SummaryClient({
                 </div>
               </div>
 
-              <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <div className="mt-5 grid gap-5 2xl:grid-cols-2">
                 {summary.questionSummaries.map((question) => {
                   const confidenceDelta = getQuestionConfidenceDelta(question)
 
@@ -407,6 +439,7 @@ export default function SummaryClient({
                   <Target className="size-5" />
                 </div>
               </div>
+              
 
               <div className="mt-5 space-y-4">
                 {patternCards.map((pattern) => (
@@ -448,30 +481,7 @@ export default function SummaryClient({
           </aside>
         </section>
 
-        <footer className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <p className="text-sm font-medium text-slate-900">Next step</p>
-            <p className="mt-1 text-sm text-slate-600">Export the report, return to the live session, or start planning the next class run.</p>
-          </div>
-          <div className="flex flex-wrap gap-3">
-            <Link href={`/teacher/session/${sessionId}/export`}>
-              <Button variant="outline" className="rounded-full border-slate-200 px-5">
-                <Download className="size-4" />
-                Export report
-              </Button>
-            </Link>
-            <Link href="/teacher/create-session">
-              <Button variant="outline" className="rounded-full border-slate-200 px-5">
-                Start new session
-              </Button>
-            </Link>
-            <Link href="/teacher/dashboard">
-              <Button variant="outline" className="rounded-full border-slate-200 px-5">
-                Back to dashboard
-              </Button>
-            </Link>
-          </div>
-        </footer>
+      
       </div>
     </main>
   )

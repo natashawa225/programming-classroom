@@ -96,18 +96,47 @@ export interface SessionSummaryRecord {
   updated_at: string
 }
 
+export interface StudentSessionSummaryRecord {
+  id: string
+  session_id: string
+  session_participant_id: string
+  input_hash: string
+  summary_json: Record<string, unknown>
+  source: 'local' | 'mixed'
+  created_at: string
+  updated_at: string
+}
+
 export interface AnalysisRun {
   analysis_run_id: string
   session_id: string
+  question_id: string | null
   condition: 'baseline' | 'treatment' | null
   session_status: SessionStatus | null
   round_number: 1 | 2
   model: string | null
+  model_name: string | null
   status: 'queued' | 'running' | 'completed' | 'failed'
   error_message: string | null
   prompt_json: Record<string, unknown> | null
   raw_response_json: Record<string, unknown> | null
+  analysis_json: Record<string, unknown> | null
   summary_json: Record<string, unknown> | null
+  created_at: string
+}
+
+export interface SessionEvent {
+  id: string
+  session_id: string
+  question_id: string | null
+  event_type:
+    | 'session_started'
+    | 'question_opened'
+    | 'question_closed'
+    | 'revision_opened'
+    | 'revision_closed'
+    | 'analysis_generated'
+  round_number: 1 | 2
   created_at: string
 }
 
