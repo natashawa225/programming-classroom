@@ -6,7 +6,6 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { joinSessionWithParticipantCredentials } from '@/lib/supabase/queries'
 
 export default function StudentJoin() {
   const router = useRouter()
@@ -22,11 +21,22 @@ export default function StudentJoin() {
     setError(null)
 
     try {
-      const { session } = await joinSessionWithParticipantCredentials({
-        sessionCode,
-        participantId,
-        password,
+      const response = await fetch('/api/student/join', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          sessionCode,
+          participantId,
+          password,
+        }),
       })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to join session.')
+      }
+      const session = payload?.session
 
       router.push(`/student/respond/${session.id}`)
     } catch (err) {

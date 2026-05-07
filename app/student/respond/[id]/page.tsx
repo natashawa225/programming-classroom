@@ -8,14 +8,6 @@ import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { StudentSessionSummary } from '@/components/student-session-summary'
-import {
-  getRevisionPrefillResponse,
-  getSession,
-  getSessionParticipantForStudent,
-  getSessionQuestions,
-  getStudentResponse,
-  submitStudentResponse,
-} from '@/lib/supabase/queries'
 import type { AttemptType, Session, SessionQuestion } from '@/lib/types/database'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
 
@@ -88,11 +80,20 @@ export default function StudentRespondPage() {
   useEffect(() => {
     const load = async () => {
       try {
-        const [sessionData, participation, sessionQuestions] = await Promise.all([
-          getSession(sessionId),
-          getSessionParticipantForStudent(sessionId),
-          getSessionQuestions(sessionId),
-        ])
+        const response = await fetch('/api/student/respond-state', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ sessionId }),
+        })
+        const payload = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(payload?.error || 'Failed to load this session.')
+        }
+        const sessionData = payload?.session as Session | null
+        const participation = payload?.participation
+        const sessionQuestions = (payload?.questions || []) as SessionQuestion[]
 
         if (!participation) {
           router.replace('/student/join')
@@ -117,7 +118,18 @@ export default function StudentRespondPage() {
     tables: realtimeTables,
     onChange: async () => {
       try {
-        const updated = await getSession(sessionId)
+        const response = await fetch('/api/student/session-status', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ sessionId }),
+        })
+        const payload = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(payload?.error || 'Failed to refresh session.')
+        }
+        const updated = payload?.session as Session
         setSession(updated)
       } catch (err) {
         console.error(err)
@@ -168,7 +180,22 @@ export default function StudentRespondPage() {
 
       try {
         if (currentAttemptType === 'revision') {
-          const prefill = await getRevisionPrefillResponse(sessionId, { questionId: currentQuestion.question_id })
+          const response = await fetch('/api/student/current-response', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              sessionId,
+              questionId: currentQuestion.question_id,
+              mode: 'revision',
+            }),
+          })
+          const payload = await response.json().catch(() => null)
+          if (!response.ok) {
+            throw new Error(payload?.error || 'Failed to load your saved answer.')
+          }
+          const prefill = payload?.prefill
           if (cancelled) return
 
           if (prefill.round2Response) {
@@ -196,10 +223,22 @@ export default function StudentRespondPage() {
           return
         }
 
-        const existing = await getStudentResponse(sessionId, {
-          questionId: currentQuestion.question_id,
-          attemptType: currentAttemptType,
+        const response = await fetch('/api/student/current-response', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            sessionId,
+            questionId: currentQuestion.question_id,
+            mode: currentAttemptType,
+          }),
         })
+        const payload = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(payload?.error || 'Failed to load your saved answer.')
+        }
+        const existing = payload?.response
 
         if (cancelled) return
 
@@ -262,12 +301,23 @@ export default function StudentRespondPage() {
       setSubmitting(true)
       setError(null)
 
-      await submitStudentResponse(sessionId, {
-        questionId: currentQuestion.question_id,
-        answerText: answer,
-        confidence,
-        timeTakenSeconds: Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000)),
+      const response = await fetch('/api/student/submit-response', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          sessionId,
+          questionId: currentQuestion.question_id,
+          answerText: answer,
+          confidence,
+          timeTakenSeconds: Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000)),
+        }),
       })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to submit your answer.')
+      }
 
       if (activeStepKey) {
         activeStepKeyRef.current = activeStepKey

@@ -5,10 +5,9 @@ import { useParams } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { getSession, getSessionResponses } from '@/lib/supabase/queries'
 import type { Session } from '@/lib/types/database'
-import { teacherLogout } from '@/app/teacher/auth-actions'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
+import { TeacherLogoutButton } from '@/components/teacher-logout-button'
 
 function formatDateUtc(isoLike: string) {
   const date = new Date(isoLike)
@@ -35,11 +34,19 @@ export default function SessionExport() {
     const loadData = async () => {
       try {
         setLoading(true)
-        const sessionData = await getSession(sessionId)
+        const response = await fetch('/api/teacher/session-state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId }),
+        })
+        const payload = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(payload?.error || 'Failed to load session data.')
+        }
+        const sessionData = payload?.session as Session | null
+        const responsesData = Array.isArray(payload?.responses) ? payload.responses : []
         setSession(sessionData)
-
-        const responsesData = await getSessionResponses(sessionId)
-        setResponseCount(responsesData?.length || 0)
+        setResponseCount(responsesData.length)
       } catch (err) {
         console.error('Error loading session:', err)
         setError('Failed to load session data')
@@ -55,8 +62,17 @@ export default function SessionExport() {
     tables: realtimeTables,
     onChange: async () => {
       try {
-        const responsesData = await getSessionResponses(sessionId)
-        setResponseCount(responsesData?.length || 0)
+        const response = await fetch('/api/teacher/session-state', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId }),
+        })
+        const payload = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(payload?.error || 'Failed to refresh session data.')
+        }
+        const responsesData = Array.isArray(payload?.responses) ? payload.responses : []
+        setResponseCount(responsesData.length)
       } catch (err) {
         console.error('Error refreshing response count:', err)
       }
@@ -157,9 +173,7 @@ export default function SessionExport() {
             <Link href={`/teacher/session/${sessionId}`}>
               <Button variant="outline">Back</Button>
             </Link>
-            <form action={teacherLogout}>
-              <Button variant="outline" type="submit">Log Out</Button>
-            </form>
+            <TeacherLogoutButton />
           </div>
         </div>
       </header>

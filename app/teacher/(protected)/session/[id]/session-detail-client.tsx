@@ -3,13 +3,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import {
-  getLiveQuestionAnalyses,
-  getSession,
-  getSessionParticipants,
-  getSessionResponses,
-} from '@/lib/supabase/queries'
-import { teacherLogout } from '@/app/teacher/auth-actions'
 import type {
   AttemptType,
   LiveQuestionAnalysis,
@@ -23,6 +16,7 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
 import { CONFIDENCE_BINS, getConfidenceLevel } from '@/lib/confidence'
+import { TeacherLogoutButton } from '@/components/teacher-logout-button'
 
 type Props = {
   initialSession: Session
@@ -484,17 +478,20 @@ export default function SessionDetailClient({
 
   const refreshLiveData = useCallback(async () => {
     try {
-      const [sessionData, participantsData, responsesData, analysesData] = await Promise.all([
-        getSession(sessionId),
-        getSessionParticipants(sessionId),
-        getSessionResponses(sessionId),
-        getLiveQuestionAnalyses(sessionId),
-      ])
+      const response = await fetch('/api/teacher/session-state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId }),
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to refresh live session data.')
+      }
 
-      setSession(sessionData)
-      setParticipants(participantsData || [])
-      setResponses(responsesData || [])
-      setLiveQuestionAnalyses(analysesData || [])
+      setSession(payload?.session as Session)
+      setParticipants((payload?.participants || []) as SessionParticipant[])
+      setResponses((payload?.responses || []) as Response[])
+      setLiveQuestionAnalyses((payload?.liveQuestionAnalyses || []) as LiveQuestionAnalysis[])
     } catch (err) {
       console.error('Error refreshing live session data:', err)
     }
@@ -820,11 +817,10 @@ export default function SessionDetailClient({
                   Back
                 </Button>
               </Link>
-              <form action={teacherLogout}>
-                <Button variant="outline" type="submit" className="rounded-full border-[rgba(123,175,212,0.22)] bg-white/80 px-5">
-                  Log Out
-                </Button>
-              </form>
+              <TeacherLogoutButton
+                variant="outline"
+                className="rounded-full border-[rgba(123,175,212,0.22)] bg-white/80 px-5"
+              />
             </div>
           </div>
         </div>
@@ -1401,7 +1397,7 @@ export default function SessionDetailClient({
                 onClick={() => setShowRawResponses((value) => !value)}
                 className="mt-6 w-full rounded-2xl border border-[rgba(123,175,212,0.22)] bg-white px-4 py-3 text-sm font-medium text-foreground/74"
               >
-                  {showRawResponses ? 'Hide Example Responses' : 'View Example Responses'}
+                  {showRawResponses ? 'Hide Students Responses' : 'View Students Responses'}
               </button>
             </section>
 

@@ -246,11 +246,21 @@ export async function getSession(sessionId: string) {
     if (error) throw error
     if (data) return data as Session
 
+    console.warn('session lookup miss', {
+      sessionId,
+      attempt: attempt + 1,
+      attempts,
+    })
+
     if (attempt < attempts - 1) {
       await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)))
     }
   }
 
+  console.error('session lookup failed after retries', {
+    sessionId,
+    attempts,
+  })
   throw new Error('Session not found')
 }
 
@@ -290,6 +300,12 @@ export async function getSessionByCode(sessionCode: string) {
     .maybeSingle()
 
   if (error) throw error
+  if (!data) {
+    console.warn('session code lookup miss', {
+      requestedSessionCode: sessionCode,
+      normalizedSessionCode: normalized,
+    })
+  }
   if (!data) throw new Error('Session code not found')
   return data as Session
 }
@@ -320,6 +336,9 @@ export async function startCurrentQuestion(sessionId: string, timerSeconds?: num
   }
   if (session.live_phase === 'session_completed' || session.status === 'closed') {
     throw new Error('This session has already ended.')
+  }
+  if (session.live_phase !== 'not_started') {
+    throw new Error('This session has already started.')
   }
 
   const effectiveTimer =
@@ -380,6 +399,9 @@ export async function closeCurrentQuestion(sessionId: string, attemptType: Attem
 
 export async function moveToNextQuestion(sessionId: string, timerSeconds?: number | null) {
   const session = await getSession(sessionId)
+  if (session.live_phase !== 'question_initial_closed' && session.live_phase !== 'question_revision_closed') {
+    throw new Error('You can only move to the next question after the current step has been closed.')
+  }
   const questions = await getSessionQuestions(sessionId)
   const nextPosition = session.current_question_position + 1
   const nextQuestion = questions.find((question) => question.position === nextPosition)
@@ -604,8 +626,29 @@ export async function joinSessionWithParticipantCredentials(data: {
       break
     }
 
-    // Label collision under concurrent joins: retry.
-    if (insertError.code === '23505') continue
+    if (insertError.code === '23505') {
+      const { data: racedJoin, error: racedJoinError } = await adminSupabase
+        .from('session_participants')
+        .select('session_participant_id, session_id, participant_id, student_name, student_id, anonymized_label, joined_at')
+        .eq('session_id', session.id)
+        .eq('participant_id', participant.participant_id)
+        .maybeSingle()
+
+      if (racedJoinError) throw racedJoinError
+      if (racedJoin) {
+        const { error: updateError } = await adminSupabase
+          .from('session_participants')
+          .update({ join_token_hash: joinTokenHash })
+          .eq('session_participant_id', racedJoin.session_participant_id)
+
+        if (updateError) throw updateError
+        participation = racedJoin
+        break
+      }
+
+      // Label collision under concurrent joins: retry.
+      continue
+    }
     throw insertError
   }
 
@@ -630,7 +673,12 @@ export async function getSessionParticipantForStudent(sessionId: string) {
   const supabase = createAdminClient()
   const cookieStore = await cookies()
   const token = cookieStore.get(sessionParticipantCookieName(sessionId))?.value
-  if (!token) return null
+  if (!token) {
+    console.warn('student participant lookup missing join token', {
+      sessionId,
+    })
+    return null
+  }
 
   const { data, error } = await supabase
     .from('session_participants')
@@ -640,6 +688,12 @@ export async function getSessionParticipantForStudent(sessionId: string) {
     .maybeSingle()
 
   if (error) throw error
+  if (!data) {
+    console.warn('student participant lookup miss', {
+      sessionId,
+      cookieName: sessionParticipantCookieName(sessionId),
+    })
+  }
   return (data as SessionParticipant) || null
 }
 
@@ -753,6 +807,22 @@ export async function submitResponse(
     throw new Error('Join not found for this session. Please re-join using the session code.')
   }
 
+  const latestSession = await getSession(sessionId)
+  const latestAllowedAttemptType = getAllowedAttemptType(latestSession)
+  if (!latestAllowedAttemptType) {
+    throw new Error('This question is not accepting responses right now.')
+  }
+  if (latestAllowedAttemptType !== requestedAttemptType) {
+    throw new Error(
+      requestedAttemptType === 'revision'
+        ? 'Revision is not open right now.'
+        : 'The current question is not open for initial responses right now.'
+    )
+  }
+  if (questionRow.position !== latestSession.current_question_position) {
+    throw new Error('This is not the active question right now.')
+  }
+
   const { data, error } = await adminSupabase
     .from('responses')
     .insert({
@@ -770,6 +840,13 @@ export async function submitResponse(
     .select()
     .single()
 
+  if (error?.code === '23505') {
+    throw new Error(
+      requestedAttemptType === 'revision'
+        ? 'You have already submitted your revision for this question.'
+        : 'You have already submitted for this question.'
+    )
+  }
   if (error) throw error
   return data as Response
 }
@@ -789,7 +866,6 @@ export async function submitStudentResponse(
     throw new Error('Not joined for this session. Please join using the session code.')
   }
 
-  const supabase = await createClient()
   const adminSupabase = createAdminClient()
   const session = await getSession(sessionId)
   const attemptType = getAllowedAttemptType(session)
@@ -799,21 +875,6 @@ export async function submitStudentResponse(
   }
 
   const roundNumber = getRoundNumberForAttemptType(attemptType)
-
-  // Server-side duplicate protection per question+round (in addition to DB unique index).
-  const { data: existing, error } = await adminSupabase
-    .from('responses')
-    .select('response_id')
-    .eq('session_id', sessionId)
-    .eq('session_participant_id', participation.session_participant_id)
-    .eq('question_id', data.questionId)
-    .eq('attempt_type', attemptType)
-    .limit(1)
-
-  if (error) throw error
-  if (existing && existing.length > 0) {
-    throw new Error('You have already submitted for this question.')
-  }
 
   // For revision, link to original round-1 response if present.
   let originalResponseId: string | null = data.originalResponseId || null

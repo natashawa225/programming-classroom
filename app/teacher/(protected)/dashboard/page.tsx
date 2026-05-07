@@ -4,10 +4,9 @@ import { useMemo, useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { getSessionsByTeacher } from '@/lib/supabase/queries'
 import type { Session } from '@/lib/types/database'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
-import { teacherLogout } from '@/app/teacher/auth-actions'
+import { TeacherLogoutButton } from '@/components/teacher-logout-button'
 
 function formatDateUtc(isoLike: string) {
   const date = new Date(isoLike)
@@ -27,9 +26,12 @@ export default function TeacherDashboard() {
   const loadSessions = useCallback(async () => {
     try {
       setLoading(true)
-      // For now, use a demo teacher ID
-      const teacherId = 'demo-teacher-001'
-      const data = await getSessionsByTeacher(teacherId)
+      const response = await fetch('/api/teacher/sessions')
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to load sessions.')
+      }
+      const data = (payload?.sessions || []) as Session[]
       setSessions(data)
     } catch (err) {
       console.error('Error loading sessions:', err)
@@ -70,9 +72,7 @@ export default function TeacherDashboard() {
             <h1 className="text-2xl font-bold text-foreground">Teacher Dashboard</h1>
             <p className="text-sm text-foreground/60 mt-1">Manage your classroom sessions</p>
           </div>
-          <form action={teacherLogout}>
-            <Button variant="outline" type="submit">Log Out</Button>
-          </form>
+          <TeacherLogoutButton />
         </div>
       </header>
 

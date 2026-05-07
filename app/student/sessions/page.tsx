@@ -4,8 +4,8 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { getActiveSessions } from '@/lib/supabase/queries'
-import { studentLogout } from '@/app/student/auth-actions'
+import type { Session } from '@/lib/types/database'
+import { StudentLogoutButton } from '@/components/student-logout-button'
 
 export default function StudentSessions() {
   const router = useRouter()
@@ -20,7 +20,12 @@ export default function StudentSessions() {
   useEffect(() => {
     const loadSessions = async () => {
       try {
-        const sessions = await getActiveSessions()
+        const response = await fetch('/api/student/active-sessions')
+        const payload = await response.json().catch(() => null)
+        if (!response.ok) {
+          throw new Error(payload?.error || 'Failed to load active sessions.')
+        }
+        const sessions = (payload?.sessions || []) as Session[]
         setActiveSessions(sessions.map(session => ({
           id: session.id,
           session_code: session.session_code,
@@ -58,9 +63,7 @@ export default function StudentSessions() {
             <h1 className="text-2xl font-bold text-foreground">Active Sessions</h1>
             <p className="text-sm text-foreground/60 mt-1">Join using your participant ID + password</p>
           </div>
-          <form action={studentLogout}>
-            <Button variant="outline" type="submit">Log Out</Button>
-          </form>
+          <StudentLogoutButton />
         </div>
       </header>
 

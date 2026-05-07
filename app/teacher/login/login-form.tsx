@@ -1,18 +1,48 @@
 'use client'
 
-import { useActionState } from 'react'
+import { useState, type FormEvent } from 'react'
+import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { teacherLogin, type TeacherLoginState } from '@/app/teacher/auth-actions'
 
 export default function TeacherLoginForm({ showUsername }: { showUsername: boolean }) {
-  const [state, action, pending] = useActionState<TeacherLoginState, FormData>(
-    teacherLogin,
-    { error: null }
-  )
+  const router = useRouter()
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setPending(true)
+    setError(null)
+
+    const formData = new FormData(event.currentTarget)
+    try {
+      const response = await fetch('/api/teacher/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          username: String(formData.get('username') || ''),
+          password: String(formData.get('password') || ''),
+        }),
+      })
+
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to sign in.')
+      }
+
+      router.replace('/teacher/dashboard')
+      router.refresh()
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'Failed to sign in.')
+      setPending(false)
+    }
+  }
 
   return (
-    <form action={action} className="space-y-6">
+    <form onSubmit={handleSubmit} className="space-y-6">
       {showUsername && (
         <div>
           <label htmlFor="username" className="block text-sm font-medium text-foreground mb-3">
@@ -36,9 +66,9 @@ export default function TeacherLoginForm({ showUsername }: { showUsername: boole
         />
       </div>
 
-      {state.error && (
+      {error && (
         <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20">
-          <p className="text-sm text-destructive">{state.error}</p>
+          <p className="text-sm text-destructive">{error}</p>
         </div>
       )}
 
@@ -48,4 +78,3 @@ export default function TeacherLoginForm({ showUsername }: { showUsername: boole
     </form>
   )
 }
-

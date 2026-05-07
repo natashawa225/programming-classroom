@@ -5,6 +5,7 @@ import { getUnionFindQuestionContext } from '@/lib/ai/union-find-question-config
 import {
   closeCurrentQuestion,
   createAnalysisRun,
+  getLatestQuestionAnalysisRun,
   getSession,
   getSessionQuestions,
   getSessionResponses,
@@ -134,6 +135,18 @@ export async function POST(request: NextRequest) {
     }
 
     const roundNumber = getRoundNumberForAttemptType(attemptType)
+    const latestRun = await getLatestQuestionAnalysisRun(sessionId, question.question_id, roundNumber)
+    if (latestRun && (latestRun.status === 'queued' || latestRun.status === 'running')) {
+      return NextResponse.json(
+        {
+          status: latestRun.status,
+          analysis_run_id: latestRun.analysis_run_id,
+          created_at: latestRun.created_at,
+        },
+        { status: 202 }
+      )
+    }
+
     const lessonContext = getUnionFindQuestionContext({
       position: question.position,
       prompt: question.prompt,

@@ -6,21 +6,12 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import {
-  getSession,
-  getSessionParticipants,
-  getSessionQuestions,
-  getSessionResponses,
-  getLatestCompletedAnalysisRun,
-  getLatestInProgressAnalysisRun,
-  updateSessionStatus,
-} from '@/lib/supabase/queries'
 import type { Response, Session, SessionParticipant, SessionQuestion } from '@/lib/types/database'
 import type { SessionRoundAnalysis } from '@/lib/ai/experiment-analysis'
 import { summarizeSessionRoundMetrics } from '@/lib/session-metrics'
-import { teacherLogout } from '@/app/teacher/auth-actions'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
 import { AnalysisDashboard } from '@/components/analysis-dashboard'
+import { TeacherLogoutButton } from '@/components/teacher-logout-button'
 
 type MisconceptionComparison = NonNullable<SessionRoundAnalysis['misconception_comparison']>[number]
 type MisconceptionDelta = NonNullable<MisconceptionComparison['deltas']>[number]
@@ -379,6 +370,10 @@ export default function SessionAnalysis() {
     () => [{ table: 'analysis_runs', event: '*' as const, filter: `session_id=eq.${sessionId}` }],
     [sessionId]
   )
+  const realtimeTables = useMemo(
+    () => [...responseRealtimeTables, ...participantRealtimeTables, ...analysisRealtimeTables],
+    [analysisRealtimeTables, participantRealtimeTables, responseRealtimeTables]
+  )
 
   const metrics = useMemo(
     () =>
@@ -392,20 +387,28 @@ export default function SessionAnalysis() {
     [analysis?.per_question?.length, participants, questions.length, responses, roundNumber, session]
   )
 
+  const fetchAnalysisState = async () => {
+    const response = await fetch('/api/teacher/analysis-state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId }),
+    })
+    const payload = await response.json().catch(() => null)
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Failed to load analysis state.')
+    }
+    return payload
+  }
+
   useEffect(() => {
     const loadData = async () => {
       try {
         setLoading(true)
-        const [sessionData, participantsData, questionsData, responsesData] = await Promise.all([
-          getSession(sessionId),
-          getSessionParticipants(sessionId),
-          getSessionQuestions(sessionId),
-          getSessionResponses(sessionId),
-        ])
-        setSession(sessionData)
-        setParticipants(participantsData || [])
-        setQuestions(questionsData || [])
-        setResponses(responsesData || [])
+        const payload = await fetchAnalysisState()
+        setSession((payload?.session || null) as Session | null)
+        setParticipants((payload?.participants || []) as SessionParticipant[])
+        setQuestions((payload?.questions || []) as SessionQuestion[])
+        setResponses((payload?.responses || []) as Response[])
         setRoundNumber(1)
       } catch (err) {
         console.error('Error loading session:', err)
@@ -424,14 +427,23 @@ export default function SessionAnalysis() {
         setLoadingStoredAnalysis(true)
       }
       setError(null)
-      const [completed, inProgress, completedRound1, completedRound2, inProgressRound1, inProgressRound2] = await Promise.all([
-        getLatestCompletedAnalysisRun(sessionId, rn),
-        getLatestInProgressAnalysisRun(sessionId, rn),
-        getLatestCompletedAnalysisRun(sessionId, 1),
-        getLatestCompletedAnalysisRun(sessionId, 2),
-        getLatestInProgressAnalysisRun(sessionId, 1),
-        getLatestInProgressAnalysisRun(sessionId, 2),
-      ])
+      const payload = await fetchAnalysisState()
+      const sessionData = (payload?.session || null) as Session | null
+      const participantsData = (payload?.participants || []) as SessionParticipant[]
+      const questionsData = (payload?.questions || []) as SessionQuestion[]
+      const responsesData = (payload?.responses || []) as Response[]
+      const completedRound1 = payload?.completedRound1 || null
+      const completedRound2 = payload?.completedRound2 || null
+      const inProgressRound1 = payload?.inProgressRound1 || null
+      const inProgressRound2 = payload?.inProgressRound2 || null
+      const completed = rn === 1 ? completedRound1 : completedRound2
+      const inProgress = rn === 1 ? inProgressRound1 : inProgressRound2
+
+      setSession(sessionData)
+      setParticipants(participantsData)
+      setQuestions(questionsData)
+      setResponses(responsesData)
+
       setAnalysisAvailability({
         round1Completed: Boolean(completedRound1?.summary_json),
         round2Completed: Boolean(completedRound2?.summary_json),
@@ -478,20 +490,6 @@ export default function SessionAnalysis() {
   }
 
   useEffect(() => {
-    const refreshCount = async () => {
-      try {
-        const [participantsData, responsesData] = await Promise.all([
-          getSessionParticipants(sessionId),
-          getSessionResponses(sessionId),
-        ])
-        setParticipants(participantsData || [])
-        setResponses(responsesData || [])
-      } catch {}
-    }
-    void refreshCount()
-  }, [sessionId, roundNumber])
-
-  useEffect(() => {
     if (!session) return
     setAnalysis(null)
     setAnalysisStatus('none')
@@ -501,40 +499,12 @@ export default function SessionAnalysis() {
   }, [sessionId, session?.id, roundNumber])
 
   usePostgresChanges({
-    tables: responseRealtimeTables,
-    onChange: async () => {
-      try {
-        const responsesData = await getSessionResponses(sessionId)
-        setResponses(responsesData || [])
-      } catch (err) {
-        console.error('Error refreshing response count:', err)
-      }
-    },
-    pollMs: 10000,
-    debugLabel: `teacher-analysis-${sessionId}-r${roundNumber}`,
-  })
-
-  usePostgresChanges({
-    tables: participantRealtimeTables,
-    onChange: async () => {
-      try {
-        const participantsData = await getSessionParticipants(sessionId)
-        setParticipants(participantsData || [])
-      } catch (err) {
-        console.error('Error refreshing participant count:', err)
-      }
-    },
-    pollMs: 10000,
-    debugLabel: `teacher-analysis-participants-${sessionId}`,
-  })
-
-  usePostgresChanges({
-    tables: analysisRealtimeTables,
+    tables: realtimeTables,
     onChange: async () => {
       await loadStoredAnalysis(roundNumber, { silent: true })
     },
     pollMs: 10000,
-    debugLabel: `teacher-analysis-run-${sessionId}-r${roundNumber}`,
+    debugLabel: `teacher-analysis-${sessionId}-r${roundNumber}`,
   })
 
   const round1Responses = useMemo(
@@ -692,8 +662,16 @@ export default function SessionAnalysis() {
       setActionLoading(true)
       setError(null)
       setSession({ ...session, status: 'revision' })
-      const updated = await updateSessionStatus(sessionId, 'revision')
-      setSession(updated)
+      const response = await fetch('/api/teacher/session-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, status: 'revision' }),
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to open revision')
+      }
+      setSession(payload?.session as Session)
     } catch (err) {
       console.error('Error opening revision:', err)
       setSession(previousSession)
@@ -710,8 +688,16 @@ export default function SessionAnalysis() {
       setActionLoading(true)
       setError(null)
       setSession({ ...session, status: 'analysis_ready' })
-      const updated = await updateSessionStatus(sessionId, 'analysis_ready')
-      setSession(updated)
+      const response = await fetch('/api/teacher/session-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, status: 'analysis_ready' }),
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to close revision')
+      }
+      setSession(payload?.session as Session)
     } catch (err) {
       console.error('Error closing revision:', err)
       setSession(previousSession)
@@ -757,9 +743,7 @@ export default function SessionAnalysis() {
             <Link href={`/teacher/session/${sessionId}`}>
               <Button variant="outline">Back</Button>
             </Link>
-            <form action={teacherLogout}>
-              <Button variant="outline" type="submit">Log Out</Button>
-            </form>
+            <TeacherLogoutButton />
           </div>
         </div>
       </header>

@@ -5,8 +5,7 @@ import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { createSession } from '@/lib/supabase/queries'
-import { teacherLogout } from '@/app/teacher/auth-actions'
+import { TeacherLogoutButton } from '@/components/teacher-logout-button'
 
 export default function CreateSession() {
   const router = useRouter()
@@ -80,16 +79,28 @@ export default function CreateSession() {
       }
 
       // Create the session
-      const session = await createSession({
-        condition: formData.condition,
-        title: formData.title.trim() || undefined,
-        answerOptions: [],
-        questions: normalized.map((q) => ({
-          prompt: q.prompt,
-          correctAnswer: q.correctAnswer || undefined,
-          timerSeconds: q.timerSeconds === null ? undefined : q.timerSeconds,
-        })),
+      const response = await fetch('/api/teacher/create-session', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          condition: formData.condition,
+          title: formData.title.trim() || undefined,
+          answerOptions: [],
+          questions: normalized.map((q) => ({
+            prompt: q.prompt,
+            correctAnswer: q.correctAnswer || undefined,
+            timerSeconds: q.timerSeconds === null ? undefined : q.timerSeconds,
+          })),
+        }),
       })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to create session')
+      }
+
+      const session = payload?.session
 
       createdSessionIdRef.current = session.id
       router.replace(`/teacher/session/${session.id}`)
@@ -114,9 +125,7 @@ export default function CreateSession() {
             <Link href="/teacher/dashboard">
               <Button variant="outline">Back</Button>
             </Link>
-            <form action={teacherLogout}>
-              <Button variant="outline" type="submit">Log Out</Button>
-            </form>
+            <TeacherLogoutButton />
           </div>
         </div>
       </header>
