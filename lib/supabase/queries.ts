@@ -1388,6 +1388,19 @@ export async function getLatestInProgressAnalysisRun(sessionId: string, roundNum
   return (data as AnalysisRun) || null
 }
 
+export async function getAnalysisRuns(sessionId: string) {
+  await assertTeacherAuthenticated()
+  const supabase = await createClient()
+  const { data, error } = await supabase
+    .from('analysis_runs')
+    .select('*')
+    .eq('session_id', sessionId)
+    .order('created_at', { ascending: true })
+
+  if (error) throw error
+  return (data || []) as AnalysisRun[]
+}
+
 export async function getResponseAiLabels(sessionId: string, roundNumber: 1 | 2) {
   await assertTeacherAuthenticated()
   const supabase = await createClient()

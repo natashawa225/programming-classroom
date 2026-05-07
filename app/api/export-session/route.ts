@@ -1,6 +1,8 @@
 import {
+  getAnalysisRuns,
   getLiveQuestionAnalyses,
   getSession,
+  getSessionEvents,
   getSessionParticipants,
   getSessionResponses,
 } from '@/lib/supabase/queries'
@@ -21,11 +23,13 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Missing sessionId' }, { status: 400 })
     }
 
-    const [session, participants, responses, liveQuestionAnalyses] = await Promise.all([
+    const [session, participants, responses, liveQuestionAnalyses, analysisRuns, sessionEvents] = await Promise.all([
       getSession(sessionId),
       getSessionParticipants(sessionId),
       getSessionResponses(sessionId),
       getLiveQuestionAnalyses(sessionId),
+      getAnalysisRuns(sessionId),
+      getSessionEvents(sessionId),
     ])
 
     if (format === 'json') {
@@ -34,10 +38,12 @@ export async function GET(request: NextRequest) {
         participants,
         responses,
         liveQuestionAnalyses,
+        analysisRuns,
+        sessionEvents,
       })
     }
 
-    const csvData = generateCSV(session, participants, responses, liveQuestionAnalyses)
+    const csvData = generateCSV(session, participants, responses, liveQuestionAnalyses, analysisRuns, sessionEvents)
 
     return new NextResponse(csvData, {
       headers: {
@@ -58,7 +64,9 @@ function generateCSV(
   session: any,
   participants: any[],
   responses: any[],
-  liveQuestionAnalyses: any[]
+  liveQuestionAnalyses: any[],
+  analysisRuns: any[],
+  sessionEvents: any[]
 ): string {
   const lines: string[] = []
 
@@ -128,6 +136,48 @@ function generateCSV(
           escapeCSV(analysis.attempt_type),
           escapeCSV(JSON.stringify(analysis.analysis_json || {})),
           analysis.generated_at ? new Date(analysis.generated_at).toISOString() : '',
+        ].join(',')
+      )
+    })
+    lines.push('')
+  }
+
+  if (analysisRuns.length > 0) {
+    lines.push('Analysis Runs')
+    lines.push('Analysis Run ID,Question ID,Round Number,Status,Condition,Session Status,Model,Prompt JSON,Raw Response JSON,Analysis JSON,Summary JSON,Error Message,Created At')
+    analysisRuns.forEach((run: any) => {
+      lines.push(
+        [
+          escapeCSV(run.analysis_run_id || ''),
+          escapeCSV(run.question_id || ''),
+          escapeCSV(String(run.round_number ?? '')),
+          escapeCSV(run.status || ''),
+          escapeCSV(run.condition || ''),
+          escapeCSV(run.session_status || ''),
+          escapeCSV(run.model_name || run.model || ''),
+          escapeCSV(JSON.stringify(run.prompt_json || {})),
+          escapeCSV(JSON.stringify(run.raw_response_json || {})),
+          escapeCSV(JSON.stringify(run.analysis_json || {})),
+          escapeCSV(JSON.stringify(run.summary_json || {})),
+          escapeCSV(run.error_message || ''),
+          run.created_at ? new Date(run.created_at).toISOString() : '',
+        ].join(',')
+      )
+    })
+    lines.push('')
+  }
+
+  if (sessionEvents.length > 0) {
+    lines.push('Session Events')
+    lines.push('Event ID,Question ID,Event Type,Round Number,Created At')
+    sessionEvents.forEach((event: any) => {
+      lines.push(
+        [
+          escapeCSV(event.id || ''),
+          escapeCSV(event.question_id || ''),
+          escapeCSV(event.event_type || ''),
+          escapeCSV(String(event.round_number ?? '')),
+          event.created_at ? new Date(event.created_at).toISOString() : '',
         ].join(',')
       )
     })

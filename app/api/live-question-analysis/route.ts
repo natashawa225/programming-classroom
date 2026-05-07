@@ -56,7 +56,7 @@ function buildLiveQuestionPromptPayload(input: {
   responses: Array<{ response_id: string; answer: string; confidence: number }>
 }) {
   return {
-    prompt_version: 'live_question_clusters_v1',
+    prompt_version: 'live_question_clusters_v2',
     system_instruction:
       'Cluster short student answers for one open-ended classroom question into 2 to 5 reasoning-pattern groups.',
     user_input: {
@@ -137,6 +137,9 @@ export async function POST(request: NextRequest) {
     const roundNumber = getRoundNumberForAttemptType(attemptType)
     const latestRun = await getLatestQuestionAnalysisRun(sessionId, question.question_id, roundNumber)
     if (latestRun && (latestRun.status === 'queued' || latestRun.status === 'running')) {
+      console.info(
+        `[live-analysis] reuse=in_progress session_id=${sessionId} question_id=${question.question_id} attempt_type=${attemptType} analysis_run_id=${latestRun.analysis_run_id}`
+      )
       return NextResponse.json(
         {
           status: latestRun.status,
@@ -145,6 +148,18 @@ export async function POST(request: NextRequest) {
         },
         { status: 202 }
       )
+    }
+    if (latestRun && latestRun.status === 'completed' && latestRun.analysis_json && !body?.forceRegenerate) {
+      console.info(
+        `[live-analysis] reuse=completed session_id=${sessionId} question_id=${question.question_id} attempt_type=${attemptType} analysis_run_id=${latestRun.analysis_run_id}`
+      )
+      return NextResponse.json({
+        question,
+        attemptType,
+        analysis: latestRun.analysis_json,
+        saved: null,
+        reused: true,
+      })
     }
 
     const lessonContext = getUnionFindQuestionContext({
@@ -165,7 +180,7 @@ export async function POST(request: NextRequest) {
       })),
     })
     console.info(
-      `[live-analysis] question_id=${question.question_id} position=${question.position} prompt_included=true correct_answer_included=${Boolean(question.correct_answer && question.correct_answer.trim())} lesson_context_included=${Boolean(lessonContext)} response_count=${responses.length} round_number=${roundNumber} attempt_type=${attemptType}`
+      `[live-analysis] reuse=regenerate session_id=${sessionId} question_id=${question.question_id} position=${question.position} prompt_included=true correct_answer_included=${Boolean(question.correct_answer && question.correct_answer.trim())} lesson_context_included=${Boolean(lessonContext)} response_count=${responses.length} round_number=${roundNumber} attempt_type=${attemptType}`
     )
     const modelName = process.env.OPENAI_MODEL || 'gpt-4.1-mini'
     const run = await createAnalysisRun({
@@ -216,12 +231,18 @@ export async function POST(request: NextRequest) {
       status: 'completed',
       analysisJson: analysis as Record<string, unknown>,
       summaryJson: {
+        version: analysis.version,
         source: analysis.source,
         total_responses: analysis.total_responses,
         cluster_count: analysis.cluster_count,
         attempt_type: analysis.attempt_type,
       },
       rawResponseJson: {
+        question_position: question.position,
+        question_prompt: question.prompt,
+        correct_answer: question.correct_answer ?? null,
+        attempt_type: attemptType,
+        round_number: roundNumber,
         question_id: question.question_id,
         responses: responses.map((response) => ({
           response_id: response.response_id,

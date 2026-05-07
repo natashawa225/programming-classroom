@@ -2,6 +2,12 @@ import type { AttemptType } from '@/lib/types/database'
 import { openaiChatJson } from '@/lib/ai/openai-json'
 import type { UnionFindQuestionContext } from '@/lib/ai/union-find-question-config'
 
+export type UnderstandingBucket =
+  | 'needs_attention'
+  | 'mixed_reasoning'
+  | 'strong_alignment'
+  | 'unclear'
+
 export type LiveCluster = {
   cluster_id: string
   label: string
@@ -10,10 +16,14 @@ export type LiveCluster = {
   average_confidence: number
   representative_answers: string[]
   response_ids: string[]
+  // v2 fields
+  conceptual_alignment?: number       // -1 (conflicting) → 0 (mixed) → 1 (aligned)
+  understanding_bucket?: UnderstandingBucket
+  teacher_note?: string | null
 }
 
 export type LiveQuestionClusterAnalysis = {
-  version: 'live_question_clusters_v1'
+  version: 'live_question_clusters_v1' | 'live_question_clusters_v2'
   question_prompt: string
   attempt_type: AttemptType
   total_responses: number
@@ -33,10 +43,43 @@ type InputResponse = {
   confidence: number
 }
 
+// --- Backward-compat: map v1 True/False labels to alignment scores ---
+export function inferAlignmentFromV1Label(label: string): number {
+  const lower = label.toLowerCase()
+  if (lower.startsWith('true')) return 0.7
+  if (lower.startsWith('false')) return -0.7
+  return 0.0
+}
+
+export function inferBucketFromAlignment(alignment: number): UnderstandingBucket {
+  if (alignment >= 0.6) return 'strong_alignment'
+  if (alignment >= 0.1) return 'mixed_reasoning'
+  if (alignment <= -0.3) return 'needs_attention'
+  return 'unclear'
+}
+
 function clampClusterCount(count: number) {
   if (count < 2) return 2
   if (count > 5) return 5
   return count
+}
+
+function clampAlignment(value: unknown): number {
+  const n = Number(value)
+  if (isNaN(n)) return 0
+  return Math.max(-1, Math.min(1, n))
+}
+
+function safeUnderstandingBucket(value: unknown): UnderstandingBucket {
+  const valid: UnderstandingBucket[] = [
+    'needs_attention',
+    'mixed_reasoning',
+    'strong_alignment',
+    'unclear',
+  ]
+  return valid.includes(value as UnderstandingBucket)
+    ? (value as UnderstandingBucket)
+    : 'unclear'
 }
 
 function safeLabel(text: string, index: number) {
@@ -70,10 +113,17 @@ function buildClusterFromResponses(
   label: string,
   summary: string,
   rows: InputResponse[],
-  index: number
+  index: number,
+  v2Fields?: {
+    conceptual_alignment?: number
+    understanding_bucket?: UnderstandingBucket
+    teacher_note?: string | null
+  }
 ): LiveCluster {
   const averageConfidence =
-    rows.length > 0 ? Number((rows.reduce((sum, row) => sum + row.confidence, 0) / rows.length).toFixed(2)) : 0
+    rows.length > 0
+      ? Number((rows.reduce((sum, row) => sum + row.confidence, 0) / rows.length).toFixed(2))
+      : 0
 
   return {
     cluster_id: `cluster_${index + 1}`,
@@ -83,6 +133,7 @@ function buildClusterFromResponses(
     average_confidence: averageConfidence,
     representative_answers: rows.slice(0, 3).map((row) => row.answer),
     response_ids: rows.map((row) => row.response_id),
+    ...(v2Fields ?? {}),
   }
 }
 
@@ -115,13 +166,19 @@ function sanitizeModelClusters(
 
     ids.forEach((id: string) => assigned.add(id))
     const rows = ids.map((id: string) => responseMap.get(id)!).filter(Boolean)
+
+    const alignment = clampAlignment(cluster?.conceptual_alignment)
+
     sanitized.push(
-      buildClusterFromResponses(
-        cluster?.label,
-        cluster?.summary,
-        rows,
-        index
-      )
+      buildClusterFromResponses(cluster?.label, cluster?.summary, rows, index, {
+        conceptual_alignment: alignment,
+        understanding_bucket: cluster?.understanding_bucket
+          ? safeUnderstandingBucket(cluster.understanding_bucket)
+          : inferBucketFromAlignment(alignment),
+        teacher_note: cluster?.teacher_note
+          ? String(cluster.teacher_note).trim() || null
+          : null,
+      })
     )
   }
 
@@ -135,7 +192,17 @@ function sanitizeModelClusters(
     const mergedRows = [...target.response_ids, ...unassigned.map((row) => row.response_id)]
       .map((id: string) => responseMap.get(id)!)
       .filter(Boolean)
-    sanitized[targetIndex] = buildClusterFromResponses(target.label, target.summary, mergedRows, targetIndex)
+    sanitized[targetIndex] = buildClusterFromResponses(
+      target.label,
+      target.summary,
+      mergedRows,
+      targetIndex,
+      {
+        conceptual_alignment: target.conceptual_alignment,
+        understanding_bucket: target.understanding_bucket,
+        teacher_note: target.teacher_note,
+      }
+    )
   }
 
   return sanitized.slice(0, 5)
@@ -175,16 +242,20 @@ function buildFallbackClusters(
   const clusters = limitedGroups.map((rows, index) => {
     const isMixedGroup = sortedGroups.length > targetClusterCount && index === limitedGroups.length - 1
     const label = isMixedGroup
-      ? 'Uncertain: Mixed response patterns'
-      : `Uncertain: Similar response pattern ${index + 1}`
+      ? 'Mixed response patterns'
+      : `Similar response pattern ${index + 1}`
     const summary = isMixedGroup
       ? 'Students gave varied answers that could not be separated further without AI clustering.'
       : summarizeAnswerStem(rows[0]?.answer || '')
-    return buildClusterFromResponses(label, summary, rows, index)
+    return buildClusterFromResponses(label, summary, rows, index, {
+      conceptual_alignment: 0,
+      understanding_bucket: 'unclear',
+      teacher_note: null,
+    })
   })
 
   return {
-    version: 'live_question_clusters_v1',
+    version: 'live_question_clusters_v2',
     question_prompt: '',
     attempt_type: 'initial',
     total_responses: responses.length,
@@ -227,13 +298,26 @@ export async function clusterLiveQuestionResponses(input: {
     .join('\n\n')
 
   const result = await openaiChatJson({
-    maxTokens: 1400,
+    maxTokens: 1600,
     timeoutMs: 100000,
     messages: [
       {
         role: 'system',
-        content:
-          'You cluster short student answers for one open-ended classroom question. Return concise JSON only. Keep 2 to 5 clusters. Use classroom-safe language. Separate responses by distinct reasoning patterns, not just broad answer polarity. Avoid junk-drawer clusters that mix different misconceptions. Label each cluster with one of these prefixes: "True:", "False:", or "Uncertain:" so the visualization can place it on a correctness map.',
+        content: [
+          'You cluster short student answers for one open-ended classroom question into 2 to 5 reasoning-pattern groups.',
+          '',
+          'Your goal is teacher sensemaking — help the teacher quickly see the spread of reasoning in the room.',
+          '',
+          'Do NOT grade students. Do NOT label responses as simply correct or incorrect.',
+          '',
+          'Instead:',
+          '- Identify the main reasoning pattern used in each cluster.',
+          '- Estimate how closely the reasoning aligns with the target concept.',
+          '- Identify potentially incomplete, partial, or conflicting reasoning.',
+          '- Preserve nuanced or conditionally-valid reasoning rather than collapsing it to a binary.',
+          '',
+          'Return concise JSON only. Use classroom-safe language.',
+        ].join('\n'),
       },
       {
         role: 'user',
@@ -250,15 +334,30 @@ export async function clusterLiveQuestionResponses(input: {
           'Student responses:',
           numberedResponses,
           'Return JSON with this shape:',
-          '{"clusters":[{"cluster_id":"cluster_1","label":"short label","summary":"neutral one-sentence summary","response_ids":["..."]}]}',
+          JSON.stringify({
+            clusters: [
+              {
+                cluster_id: 'cluster_1',
+                label: 'neutral reasoning label (no True/False prefix)',
+                summary: 'one-sentence neutral description of the shared reasoning pattern',
+                conceptual_alignment: 0.35,
+                understanding_bucket: 'mixed_reasoning',
+                teacher_note: 'optional note for teacher — only if genuinely useful, else omit or null',
+                response_ids: ['...'],
+              },
+            ],
+          }, null, 2),
           'Rules:',
           '- Every response_id must appear in exactly one cluster.',
           '- Use 2 to 5 clusters unless there is only 1 response.',
-          '- Labels should be short and descriptive and must start with "True:", "False:", or "Uncertain:".',
+          '- Labels must be neutral and descriptive — never start with "True:", "False:", or "Uncertain:".',
+          '- Labels should describe the reasoning pattern, not the verdict (e.g. "Uses path compression reasoning" not "True: path compression").',
           '- Split different lines of reasoning into separate clusters even when they reach the same final answer.',
           '- Do not combine directional-union confusion, root/order confusion, implementation-dependence, and simple uncertainty into one broad cluster.',
-          '- Summaries should neutrally describe the shared reasoning pattern.',
-          '- Keep summaries concise and classroom-safe.',
+          '- conceptual_alignment is a float from -1.0 (strongly conflicts with target concept) to 1.0 (strongly aligned). 0.0 = mixed or partial.',
+          '- understanding_bucket must be exactly one of: needs_attention, mixed_reasoning, strong_alignment, unclear.',
+          '- teacher_note is optional — only include if the reasoning is ambiguous, conditionally valid, or requires context.',
+          '- Summaries should neutrally describe the shared reasoning pattern and be concise and classroom-safe.',
         ].join('\n\n'),
       },
     ],
@@ -287,7 +386,7 @@ export async function clusterLiveQuestionResponses(input: {
   }
 
   return {
-    version: 'live_question_clusters_v1',
+    version: 'live_question_clusters_v2',
     question_prompt: input.questionPrompt,
     attempt_type: input.attemptType,
     total_responses: cleanedResponses.length,
