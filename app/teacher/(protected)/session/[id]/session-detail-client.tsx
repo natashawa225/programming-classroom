@@ -33,6 +33,8 @@ type Props = {
   initialParticipants: SessionParticipant[]
   initialResponses: Response[]
   initialLiveQuestionAnalyses: LiveQuestionAnalysis[]
+  initialJoinedParticipantCount: number
+  initialCurrentQuestionRespondentCount: number
 }
 
 type LiveAnalysisPayload = {
@@ -287,6 +289,8 @@ export default function SessionDetailClient({
   initialParticipants,
   initialResponses,
   initialLiveQuestionAnalyses,
+  initialJoinedParticipantCount,
+  initialCurrentQuestionRespondentCount,
 }: Props) {
   const router = useRouter()
   const sessionId = initialSession.id
@@ -298,6 +302,8 @@ export default function SessionDetailClient({
   const [participants, setParticipants] = useState(initialParticipants)
   const [responses, setResponses] = useState(initialResponses)
   const [liveQuestionAnalyses, setLiveQuestionAnalyses] = useState(initialLiveQuestionAnalyses)
+  const [joinedParticipantCount, setJoinedParticipantCount] = useState(initialJoinedParticipantCount)
+  const [currentQuestionRespondentCount, setCurrentQuestionRespondentCount] = useState(initialCurrentQuestionRespondentCount)
   const [timerInput, setTimerInput] = useState('')
   const [secondsRemaining, setSecondsRemaining] = useState<number | null>(null)
   const [viewedQuestionId, setViewedQuestionId] = useState<string | null>(initialViewedQuestion?.question_id ?? null)
@@ -431,11 +437,13 @@ export default function SessionDetailClient({
       }
 
       setSession(payload?.session as Session)
+      setJoinedParticipantCount(Number(payload?.joinedParticipantCount ?? 0))
+      setCurrentQuestionRespondentCount(Number(payload?.currentQuestionRespondentCount ?? 0))
       setParticipants((payload?.participants || []) as SessionParticipant[])
       setResponses((payload?.responses || []) as Response[])
       setLiveQuestionAnalyses((payload?.liveQuestionAnalyses || []) as LiveQuestionAnalysis[])
       console.info(
-        `[teacher-live] session_id=${sessionId} joined=${(payload?.participants || []).length} submitted=${(payload?.responses || []).length}`
+        `[teacher-live] session_id=${sessionId} joined=${Number(payload?.joinedParticipantCount ?? 0)} current_question_id=${payload?.currentQuestionId || 'none'} responses=${Number(payload?.currentQuestionRespondentCount ?? 0)}`
       )
     } catch (err) {
       console.error('Error refreshing live session data:', err)
@@ -781,8 +789,8 @@ export default function SessionDetailClient({
 
           <div className="flex flex-wrap items-start gap-6">
             <MiniStat label="Phase" value={getPhaseLabel(session)} />
-            <MiniStat label="Joined" value={String(participants.length)} />
-            <MiniStat label={responseCountLabel} value={String(visibleResponseCount)} emphasized />
+            <MiniStat label="Joined" value={String(joinedParticipantCount)} />
+            <MiniStat label="Responses" value={String(isViewingCurrentQuestion ? currentQuestionRespondentCount : visibleResponseCount)} emphasized />
             <MiniStat label="Timer" value={secondsRemaining === null ? '—' : `${secondsRemaining}s`} />
             <div className="flex items-center gap-3 pt-6">
               <Link href="/teacher/dashboard">

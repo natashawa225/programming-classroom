@@ -1,7 +1,9 @@
 import Link from 'next/link'
 import {
+  getCurrentQuestionRespondentCount,
   getLiveQuestionAnalyses,
   getSession,
+  getSessionParticipantCount,
   getSessionParticipants,
   getSessionQuestions,
   getSessionResponses,
@@ -38,6 +40,10 @@ export default async function SessionDetailPage({
       getSessionResponses(sessionId),
       getLiveQuestionAnalyses(sessionId),
     ])
+    const [joinedParticipantCount, currentQuestionRespondent] = await Promise.all([
+      getSessionParticipantCount(sessionId),
+      getCurrentQuestionRespondentCount(sessionId),
+    ])
 
     return (
       <SessionDetailClient
@@ -46,6 +52,8 @@ export default async function SessionDetailPage({
         initialParticipants={participants || []}
         initialResponses={responses || []}
         initialLiveQuestionAnalyses={liveQuestionAnalyses || []}
+        initialJoinedParticipantCount={joinedParticipantCount}
+        initialCurrentQuestionRespondentCount={currentQuestionRespondent.respondentCount}
       />
     )
   } catch (err) {

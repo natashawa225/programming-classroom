@@ -100,6 +100,16 @@ function getAllowedAttemptType(session: Session): AttemptType | null {
   return null
 }
 
+function getCurrentAttemptTypeForSession(session: Session): AttemptType | null {
+  if (session.live_phase === 'question_initial_open' || session.live_phase === 'question_initial_closed') {
+    return 'initial'
+  }
+  if (session.live_phase === 'question_revision_open' || session.live_phase === 'question_revision_closed') {
+    return 'revision'
+  }
+  return null
+}
+
 function getLivePhaseForAttemptType(attemptType: AttemptType, isClosed: boolean): SessionLivePhase {
   if (attemptType === 'revision') {
     return isClosed ? 'question_revision_closed' : 'question_revision_open'
@@ -718,6 +728,51 @@ export async function getSessionParticipants(sessionId: string) {
 
   if (error) throw error
   return data as SessionParticipant[]
+}
+
+export async function getSessionParticipantCount(sessionId: string) {
+  await assertTeacherAuthenticated()
+  const supabase = await createClient()
+  const { count, error } = await supabase
+    .from('session_participants')
+    .select('session_participant_id', { count: 'exact', head: true })
+    .eq('session_id', sessionId)
+
+  if (error) throw error
+  return count ?? 0
+}
+
+export async function getCurrentQuestionRespondentCount(sessionId: string) {
+  await assertTeacherAuthenticated()
+  const [session, currentQuestion] = await Promise.all([
+    getSession(sessionId),
+    getCurrentSessionQuestion(sessionId),
+  ])
+
+  const attemptType = getCurrentAttemptTypeForSession(session)
+  if (!currentQuestion || !attemptType) {
+    return {
+      currentQuestionId: currentQuestion?.question_id ?? null,
+      attemptType,
+      respondentCount: 0,
+    }
+  }
+
+  const supabase = await createClient()
+  const { count, error } = await supabase
+    .from('responses')
+    .select('session_participant_id', { count: 'exact', head: true })
+    .eq('session_id', sessionId)
+    .eq('question_id', currentQuestion.question_id)
+    .eq('attempt_type', attemptType)
+
+  if (error) throw error
+
+  return {
+    currentQuestionId: currentQuestion.question_id,
+    attemptType,
+    respondentCount: count ?? 0,
+  }
 }
 
 // Responses

@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import {
+  getCurrentQuestionRespondentCount,
   getLiveQuestionAnalyses,
   getSession,
+  getSessionParticipantCount,
   getSessionParticipants,
   getSessionQuestions,
   getSessionResponses,
@@ -23,19 +25,40 @@ export async function POST(request: NextRequest) {
     }
 
     const session = await getSession(sessionId)
-    const [participantsResult, questionsResult, responsesResult, liveQuestionAnalysesResult] = await Promise.allSettled([
+    const [
+      joinedParticipantCountResult,
+      currentQuestionRespondentCountResult,
+      participantsResult,
+      questionsResult,
+      responsesResult,
+      liveQuestionAnalysesResult,
+    ] = await Promise.allSettled([
+      getSessionParticipantCount(sessionId),
+      getCurrentQuestionRespondentCount(sessionId),
       getSessionParticipants(sessionId),
       getSessionQuestions(sessionId),
       getSessionResponses(sessionId),
       getLiveQuestionAnalyses(sessionId),
     ])
 
+    const joinedParticipantCount =
+      joinedParticipantCountResult.status === 'fulfilled' ? joinedParticipantCountResult.value : 0
+    const currentQuestionRespondent =
+      currentQuestionRespondentCountResult.status === 'fulfilled'
+        ? currentQuestionRespondentCountResult.value
+        : { currentQuestionId: null, attemptType: null, respondentCount: 0 }
     const participants = participantsResult.status === 'fulfilled' ? participantsResult.value : []
     const questions = questionsResult.status === 'fulfilled' ? questionsResult.value : []
     const responses = responsesResult.status === 'fulfilled' ? responsesResult.value : []
     const liveQuestionAnalyses =
       liveQuestionAnalysesResult.status === 'fulfilled' ? liveQuestionAnalysesResult.value : []
 
+    if (joinedParticipantCountResult.status === 'rejected') {
+      console.error('teacher session-state joined count warning', joinedParticipantCountResult.reason)
+    }
+    if (currentQuestionRespondentCountResult.status === 'rejected') {
+      console.error('teacher session-state respondent count warning', currentQuestionRespondentCountResult.reason)
+    }
     if (participantsResult.status === 'rejected') {
       console.error('teacher session-state participants warning', participantsResult.reason)
     }
@@ -50,11 +73,15 @@ export async function POST(request: NextRequest) {
     }
 
     console.info(
-      `[teacher-session-state] session_id=${sessionId} participants=${participants.length} responses=${responses.length} analyses=${liveQuestionAnalyses.length}`
+      `[teacher-session-state] session_id=${sessionId} joined_count=${joinedParticipantCount} current_question_id=${currentQuestionRespondent.currentQuestionId || 'none'} response_count=${currentQuestionRespondent.respondentCount} participants=${participants.length} responses=${responses.length} analyses=${liveQuestionAnalyses.length}`
     )
 
     return NextResponse.json({
       session,
+      joinedParticipantCount,
+      currentQuestionRespondentCount: currentQuestionRespondent.respondentCount,
+      currentQuestionRespondentAttemptType: currentQuestionRespondent.attemptType,
+      currentQuestionId: currentQuestionRespondent.currentQuestionId,
       participants,
       questions,
       responses,
