@@ -481,6 +481,7 @@ export default function SessionDetailClient({
       const response = await fetch('/api/teacher/session-state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
         body: JSON.stringify({ sessionId }),
       })
       const payload = await response.json().catch(() => null)
@@ -492,6 +493,9 @@ export default function SessionDetailClient({
       setParticipants((payload?.participants || []) as SessionParticipant[])
       setResponses((payload?.responses || []) as Response[])
       setLiveQuestionAnalyses((payload?.liveQuestionAnalyses || []) as LiveQuestionAnalysis[])
+      console.info(
+        `[teacher-live] session_id=${sessionId} joined=${(payload?.participants || []).length} submitted=${(payload?.responses || []).length}`
+      )
     } catch (err) {
       console.error('Error refreshing live session data:', err)
     }
