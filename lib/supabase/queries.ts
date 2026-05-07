@@ -709,7 +709,7 @@ export async function getSessionParticipantForStudent(sessionId: string) {
 
 export async function getSessionParticipants(sessionId: string) {
   await assertTeacherAuthenticated()
-  const supabase = await createClient()
+  const supabase = createAdminClient()
   const { data, error } = await supabase
     .from('session_participants')
     .select(
@@ -732,11 +732,25 @@ export async function getSessionParticipants(sessionId: string) {
 
 export async function getSessionParticipantCount(sessionId: string) {
   await assertTeacherAuthenticated()
-  const supabase = await createClient()
+  const supabase = createAdminClient()
   const { count, error } = await supabase
     .from('session_participants')
     .select('session_participant_id', { count: 'exact', head: true })
     .eq('session_id', sessionId)
+
+  if (error) throw error
+  return count ?? 0
+}
+
+export async function getAssignedParticipantCountForSession(sessionId: string) {
+  await assertTeacherAuthenticated()
+  const session = await getSession(sessionId)
+  const supabase = createAdminClient()
+  const { count, error } = await supabase
+    .from('participants')
+    .select('id', { count: 'exact', head: true })
+    .eq('group_name', session.condition)
+    .eq('is_active', true)
 
   if (error) throw error
   return count ?? 0
@@ -758,7 +772,7 @@ export async function getCurrentQuestionRespondentCount(sessionId: string) {
     }
   }
 
-  const supabase = await createClient()
+  const supabase = createAdminClient()
   const { count, error } = await supabase
     .from('responses')
     .select('session_participant_id', { count: 'exact', head: true })

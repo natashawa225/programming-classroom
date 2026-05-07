@@ -1,5 +1,6 @@
 import Link from 'next/link'
 import {
+  getAssignedParticipantCountForSession,
   getCurrentQuestionRespondentCount,
   getLiveQuestionAnalyses,
   getSession,
@@ -10,6 +11,8 @@ import {
 } from '@/lib/supabase/queries'
 import { Button } from '@/components/ui/button'
 import SessionDetailClient from './session-detail-client'
+
+export const dynamic = 'force-dynamic'
 
 function getLoadErrorMessage(error: unknown) {
   if (error instanceof Error) {
@@ -40,7 +43,8 @@ export default async function SessionDetailPage({
       getSessionResponses(sessionId),
       getLiveQuestionAnalyses(sessionId),
     ])
-    const [joinedParticipantCount, currentQuestionRespondent] = await Promise.all([
+    const [assignedParticipantCount, joinedParticipantCount, currentQuestionRespondent] = await Promise.all([
+      getAssignedParticipantCountForSession(sessionId),
       getSessionParticipantCount(sessionId),
       getCurrentQuestionRespondentCount(sessionId),
     ])
@@ -52,6 +56,7 @@ export default async function SessionDetailPage({
         initialParticipants={participants || []}
         initialResponses={responses || []}
         initialLiveQuestionAnalyses={liveQuestionAnalyses || []}
+        initialAssignedParticipantCount={assignedParticipantCount}
         initialJoinedParticipantCount={joinedParticipantCount}
         initialCurrentQuestionRespondentCount={currentQuestionRespondent.respondentCount}
       />

@@ -33,6 +33,7 @@ type Props = {
   initialParticipants: SessionParticipant[]
   initialResponses: Response[]
   initialLiveQuestionAnalyses: LiveQuestionAnalysis[]
+  initialAssignedParticipantCount: number
   initialJoinedParticipantCount: number
   initialCurrentQuestionRespondentCount: number
 }
@@ -262,21 +263,16 @@ function getRepresentativeAnswers(cluster: LiveAnalysisPayload['clusters'][numbe
 function MiniStat({
   label,
   value,
-  emphasized = false,
 }: {
   label: string
   value: string
-  emphasized?: boolean
 }) {
   return (
-    <div className="min-w-[92px]">
-      <p className="text-[11px] uppercase tracking-[0.18em] text-foreground/42">{label}</p>
-      <div
-        className={[
-          'mt-2 inline-flex rounded-full px-4 py-3 text-base font-semibold',
-          emphasized ? 'bg-primary text-primary-foreground shadow-[0_8px_20px_rgba(28,26,36,0.14)]' : 'text-foreground',
-        ].join(' ')}
-      >
+    <div className="min-w-[118px] rounded-2xl border border-[rgba(123,175,212,0.18)] bg-white/92 px-4 py-3 text-foreground shadow-sm">
+      <p className="text-[11px] uppercase tracking-[0.18em] text-foreground/42">
+        {label}
+      </p>
+      <div className="mt-2 text-xl font-semibold tracking-tight">
         {value}
       </div>
     </div>
@@ -289,6 +285,7 @@ export default function SessionDetailClient({
   initialParticipants,
   initialResponses,
   initialLiveQuestionAnalyses,
+  initialAssignedParticipantCount,
   initialJoinedParticipantCount,
   initialCurrentQuestionRespondentCount,
 }: Props) {
@@ -302,6 +299,7 @@ export default function SessionDetailClient({
   const [participants, setParticipants] = useState(initialParticipants)
   const [responses, setResponses] = useState(initialResponses)
   const [liveQuestionAnalyses, setLiveQuestionAnalyses] = useState(initialLiveQuestionAnalyses)
+  const [assignedParticipantCount, setAssignedParticipantCount] = useState(initialAssignedParticipantCount)
   const [joinedParticipantCount, setJoinedParticipantCount] = useState(initialJoinedParticipantCount)
   const [currentQuestionRespondentCount, setCurrentQuestionRespondentCount] = useState(initialCurrentQuestionRespondentCount)
   const [timerInput, setTimerInput] = useState('')
@@ -437,13 +435,14 @@ export default function SessionDetailClient({
       }
 
       setSession(payload?.session as Session)
+      setAssignedParticipantCount(Number(payload?.assignedParticipantCount ?? 0))
       setJoinedParticipantCount(Number(payload?.joinedParticipantCount ?? 0))
       setCurrentQuestionRespondentCount(Number(payload?.currentQuestionRespondentCount ?? 0))
       setParticipants((payload?.participants || []) as SessionParticipant[])
       setResponses((payload?.responses || []) as Response[])
       setLiveQuestionAnalyses((payload?.liveQuestionAnalyses || []) as LiveQuestionAnalysis[])
       console.info(
-        `[teacher-live] session_id=${sessionId} joined=${Number(payload?.joinedParticipantCount ?? 0)} current_question_id=${payload?.currentQuestionId || 'none'} responses=${Number(payload?.currentQuestionRespondentCount ?? 0)}`
+        `[teacher-live] session_id=${sessionId} assigned=${Number(payload?.assignedParticipantCount ?? 0)} joined=${Number(payload?.joinedParticipantCount ?? 0)} current_question_id=${payload?.currentQuestionId || 'none'} responses=${Number(payload?.currentQuestionRespondentCount ?? 0)}`
       )
     } catch (err) {
       console.error('Error refreshing live session data:', err)
@@ -773,10 +772,10 @@ export default function SessionDetailClient({
 
   return (
     <main className="min-h-screen bg-[linear-gradient(180deg,#edf4fa_0%,#f7fbff_100%)] text-foreground">
-      <header className="border-b border-[rgba(123,175,212,0.18)] px-6 py-5 lg:px-8">
-        <div className="mx-auto flex max-w-[1600px] flex-wrap items-start justify-between gap-6">
-          <div className="flex flex-wrap items-center gap-4">
-            <div>
+      <header className="border-b border-[rgba(123,175,212,0.18)] px-6 py-4 lg:px-8">
+        <div className="mx-auto flex max-w-[1600px] flex-col gap-4">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0">
               <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Live classroom session</p>
               <div className="mt-2 flex items-center gap-3">
                 <h1 className="text-3xl font-semibold tracking-tight text-foreground">{session.session_code}</h1>
@@ -785,14 +784,7 @@ export default function SessionDetailClient({
                 </Badge>
               </div>
             </div>
-          </div>
-
-          <div className="flex flex-wrap items-start gap-6">
-            <MiniStat label="Phase" value={getPhaseLabel(session)} />
-            <MiniStat label="Joined" value={String(joinedParticipantCount)} />
-            <MiniStat label="Responses" value={String(isViewingCurrentQuestion ? currentQuestionRespondentCount : visibleResponseCount)} emphasized />
-            <MiniStat label="Timer" value={secondsRemaining === null ? '—' : `${secondsRemaining}s`} />
-            <div className="flex items-center gap-3 pt-6">
+            <div className="flex flex-wrap items-center gap-3 lg:justify-end">
               <Link href="/teacher/dashboard">
                 <Button variant="outline" className="rounded-full border-[rgba(123,175,212,0.22)] bg-white/80 px-5">
                   Back
@@ -802,6 +794,18 @@ export default function SessionDetailClient({
                 variant="outline"
                 className="rounded-full border-[rgba(123,175,212,0.22)] bg-white/80 px-5"
               />
+            </div>
+          </div>
+          <div className="overflow-x-auto">
+            <div className="grid min-w-[720px] grid-cols-5 gap-3 sm:min-w-0 sm:grid-cols-2 lg:grid-cols-5">
+              <MiniStat label="Phase" value={getPhaseLabel(session)} />
+              <MiniStat label="Assigned" value={String(assignedParticipantCount)} />
+              <MiniStat label="Joined" value={String(joinedParticipantCount)} />
+              <MiniStat
+                label="Responses"
+                value={String(isViewingCurrentQuestion ? currentQuestionRespondentCount : visibleResponseCount)}
+              />
+              <MiniStat label="Timer" value={secondsRemaining === null ? '—' : `${secondsRemaining}s`} />
             </div>
           </div>
         </div>
@@ -1407,7 +1411,7 @@ export default function SessionDetailClient({
                 onClick={() => setShowRawResponses((value) => !value)}
                 className="mt-6 w-full rounded-2xl border border-[rgba(123,175,212,0.22)] bg-white px-4 py-3 text-sm font-medium text-foreground/74"
               >
-                  {showRawResponses ? 'Hide Students Responses' : 'View Students Responses'}
+                  {showRawResponses ? 'Hide student responses' : 'View student responses'}
               </button>
             </section>
 
