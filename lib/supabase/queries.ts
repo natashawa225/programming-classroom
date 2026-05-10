@@ -1174,6 +1174,23 @@ export async function getLiveQuestionAnalyses(sessionId: string) {
   return (data || []) as LiveQuestionAnalysis[]
 }
 
+export async function getLiveQuestionAnalysesForStudent(sessionId: string) {
+  const participation = await getSessionParticipantForStudent(sessionId)
+  if (!participation) {
+    throw new Error('Not joined for this session. Please join using the session code.')
+  }
+
+  const supabase = createAdminClient()
+  const { data, error } = await supabase
+    .from('live_question_analyses')
+    .select('*')
+    .eq('session_id', sessionId)
+    .order('generated_at', { ascending: true })
+
+  if (error) throw error
+  return (data || []) as LiveQuestionAnalysis[]
+}
+
 export async function getSessionSummaryRecord(sessionId: string) {
   await assertTeacherAuthenticated()
   const supabase = await createClient()

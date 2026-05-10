@@ -15,7 +15,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
-import { CONFIDENCE_BINS, getConfidenceLevel } from '@/lib/confidence'
+import { getConfidenceLevel } from '@/lib/confidence'
 import { TeacherLogoutButton } from '@/components/teacher-logout-button'
 import {
   clamp,
@@ -79,8 +79,15 @@ type BubblePlacement = {
   radius: number
 }
 
-const CHART_VIEWBOX_WIDTH = 900
-const CHART_VIEWBOX_HEIGHT = 560
+const CHART_VIEWBOX_WIDTH = 1200
+const CHART_VIEWBOX_HEIGHT = 620
+const CHART_LANE_TOP = 44
+const CHART_LANE_HEIGHT = 500
+const CHART_LANE_GAP = 28
+const CHART_LANE_WIDTH = 344
+const CHART_AXIS_LEFT = 84
+const CHART_AXIS_RIGHT = 1120
+const CHART_AXIS_BOTTOM = 544
 
 function mergeByKey<T>(items: T[], item: T, keyOf: (value: T) => string) {
   const key = keyOf(item)
@@ -187,9 +194,9 @@ function formatResponsesLabel(count: number) {
 }
 
 function getBubbleRadius(count: number, maxCount: number) {
-  if (maxCount <= 1) return 64
+  if (maxCount <= 1) return 86
   const normalized = Math.sqrt(count / maxCount)
-  return clamp(46 + normalized * 58, 46, 104)
+  return clamp(60 + normalized * 72, 60, 132)
 }
 
 function getClusterMapPlacements(
@@ -202,14 +209,14 @@ function getClusterMapPlacements(
 
   const sorted = clusters.slice().sort((a, b) => b.count - a.count)
   const maxCount = sorted.reduce((max, cluster) => Math.max(max, cluster.count), 0)
-  const padding = 28
+  const padding = 36
   const placements = new Map<string, BubblePlacement>()
 
   sorted.forEach((cluster) => {
     const radius = getBubbleRadius(cluster.count, maxCount)
     const rendered = resolveRenderedCluster(cluster, version)
     const normalizedConfidence = clamp((cluster.average_confidence - 1) / 4, 0, 1)
-    const baseY = height - 74 - normalizedConfidence * (height - 148)
+    const baseY = CHART_AXIS_BOTTOM - normalizedConfidence * (CHART_AXIS_BOTTOM - 92)
     const x = getClusterBucketX(rendered) * width
     const y = rendered.resolvedBucket === 'unclear' ? baseY + 18 : baseY
 
@@ -268,11 +275,11 @@ function MiniStat({
   value: string
 }) {
   return (
-    <div className="min-w-[118px] rounded-2xl border border-[rgba(123,175,212,0.18)] bg-white/92 px-4 py-3 text-foreground shadow-sm">
+    <div className="min-w-0 rounded-xl border border-[rgba(123,175,212,0.16)] bg-white/92 px-3 py-2 text-foreground shadow-sm">
       <p className="text-[11px] uppercase tracking-[0.18em] text-foreground/42">
         {label}
       </p>
-      <div className="mt-2 text-xl font-semibold tracking-tight">
+      <div className="mt-1 text-lg font-semibold tracking-tight">
         {value}
       </div>
     </div>
@@ -309,6 +316,7 @@ export default function SessionDetailClient({
   const [selectedRevisionClusterId, setSelectedRevisionClusterId] = useState<string | null>(null)
   const [hoveredClusterId, setHoveredClusterId] = useState<string | null>(null)
   const [compareMode, setCompareMode] = useState<'initial' | 'revision'>('initial')
+  const [showSelectedGroupResponses, setShowSelectedGroupResponses] = useState(false)
   const [showRawResponses, setShowRawResponses] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -420,6 +428,11 @@ export default function SessionDetailClient({
     selectedCluster && activeAnalysis ? resolveRenderedCluster(selectedCluster, activeAnalysis.version) : null
   const classSnapshot = getClassSnapshot(activeAnalysis, viewedResponses)
   const selectedRepresentativeAnswers = getRepresentativeAnswers(selectedCluster)
+  const selectedClusterResponses = useMemo(() => {
+    if (!selectedCluster?.response_ids?.length) return []
+    const selectedResponseIds = new Set(selectedCluster.response_ids)
+    return viewedResponses.filter((response) => selectedResponseIds.has(response.response_id))
+  }, [selectedCluster, viewedResponses])
 
   const refreshLiveData = useCallback(async () => {
     try {
@@ -511,6 +524,10 @@ export default function SessionDetailClient({
       setCompareMode('initial')
     }
   }, [canCompareRevision, compareMode])
+
+  useEffect(() => {
+    setShowSelectedGroupResponses(false)
+  }, [activeSelectedClusterId, viewedAttemptType, viewedQuestion?.question_id])
 
   useEffect(() => {
     if (!currentAnalysisKey || !currentAttemptAnalysis) return
@@ -699,6 +716,9 @@ export default function SessionDetailClient({
   const showFallbackWarning = viewedAnalysisStatus === 'success' && activeAnalysis?.source === 'fallback'
   const showV1CompatibilityWarning = viewedAnalysisStatus === 'success' && activeAnalysis?.version === 'live_question_clusters_v1'
   const isCurrentAnalysisRunning = isViewingCurrentQuestion && currentAnalysisStatus === 'loading'
+  const isViewedAnalysisLoading = viewedAnalysisStatus === 'loading'
+  const isViewedAnalysisFailed = viewedAnalysisStatus === 'failed'
+  const hasVisibleAnalysis = visibleClusters.length > 0
   const primaryAction = (() => {
     if (session.live_phase === 'not_started') {
       return {
@@ -779,9 +799,6 @@ export default function SessionDetailClient({
               <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Live classroom session</p>
               <div className="mt-2 flex items-center gap-3">
                 <h1 className="text-3xl font-semibold tracking-tight text-foreground">{session.session_code}</h1>
-                <Badge className="rounded-full border border-[rgba(123,175,212,0.28)] bg-white/80 px-3 py-1 text-sm font-medium text-foreground shadow-none hover:bg-white/80">
-                  {session.condition}
-                </Badge>
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-3 lg:justify-end">
@@ -799,7 +816,6 @@ export default function SessionDetailClient({
           <div className="overflow-x-auto">
             <div className="grid min-w-[720px] grid-cols-5 gap-3 sm:min-w-0 sm:grid-cols-2 lg:grid-cols-5">
               <MiniStat label="Phase" value={getPhaseLabel(session)} />
-              <MiniStat label="Assigned" value={String(assignedParticipantCount)} />
               <MiniStat label="Joined" value={String(joinedParticipantCount)} />
               <MiniStat
                 label="Responses"
@@ -973,75 +989,15 @@ export default function SessionDetailClient({
           </div>
         </section>
 
-        <div className="grid items-start gap-5 lg:grid-cols-[240px_minmax(0,1fr)_320px] xl:grid-cols-[260px_minmax(0,2fr)_340px]">
-          <aside className="order-2 space-y-4 lg:order-1">
-            <section className="rounded-3xl bg-white p-5 shadow-[0_10px_28px_rgba(28,26,36,0.05)]">
-              <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Class snapshot</p>
-              <div className="mt-5 grid grid-cols-3 gap-3 text-center">
-                <div>
-                  <p className="text-3xl font-semibold text-foreground">{classSnapshot.totalResponses}</p>
-                  <p className="mt-2 text-sm text-foreground/55">Responses</p>
-                </div>
-                <div>
-                  <p className="text-3xl font-semibold text-foreground">
-                    {classSnapshot.totalResponses > 0 ? `${classSnapshot.averageConfidence.toFixed(1)}/5` : '—'}
-                  </p>
-                  <p className="mt-2 text-sm text-foreground/55">Avg confidence</p>
-                </div>
-                <div>
-                  <p className="text-3xl font-semibold text-foreground">{classSnapshot.clusterCount || '—'}</p>
-                  <p className="mt-2 text-sm text-foreground/55">Clusters</p>
-                </div>
-              </div>
-            </section>
-
-            <section className="rounded-3xl bg-white p-5 shadow-[0_10px_28px_rgba(28,26,36,0.05)]">
-              <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Legend</p>
-              <div className="mt-5 space-y-4 text-sm text-foreground/68">
-                <p>Bubble size = number of students</p>
-                <p>Bubble color = average confidence</p>
-                <div className="grid grid-cols-3 gap-2 text-xs text-foreground/55">
-                  {CONFIDENCE_BINS.map((bin) => {
-                    const palette = getConfidencePalette(bin.min)
-                    return (
-                      <div
-                        key={bin.level}
-                        className="rounded-2xl px-3 py-3 text-center"
-                        style={{ backgroundColor: palette.badgeBg }}
-                      >
-                        <div className="mx-auto h-3 w-3 rounded-full" style={{ backgroundColor: palette.dot }} />
-                        <p className="mt-2 font-medium" style={{ color: palette.badgeText }}>
-                          {bin.label}
-                        </p>
-                        <p>{bin.min.toFixed(1)}-{bin.max.toFixed(1)}</p>
-                      </div>
-                    )
-                  })}
-                </div>
-                <div className="flex items-start gap-3 rounded-2xl bg-[rgba(238,244,249,0.9)] px-3 py-3">
-                  <span className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-dashed border-[rgba(123,175,212,0.6)] text-[10px] text-foreground/60">
-                    ↕
-                  </span>
-                  <p className="leading-6">Vertical position = average confidence
-                  (bottom = lower confidence, top = higher confidence)</p>
-                </div>
-                <div className="flex items-start gap-3 rounded-2xl bg-[rgba(255,246,220,0.72)] px-3 py-3">
-                  <span className="mt-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-[rgba(255,199,84,0.55)] text-[10px] text-foreground/60">
-                    ~
-                  </span>
-                  <p className="leading-6">Horizontal position = reasoning pattern
-                  (left = needs attention, middle = mixed reasoning, right = strong alignment)</p>
-                </div>
-              </div>
-            </section>
-          </aside>
-
-          <section className="order-1 space-y-5 lg:order-2">
-            <section className="rounded-3xl bg-white p-6 shadow-[0_12px_30px_rgba(28,26,36,0.05)]">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <h2 className="text-[34px] font-semibold tracking-tight text-foreground">Reasoning map</h2>
-                  <p className="mt-2 text-sm text-foreground/55">Bubbles are positioned by reasoning bucket and average confidence.</p>
+        <div
+          className="grid items-start gap-4"
+          style={{ gridTemplateColumns: 'minmax(0, 3fr) clamp(320px, 28vw, 380px)' }}
+        >
+          <section className="min-w-0 space-y-5">
+            <section className="rounded-2xl bg-white p-4 shadow-[0_10px_24px_rgba(28,26,36,0.045)]">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 className="text-xl font-semibold tracking-tight text-foreground">Cluster Map</h2>
                   {activeAnalysis?.source === 'fallback' && (
                     <p className="mt-2 text-xs text-foreground/45">Fallback grouping used{activeAnalysis.fallback_reason ? ` (${activeAnalysis.fallback_reason})` : ''}.</p>
                   )}
@@ -1049,7 +1005,7 @@ export default function SessionDetailClient({
                     <p className="mt-2 text-xs text-foreground/45">Older v1 analysis is being shown with compatibility placement and cleaned labels.</p>
                   )}
                 </div>
-                <div className="flex flex-wrap items-center gap-3">
+                <div className="flex shrink-0 flex-wrap items-center gap-3">
                   {canCompareRevision && (
                     <div className="flex rounded-full bg-[rgba(238,244,249,0.95)] p-1">
                       <button
@@ -1077,61 +1033,93 @@ export default function SessionDetailClient({
                 </div>
               </div>
 
-              <div className="mt-6 rounded-[30px] bg-[rgba(248,251,255,0.9)] p-4">
-                <div className="relative h-[420px] w-full overflow-hidden rounded-[28px] bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.96),rgba(242,248,252,0.92)_58%,rgba(234,243,250,0.82)_100%)] md:h-[480px] xl:h-[520px]">
-                  {visibleClusters.length === 0 ? (
-                    <div className="flex h-full items-center justify-center rounded-[28px] border border-dashed border-[rgba(123,175,212,0.24)] bg-white/65 text-sm text-foreground/55">
-                      {viewedAnalysisStatus === 'failed'
-                        ? 'Analysis failed for this question. Retry analysis to generate cluster visualization.'
-                        : isViewingCurrentQuestion
-                          ? 'No analysis generated yet.'
-                          : 'No analysis generated yet for this question.'}
+              <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                <MiniStat label="Responses" value={String(classSnapshot.totalResponses)} />
+                <MiniStat
+                  label="Avg confidence"
+                  value={classSnapshot.totalResponses > 0 ? `${classSnapshot.averageConfidence.toFixed(1)}/5` : '—'}
+                />
+                <MiniStat label="Groups" value={classSnapshot.clusterCount ? String(classSnapshot.clusterCount) : '—'} />
+              </div>
+
+              <div className="mt-4 rounded-2xl bg-[rgba(248,251,255,0.9)] p-2">
+                <div className="relative min-h-[520px] w-full overflow-hidden rounded-2xl bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.96),rgba(242,248,252,0.92)_58%,rgba(234,243,250,0.82)_100%)] xl:min-h-[600px]">
+                  {!hasVisibleAnalysis ? (
+                    <div
+                      className={[
+                        'flex min-h-[520px] items-center justify-center rounded-2xl border px-6 py-8 text-center xl:min-h-[600px]',
+                        isViewedAnalysisFailed
+                          ? 'border-destructive/25 bg-destructive/5 text-destructive'
+                          : 'border-[rgba(123,175,212,0.18)] bg-white/68 text-foreground',
+                      ].join(' ')}
+                    >
+                      <div className="max-w-sm">
+                        {isViewedAnalysisLoading && (
+                          <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-2 border-[rgba(123,175,212,0.28)] border-t-[rgba(123,175,212,0.95)]" />
+                        )}
+                        <p className="text-lg font-semibold tracking-tight">
+                          {isViewedAnalysisLoading
+                            ? 'Generating reasoning groups...'
+                            : isViewedAnalysisFailed
+                              ? 'Analysis could not be generated.'
+                              : 'No analysis yet'}
+                        </p>
+                        <p
+                          className={[
+                            'mt-2 text-sm leading-6',
+                            isViewedAnalysisFailed ? 'text-destructive/78' : 'text-foreground/58',
+                          ].join(' ')}
+                        >
+                          {isViewedAnalysisLoading
+                            ? 'This may take a few seconds.'
+                            : isViewedAnalysisFailed
+                              ? 'Please try again by clicking Retry analysis or Regenerate analysis.'
+                              : isViewingCurrentQuestion
+                                ? 'End the question to generate reasoning groups.'
+                                : 'No analysis was generated for this question.'}
+                        </p>
+                      </div>
                     </div>
                   ) : (
                     <svg
                       viewBox={`0 0 ${CHART_VIEWBOX_WIDTH} ${CHART_VIEWBOX_HEIGHT}`}
-                      className="h-full w-full"
+                      className="h-[520px] w-full xl:h-[600px]"
                       role="img"
-                      aria-label="Reasoning map"
+                      aria-label="Student reasoning map"
                     >
                       <defs>
                         <filter id="bubble-shadow" x="-20%" y="-20%" width="140%" height="140%">
                           <feDropShadow dx="0" dy="10" stdDeviation="12" floodColor="rgba(28,26,36,0.16)" />
                         </filter>
                       </defs>
-                      <rect x="42" y="36" width="248" height="458" rx="30" fill="rgba(255,240,236,0.62)" />
-                      <rect x="326" y="36" width="248" height="458" rx="30" fill="rgba(242,246,252,0.78)" />
-                      <rect x="610" y="36" width="248" height="458" rx="30" fill="rgba(236,248,239,0.72)" />
-                      <line x1="66" y1="490" x2="842" y2="490" stroke="rgba(33,29,42,0.16)" strokeWidth="2" />
-                      <line x1="88" y1="486" x2="88" y2="72" stroke="rgba(33,29,42,0.16)" strokeWidth="2" />
-                      <line x1="450" y1="72" x2="450" y2="494" stroke="rgba(33,29,42,0.12)" strokeDasharray="8 10" strokeWidth="2" />
-                      <line x1="302" y1="156" x2="838" y2="156" stroke="rgba(33,29,42,0.08)" strokeDasharray="6 10" strokeWidth="2" />
-                      <line x1="302" y1="284" x2="838" y2="284" stroke="rgba(33,29,42,0.08)" strokeDasharray="6 10" strokeWidth="2" />
-                      <line x1="302" y1="412" x2="838" y2="412" stroke="rgba(33,29,42,0.08)" strokeDasharray="6 10" strokeWidth="2" />
-                      <text x="48" y="62" fill="rgba(33,29,42,0.68)" style={{ fontSize: 14, fontWeight: 600 }}>
+                      <rect x="72" y={CHART_LANE_TOP} width={CHART_LANE_WIDTH} height={CHART_LANE_HEIGHT} rx="34" fill="rgba(255,240,236,0.62)" />
+                      <rect x={72 + CHART_LANE_WIDTH + CHART_LANE_GAP} y={CHART_LANE_TOP} width={CHART_LANE_WIDTH} height={CHART_LANE_HEIGHT} rx="34" fill="rgba(242,246,252,0.78)" />
+                      <rect x={72 + (CHART_LANE_WIDTH + CHART_LANE_GAP) * 2} y={CHART_LANE_TOP} width={CHART_LANE_WIDTH} height={CHART_LANE_HEIGHT} rx="34" fill="rgba(236,248,239,0.72)" />
+                      <line x1={CHART_AXIS_LEFT} y1={CHART_AXIS_BOTTOM} x2={CHART_AXIS_RIGHT} y2={CHART_AXIS_BOTTOM} stroke="rgba(33,29,42,0.16)" strokeWidth="2" />
+                      <line x1={CHART_AXIS_LEFT} y1={CHART_AXIS_BOTTOM - 6} x2={CHART_AXIS_LEFT} y2="92" stroke="rgba(33,29,42,0.16)" strokeWidth="2" />
+                      <line x1="600" y1="92" x2="600" y2={CHART_AXIS_BOTTOM + 4} stroke="rgba(33,29,42,0.12)" strokeDasharray="8 10" strokeWidth="2" />
+                      <line x1="128" y1="164" x2="1100" y2="164" stroke="rgba(33,29,42,0.08)" strokeDasharray="6 10" strokeWidth="2" />
+                      <line x1="128" y1="304" x2="1100" y2="304" stroke="rgba(33,29,42,0.08)" strokeDasharray="6 10" strokeWidth="2" />
+                      <line x1="128" y1="444" x2="1100" y2="444" stroke="rgba(33,29,42,0.08)" strokeDasharray="6 10" strokeWidth="2" />
+                      <text x="48" y="70" fill="rgba(33,29,42,0.68)" style={{ fontSize: 15, fontWeight: 600 }}>
                         Confidence
                       </text>
-                      <text x="54" y="110" fill="rgba(33,29,42,0.48)" style={{ fontSize: 12, fontWeight: 500 }}>
+                      <text x="52" y="120" fill="rgba(33,29,42,0.48)" style={{ fontSize: 13, fontWeight: 500 }}>
                         High
                       </text>
-                      <text x="52" y="286" fill="rgba(33,29,42,0.48)" style={{ fontSize: 12, fontWeight: 500 }}>
+                      <text x="53" y="306" fill="rgba(33,29,42,0.48)" style={{ fontSize: 13, fontWeight: 500 }}>
                         Mid
                       </text>
-                      <text x="56" y="468" fill="rgba(33,29,42,0.48)" style={{ fontSize: 12, fontWeight: 500 }}>
+                      <text x="56" y="518" fill="rgba(33,29,42,0.48)" style={{ fontSize: 13, fontWeight: 500 }}>
                         Low
                       </text>
-                      <text x="152" y="530" textAnchor="middle" fill="rgba(33,29,42,0.68)" style={{ fontSize: 14, fontWeight: 600 }}>
-                        {getBucketDisplayLabel('needs_attention')}
+                      <text x="176" y="590" textAnchor="middle" fill="rgba(33,29,42,0.68)" style={{ fontSize: 15, fontWeight: 600 }}>
+                        Low
                       </text>
-                      <text x="450" y="530" textAnchor="middle" fill="rgba(33,29,42,0.68)" style={{ fontSize: 14, fontWeight: 600 }}>
-                        {getBucketDisplayLabel('mixed_reasoning')}
+                      <text x="1024" y="590" textAnchor="middle" fill="rgba(33,29,42,0.68)" style={{ fontSize: 15, fontWeight: 600 }}>
+                        High
                       </text>
-                      <text x="748" y="530" textAnchor="middle" fill="rgba(33,29,42,0.68)" style={{ fontSize: 14, fontWeight: 600 }}>
-                        {getBucketDisplayLabel('strong_alignment')}
-                      </text>
-                      <text x="450" y="552" textAnchor="middle" fill="rgba(33,29,42,0.48)" style={{ fontSize: 12, fontWeight: 500 }}>
-                        Reasoning alignment
-                      </text>
+
                       {renderedVisibleClusters
                         .slice()
                         .sort((a, b) => {
@@ -1146,8 +1134,8 @@ export default function SessionDetailClient({
                           const selected = cluster.cluster_id === selectedRenderedCluster?.cluster_id
                           const hovered = cluster.cluster_id === hoveredClusterId
                           const radius = placement?.radius ?? 78
-                          const compact = radius * 2 < 170
-                          const tiny = radius * 2 < 128
+                          const compact = radius * 2 < 196
+                          const tiny = radius * 2 < 150
                           const showSecondaryText = !tiny
                           const labelLines = showSecondaryText
                             ? wrapBubbleLabel(cluster.label, compact ? 14 : 18, compact ? 2 : 3)
@@ -1165,7 +1153,6 @@ export default function SessionDetailClient({
                             gapAfterCount +
                             (showSecondaryText ? confidenceLineHeight : 0)
                           const blockStartY = -totalTextHeight / 2
-                          const labelCenterY = blockStartY + labelBlockHeight / 2
                           const countY = blockStartY + labelBlockHeight + gapAfterLabel + countLineHeight / 2
                           const confidenceY = countY + countLineHeight / 2 + gapAfterCount + confidenceLineHeight / 2
 
@@ -1189,7 +1176,7 @@ export default function SessionDetailClient({
                             >
                               {selected && (
                                 <circle
-                                  r={radius + 8}
+                                  r={radius + 10}
                                   fill="none"
                                   stroke={palette.border}
                                   strokeWidth={4}
@@ -1200,31 +1187,31 @@ export default function SessionDetailClient({
                                 r={radius}
                                 fill={palette.fill}
                                 stroke={palette.border}
-                                strokeWidth={selected ? 5 : 3}
+                                strokeWidth={selected ? 6 : 3}
                                 filter="url(#bubble-shadow)"
                                 opacity={(hovered && !selected ? 0.96 : 1) * getClusterBucketOpacity(cluster.resolvedBucket)}
                               />
                              
                               <text
                                 x="0"
-                                y={showSecondaryText ? -confidenceY / 2 : 0}  // ← shift count UP by half the gap
+                                y={showSecondaryText ? -confidenceY / 2 : 0}
                                 textAnchor="middle"
                                 dominantBaseline="middle"
                                 fill="#211d2a"
-                                style={{ fontSize: tiny ? 14 : compact ? 15 : 17, fontWeight: 700 }}
-                              >
-                                {tiny ? `${cluster.count}` : formatResponsesLabel(cluster.count)}
+                                style={{ fontSize: tiny ? 28 : compact ? 32 : 38, fontWeight: 700 }}
+                                >
+                                {tiny ? `${cluster.count}` : (cluster.count)}
                               </text>
                               {showSecondaryText && (
                                 <text
                                   x="0"
-                                  y={confidenceY / 2}   // ← shift confidence DOWN by same amount
+                                  y={confidenceY / 2}
                                   textAnchor="middle"
                                   dominantBaseline="middle"
                                   fill="rgba(33,29,42,0.72)"
-                                  style={{ fontSize: compact ? 12 : 14, fontWeight: 500 }}
-                                >
-                                  Avg confidence {cluster.average_confidence.toFixed(1)}/5
+                                  style={{ fontSize: compact ? 18 : 20, fontWeight: 500 }}
+                                  >
+                                  cf. {cluster.average_confidence.toFixed(1)}/5
                                 </text>
                               )}
                               <title>
@@ -1237,128 +1224,91 @@ export default function SessionDetailClient({
                   )}
                 </div>
               </div>
-
-              <div className="mt-5 grid gap-4 rounded-3xl border border-[rgba(123,175,212,0.14)] bg-white px-5 py-5 md:grid-cols-3">
-                <div>
-                  <p className="text-xs uppercase tracking-[0.18em] text-foreground/42">Most common understanding</p>
-                  <p className="mt-3 text-xl font-semibold text-foreground">
-                    {renderedVisibleClusters[0] ? renderedVisibleClusters[0].displayLabel : '—'}
-                  </p>
-                  <p className="mt-2 text-lg text-foreground/76">
-                    {renderedVisibleClusters[0] ? formatResponsesLabel(renderedVisibleClusters[0].count) : '—'}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs uppercase tracking-[0.18em] text-foreground/42">Highest confidence</p>
-                  <p className="mt-3 text-xl font-semibold text-foreground">
-                    {renderedVisibleClusters.length > 0
-                      ? renderedVisibleClusters.slice().sort((a, b) => b.average_confidence - a.average_confidence)[0].displayLabel
-                      : '—'}
-                  </p>
-                  <p className="mt-2 text-lg text-foreground/76">
-                    {renderedVisibleClusters.length > 0
-                      ? `${renderedVisibleClusters.slice().sort((a, b) => b.average_confidence - a.average_confidence)[0].average_confidence.toFixed(1)}/5`
-                      : '—'}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs uppercase tracking-[0.18em] text-foreground/42">Lowest confidence</p>
-                  <p className="mt-3 text-xl font-semibold text-foreground">
-                    {renderedVisibleClusters.length > 0
-                      ? renderedVisibleClusters.slice().sort((a, b) => a.average_confidence - b.average_confidence)[0].displayLabel
-                      : '—'}
-                  </p>
-                  <p className="mt-2 text-lg text-foreground/76">
-                    {renderedVisibleClusters.length > 0
-                      ? `${renderedVisibleClusters.slice().sort((a, b) => a.average_confidence - b.average_confidence)[0].average_confidence.toFixed(1)}/5`
-                      : '—'}
-                  </p>
-                </div>
-              </div>
             </section>
           </section>
 
-          <aside className="order-3 space-y-4 lg:sticky lg:top-24">
-            <section className="rounded-3xl bg-white p-5 shadow-[0_10px_28px_rgba(28,26,36,0.05)]">
+          <aside className="min-w-0 xl:sticky xl:top-24">
+            <section className="rounded-2xl bg-white p-4 shadow-[0_10px_24px_rgba(28,26,36,0.045)]">
               <div className="flex items-center justify-between gap-3">
-                <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">
-                  Clusters ({visibleClusters.length})
-                </p>
+                <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Selected Group</p>
+                <Badge className="rounded-full border border-[rgba(123,175,212,0.22)] bg-white px-3 py-1 text-xs font-medium text-foreground/60 shadow-none">
+                  {visibleClusters.length} {visibleClusters.length === 1 ? 'group' : 'groups'}
+                </Badge>
               </div>
 
-              <div className="mt-4 space-y-2">
-                {visibleClusters.length === 0 ? (
-                  <p className="text-sm text-foreground/55">Clusters will appear here after analysis.</p>
-                ) : (
-                  renderedVisibleClusters.map((cluster) => {
-                    const palette = getConfidencePalette(cluster.average_confidence)
-                    const selected = cluster.cluster_id === selectedRenderedCluster?.cluster_id
-                    return (
-                      <button
-                        key={cluster.cluster_id}
-                        type="button"
-                        onClick={() => setActiveSelectedClusterId(cluster.cluster_id)}
-                        className={[
-                          'flex w-full items-start justify-between gap-3 rounded-2xl px-3 py-3 text-left transition',
-                          selected ? 'bg-[rgba(238,244,249,0.92)]' : 'hover:bg-[rgba(248,251,255,0.9)]',
-                        ].join(' ')}
-                      >
-                        <div className="flex min-w-0 gap-3">
-                          <span className="mt-1 h-3 w-3 shrink-0 rounded-full" style={{ backgroundColor: palette.dot }} />
-                          <div className="min-w-0">
-                            <p className="truncate text-[17px] font-semibold text-foreground">
-                              {cluster.displayLabel}
-                            </p>
-                            <p className="mt-2 text-sm text-foreground/58">
-                              {formatResponsesLabel(cluster.count)}
-                            </p>
-                            <p className="mt-1 text-xs text-foreground/48">
-                              {getBucketDisplayLabel(cluster.resolvedBucket)}
-                            </p>
-                          </div>
-                        </div>
-                        <span
-                          className="rounded-xl px-3 py-2 text-sm font-semibold"
-                          style={{ backgroundColor: palette.badgeBg, color: palette.badgeText }}
+              <div className="mt-3">
+                <p className="text-[11px] uppercase tracking-[0.16em] text-foreground/42">Groups</p>
+                <div className="mt-2 grid max-h-[150px] gap-1.5 overflow-y-auto pr-1">
+                  {!hasVisibleAnalysis ? (
+                    <p className="rounded-xl bg-[rgba(248,251,255,0.82)] px-3 py-3 text-sm leading-5 text-foreground/58">
+                      {isViewedAnalysisLoading
+                        ? 'Reasoning groups are being generated.'
+                        : isViewedAnalysisFailed
+                          ? 'Reasoning groups could not be generated yet.'
+                          : 'Reasoning groups will appear here after analysis.'}
+                    </p>
+                  ) : (
+                    renderedVisibleClusters.map((cluster) => {
+                      const palette = getConfidencePalette(cluster.average_confidence)
+                      const selected = cluster.cluster_id === selectedRenderedCluster?.cluster_id
+                      return (
+                        <button
+                          key={cluster.cluster_id}
+                          type="button"
+                          onClick={() => setActiveSelectedClusterId(cluster.cluster_id)}
+                          className={[
+                            'flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left transition',
+                            selected ? 'bg-[rgba(238,244,249,0.92)]' : 'hover:bg-[rgba(248,251,255,0.9)]',
+                          ].join(' ')}
                         >
-                          {cluster.average_confidence.toFixed(1)}/5
-                        </span>
-                      </button>
-                    )
-                  })
-                )}
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: palette.dot }} />
+                            <div className="min-w-0">
+                              <p className="truncate text-sm font-medium text-foreground">
+                                {cluster.displayLabel}
+                              </p>
+                              <p className="truncate text-[11px] text-foreground/48">
+                                {formatResponsesLabel(cluster.count)}
+                              </p>
+                            </div>
+                          </div>
+                          <span
+                            className="shrink-0 rounded-lg px-2 py-1 text-[11px] font-semibold"
+                            style={{ backgroundColor: palette.badgeBg, color: palette.badgeText }}
+                          >
+                            {cluster.average_confidence.toFixed(1)}
+                          </span>
+                        </button>
+                      )
+                    })
+                  )}
+                </div>
               </div>
-            </section>
 
-            <section className="rounded-3xl bg-white p-5 shadow-[0_10px_28px_rgba(28,26,36,0.05)]">
-              <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Selected cluster</p>
               {selectedRenderedCluster ? (
                 <>
                   <div
-                    className="mt-5 rounded-[28px] border px-4 py-4"
+                    className="mt-4 rounded-2xl border px-3 py-3"
                     style={{
                       backgroundColor: getConfidencePalette(selectedRenderedCluster.average_confidence).badgeBg,
                       borderColor: getConfidencePalette(selectedRenderedCluster.average_confidence).border,
                     }}
                   >
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="flex items-start gap-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex min-w-0 items-start gap-2.5">
                         <span
-                          className="mt-1 h-3.5 w-3.5 rounded-full"
+                          className="mt-1 h-3 w-3 shrink-0 rounded-full"
                           style={{
                             backgroundColor: getConfidencePalette(selectedRenderedCluster.average_confidence).dot,
                           }}
                         />
-                        <div>
+                        <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
-                            <h3 className="text-[28px] font-semibold leading-tight text-foreground">
-                              {selectedRenderedCluster.displayLabel}
+                            <h3 className="text-xl font-semibold leading-tight text-foreground">
+                              {selectedRenderedCluster.summary}
                             </h3>
-                            <Badge className="rounded-full border border-[rgba(123,175,212,0.22)] bg-white/80 px-3 py-1 text-xs font-medium text-foreground shadow-none">
-                              {getBucketDisplayLabel(selectedRenderedCluster.resolvedBucket)}
-                            </Badge>
                           </div>
-                          <p className="mt-2 text-sm text-foreground/62">{formatResponsesLabel(selectedRenderedCluster.count)}</p>
+                          
                         </div>
                       </div>
                       <Badge
@@ -1371,59 +1321,81 @@ export default function SessionDetailClient({
                         {selectedRenderedCluster.average_confidence.toFixed(1)}/5
                       </Badge>
                     </div>
+                    
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowSelectedGroupResponses((value) => !value)}
+                    className="mt-4 w-full rounded-xl bg-foreground px-3 py-2.5 text-sm font-semibold text-white transition hover:bg-foreground/90"
+                  >
+                    {showSelectedGroupResponses ? 'Hide responses in this group' : 'Show responses in this group'}
+                  </button>
 
-                  <div className="mt-6">
-                    <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Cluster summary</p>
-                    <p className="mt-3 rounded-2xl bg-[rgba(248,251,255,0.92)] px-4 py-4 text-[16px] leading-8 text-foreground/74">
-                      {selectedRenderedCluster.summary}
-                    </p>
-                  </div>
-
-                  {selectedRenderedCluster.teacher_note && (
-                    <div className="mt-6">
-                      <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Teacher note</p>
-                      <p className="mt-3 rounded-2xl bg-[rgba(255,247,223,0.8)] px-4 py-4 text-[15px] leading-7 text-foreground/74">
-                        {selectedRenderedCluster.teacher_note}
-                      </p>
-                    </div>
-                  )}
-
-                  {selectedRepresentativeAnswers.length > 0 && (
-                    <div className="mt-6">
-                      <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Representative answers</p>
-                      <div className="mt-3 space-y-3">
-                        {selectedRepresentativeAnswers.map((answer, index) => (
-                          <div key={`${selectedRenderedCluster.cluster_id}-${index}`} className="rounded-2xl bg-[rgba(248,251,255,0.92)] px-4 py-4 text-[15px] leading-7 text-foreground/74">
+                  {showSelectedGroupResponses && (
+                    <div className="mt-3 max-h-[230px] space-y-2 overflow-y-auto pr-1">
+                      {selectedClusterResponses.length > 0 ? (
+                        selectedClusterResponses.map((response) => (
+                          <div key={response.response_id} className="rounded-xl bg-[rgba(238,244,249,0.92)] px-3 py-2.5">
+                            <div className="flex items-center justify-between gap-3">
+                              <p className="text-sm font-medium text-foreground">
+                                {response.session_participants?.anonymized_label || 'Participant'}
+                              </p>
+                              <p className="text-sm text-foreground/55">{response.confidence}/5</p>
+                            </div>
+                            <p className="mt-2 text-sm leading-6 text-foreground/76">{response.answer}</p>
+                          </div>
+                        ))
+                      ) : selectedRepresentativeAnswers.length > 0 ? (
+                        selectedRepresentativeAnswers.map((answer, index) => (
+                          <div key={`${selectedRenderedCluster.cluster_id}-expanded-${index}`} className="rounded-xl bg-[rgba(238,244,249,0.92)] px-3 py-2.5 text-sm leading-5 text-foreground/76">
                             {answer}
                           </div>
-                        ))}
-                      </div>
+                        ))
+                      ) : (
+                        <p className="rounded-xl bg-[rgba(238,244,249,0.72)] px-3 py-2.5 text-sm text-foreground/58">
+                          No responses are available for this group yet.
+                        </p>
+                      )}
                     </div>
                   )}
                 </>
               ) : (
-                <p className="mt-4 text-sm text-foreground/58">Select a cluster to inspect the representative explanation and sample responses.</p>
+                <div className="mt-4 rounded-xl bg-[rgba(248,251,255,0.88)] px-3 py-3 text-sm leading-5 text-foreground/62">
+                  <p className="font-medium text-foreground/72">
+                    {isViewedAnalysisLoading
+                      ? 'Generating reasoning groups...'
+                      : isViewedAnalysisFailed
+                        ? 'Analysis could not be generated.'
+                        : 'Reasoning groups will appear here after analysis.'}
+                  </p>
+                  <p className="mt-1 text-foreground/55">
+                    {isViewedAnalysisLoading
+                      ? 'This may take a few seconds.'
+                      : isViewedAnalysisFailed
+                        ? 'Please try again by clicking Retry analysis or Regenerate analysis.'
+                        : 'After groups are generated, select one to view its summary and example responses.'}
+                  </p>
+                </div>
               )}
 
               <button
                 type="button"
                 onClick={() => setShowRawResponses((value) => !value)}
-                className="mt-6 w-full rounded-2xl border border-[rgba(123,175,212,0.22)] bg-white px-4 py-3 text-sm font-medium text-foreground/74"
+                className="mt-4 w-full rounded-xl border border-[rgba(123,175,212,0.22)] bg-white px-3 py-2.5 text-sm font-medium text-foreground/64 transition hover:bg-[rgba(248,251,255,0.9)]"
               >
-                  {showRawResponses ? 'Hide student responses' : 'View student responses'}
+                  {showRawResponses ? 'Hide all student responses' : 'View all student responses'}
               </button>
             </section>
 
             {showRawResponses && (
-              <section className="rounded-3xl bg-white p-5 shadow-[0_10px_28px_rgba(28,26,36,0.05)]">
-                <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Student responses</p>
-                <div className="mt-4 max-h-[360px] space-y-3 overflow-y-auto pr-1">
+              <section className="mt-3 rounded-2xl bg-white p-4 shadow-[0_10px_24px_rgba(28,26,36,0.045)]">
+                <p className="text-[11px] uppercase tracking-[0.16em] text-foreground/42">All Student Responses</p>
+                <div className="mt-3 max-h-[280px] space-y-2 overflow-y-auto pr-1">
                   {viewedResponses.length === 0 ? (
                     <p className="text-sm text-foreground/55">No submissions yet for this question attempt.</p>
                   ) : (
                     viewedResponses.map((response) => (
-                      <div key={response.response_id} className="rounded-2xl bg-[rgba(238,244,249,0.92)] px-4 py-3">
+                      <div key={response.response_id} className="rounded-xl bg-[rgba(238,244,249,0.92)] px-3 py-2.5">
                         <div className="flex items-center justify-between gap-3">
                           <p className="text-sm font-medium text-foreground">
                             {response.session_participants?.anonymized_label || 'Participant'}

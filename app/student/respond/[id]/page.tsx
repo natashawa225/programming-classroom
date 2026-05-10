@@ -41,7 +41,7 @@ function getStateCopy(session: Session | null, attemptType: AttemptType | null, 
   if (session.live_phase === 'question_revision_open') {
     return { title: 'Revision open', body: 'You may revise your answer for this question now.' }
   }
-  return { title: 'Question open', body: 'Enter your answer and choose your confidence.' }
+  return { title: 'Question open', body: 'Read the question carefully, enter your response, and select how confident you are in your answer.' }
 }
 
 export default function StudentRespondPage() {
@@ -348,7 +348,7 @@ export default function StudentRespondPage() {
             <h1 className="text-3xl font-bold text-foreground">Student View</h1>
             <p className="mt-1 text-sm text-foreground/60">Session {session?.session_code}</p>
           </div>
-          {anonymizedLabel && <Badge variant="outline">{anonymizedLabel}</Badge>}
+          {/* {anonymizedLabel && <Badge variant="outline">{anonymizedLabel}</Badge>} */}
         </div>
 
         <Card className="p-6">
@@ -458,7 +458,7 @@ export default function StudentRespondPage() {
               </div>
 
               <div>
-                <p className="mb-3 text-sm font-medium text-foreground">Confidence</p>
+                <p className="mb-3 text-sm font-medium text-foreground">Confidence Level</p>
                 <div className="grid grid-cols-5 gap-2">
                   {[1, 2, 3, 4, 5].map((value) => (
                     <button
@@ -475,7 +475,7 @@ export default function StudentRespondPage() {
                     </button>
                   ))}
                 </div>
-                <p className="mt-2 text-xs text-foreground/55">Choose one score from 1 to 5.</p>
+                <p className="mt-2 text-xs text-foreground/55">Rate how confident you are that your answer is correct (1–5).</p>
               </div>
 
               <Button type="submit" disabled={submitting}>
