@@ -972,11 +972,6 @@ export default function SessionDetailClient({
                     <Link href={`/teacher/session/${sessionId}/summary`}>
                       <Button className="w-full rounded-2xl">View session summary</Button>
                     </Link>
-                    <Link href={`/teacher/session/${sessionId}/analysis`}>
-                      <Button variant="outline" className="w-full rounded-2xl border-[rgba(123,175,212,0.22)] bg-white">
-                        Generate final analysis
-                      </Button>
-                    </Link>
                     <Link href={`/teacher/session/${sessionId}/export`}>
                       <Button variant="outline" className="w-full rounded-2xl border-[rgba(123,175,212,0.22)] bg-white">
                         Export session data
