@@ -6,6 +6,7 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { TeacherLogoutButton } from '@/components/teacher-logout-button'
+import { MAX_SESSION_QUESTIONS } from '@/lib/session-question-limits'
 
 export default function CreateSession() {
   const router = useRouter()
@@ -40,7 +41,7 @@ export default function CreateSession() {
 
   const addQuestion = () => {
     setFormData(prev => {
-      if (prev.questions.length >= 5) return prev
+      if (prev.questions.length >= MAX_SESSION_QUESTIONS) return prev
       return { ...prev, questions: [...prev.questions, { prompt: '', correctAnswer: '', timerSeconds: '' }] }
     })
   }
@@ -74,8 +75,8 @@ export default function CreateSession() {
       if (normalized.length < 1) {
         throw new Error('Please enter at least 1 question.')
       }
-      if (normalized.length > 5) {
-        throw new Error('Please enter no more than 5 questions.')
+      if (normalized.length > MAX_SESSION_QUESTIONS) {
+        throw new Error(`Please enter no more than ${MAX_SESSION_QUESTIONS} questions.`)
       }
 
       // Create the session
@@ -161,13 +162,18 @@ export default function CreateSession() {
                       <div>
                         <p className="text-sm font-medium text-foreground">Questions</p>
                       </div>
-                      <Button type="button" variant="outline" onClick={addQuestion} disabled={formData.questions.length >= 5}>
+                      <Button type="button" variant="outline" onClick={addQuestion} disabled={formData.questions.length >= MAX_SESSION_QUESTIONS}>
                         Add Question
                       </Button>
                     </div>
 
-                    {formData.questions.map((q, idx) => (
-                      <Card key={idx} className="p-4">
+                    <p className="text-sm text-foreground/60">
+                      {formData.questions.length} of {MAX_SESSION_QUESTIONS} questions added.
+                    </p>
+
+                    <div className="max-h-[70vh] space-y-4 overflow-y-auto pr-2">
+                      {formData.questions.map((q, idx) => (
+                        <Card key={idx} className="p-4">
                         <div className="flex items-center justify-between mb-3">
                           <p className="font-semibold text-foreground">Q{idx + 1}</p>
                           <Button
@@ -222,8 +228,9 @@ export default function CreateSession() {
                             />
                           </div>
                         </div>
-                      </Card>
-                    ))}
+                        </Card>
+                      ))}
+                    </div>
                   </div>
 	              </div>
 	            </Card>

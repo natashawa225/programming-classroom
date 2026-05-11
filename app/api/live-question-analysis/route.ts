@@ -58,7 +58,7 @@ function buildLiveQuestionPromptPayload(input: {
   return {
     prompt_version: 'live_question_clusters_v2',
     system_instruction:
-      'Cluster short student answers for one open-ended classroom question into 2 to 5 reasoning-pattern groups.',
+      'Cluster short student answers for one open-ended classroom question into 1 to 5 reasoning-pattern groups.',
     user_input: {
       question_id: input.questionId,
       question_position: input.questionPosition,
@@ -105,14 +105,39 @@ export async function POST(request: NextRequest) {
       retryOperation(() => getSession(sessionId)),
       retryOperation(() => getSessionQuestions(sessionId)),
     ])
+    const requestedQuestionId = typeof body?.questionId === 'string' ? body.questionId.trim() : ''
+    const hasRequestedQuestionPosition = body?.questionPosition !== undefined && body?.questionPosition !== null
+    const requestedQuestionPosition =
+      !hasRequestedQuestionPosition
+        ? null
+        : Number(body.questionPosition)
+    const hasExplicitQuestionTarget = Boolean(requestedQuestionId || hasRequestedQuestionPosition)
     const question =
+      (requestedQuestionId
+        ? questions.find((entry) => entry.question_id === requestedQuestionId)
+        : null) ||
+      (Number.isFinite(requestedQuestionPosition)
+        ? questions.find((entry) => entry.position === requestedQuestionPosition)
+        : null) ||
       questions.find((entry) => entry.position === session.current_question_position) ||
       questions[0] ||
       null
-    const attemptType = (body?.attemptType as AttemptType | undefined) || inferAttemptType(session)
+    const explicitAttemptType =
+      body?.attemptType === 'initial' || body?.attemptType === 'revision'
+        ? (body.attemptType as AttemptType)
+        : null
+    const attemptType = explicitAttemptType || inferAttemptType(session)
 
     if (!question) {
       return NextResponse.json({ error: 'No current question found.' }, { status: 400 })
+    }
+    if (hasExplicitQuestionTarget) {
+      const targetMatchesRequest =
+        (requestedQuestionId && question.question_id === requestedQuestionId) ||
+        (Number.isFinite(requestedQuestionPosition) && question.position === requestedQuestionPosition)
+      if (!targetMatchesRequest) {
+        return NextResponse.json({ error: 'Selected question was not found in this session.' }, { status: 400 })
+      }
     }
     if (!attemptType) {
       return NextResponse.json({ error: 'No question attempt is active or selected.' }, { status: 400 })
@@ -120,8 +145,11 @@ export async function POST(request: NextRequest) {
 
     let closedInThisRequest = false
     if (
-      (attemptType === 'initial' && session.live_phase === 'question_initial_open') ||
-      (attemptType === 'revision' && session.live_phase === 'question_revision_open')
+      !hasExplicitQuestionTarget &&
+      (
+        (attemptType === 'initial' && session.live_phase === 'question_initial_open') ||
+        (attemptType === 'revision' && session.live_phase === 'question_revision_open')
+      )
     ) {
       await retryOperation(() => closeCurrentQuestion(sessionId, attemptType))
       closedInThisRequest = true

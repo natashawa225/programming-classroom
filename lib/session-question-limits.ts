@@ -1,0 +1,2 @@
+export const MAX_SESSION_QUESTIONS = 20
+

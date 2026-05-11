@@ -16,7 +16,6 @@ export type LiveCluster = {
   average_confidence: number
   representative_answers: string[]
   response_ids: string[]
-  // v2 fields
   conceptual_alignment?: number       // -1 (conflicting) → 0 (mixed) → 1 (aligned)
   understanding_bucket?: UnderstandingBucket
   teacher_note?: string | null
@@ -59,7 +58,7 @@ export function inferBucketFromAlignment(alignment: number): UnderstandingBucket
 }
 
 function clampClusterCount(count: number) {
-  if (count < 2) return 2
+  if (count < 1) return 1
   if (count > 5) return 5
   return count
 }
@@ -185,6 +184,11 @@ function sanitizeModelClusters(
   const unassigned = responses.filter((response) => !assigned.has(response.response_id))
   if (unassigned.length > 0) {
     if (sanitized.length === 0) return []
+    console.warn('[live-clustering] model omitted response_ids; merging unassigned responses into an existing cluster', {
+      omitted_response_ids: unassigned.map((response) => response.response_id),
+      omitted_count: unassigned.length,
+      cluster_count_before_merge: sanitized.length,
+    })
     const targetIndex = sanitized.reduce((bestIndex, cluster, index, array) => {
       return cluster.count < array[bestIndex].count ? index : bestIndex
     }, 0)
@@ -230,22 +234,36 @@ function buildFallbackClusters(
     return b.reduce((sum, row) => sum + row.confidence, 0) - a.reduce((sum, row) => sum + row.confidence, 0)
   })
 
-  const targetClusterCount = responses.length === 1 ? 1 : clampClusterCount(sortedGroups.length || 1)
+  const repeatedGroups = sortedGroups.filter((rows) => rows.length > 1)
+  const singletonRows = sortedGroups.filter((rows) => rows.length === 1).flat()
+  const fallbackGroups = [
+    ...repeatedGroups,
+    ...(singletonRows.length > 0 ? [singletonRows] : []),
+  ]
+
+  const targetClusterCount = responses.length === 1 ? 1 : clampClusterCount(fallbackGroups.length || 1)
   const limitedGroups =
-    sortedGroups.length <= targetClusterCount
-      ? sortedGroups
+    fallbackGroups.length <= targetClusterCount
+      ? fallbackGroups
       : [
-          ...sortedGroups.slice(0, targetClusterCount - 1),
-          sortedGroups.slice(targetClusterCount - 1).flat(),
+          ...fallbackGroups.slice(0, targetClusterCount - 1),
+          fallbackGroups.slice(targetClusterCount - 1).flat(),
         ]
 
   const clusters = limitedGroups.map((rows, index) => {
-    const isMixedGroup = sortedGroups.length > targetClusterCount && index === limitedGroups.length - 1
-    const label = isMixedGroup
+    const isMergedOverflowGroup = fallbackGroups.length > targetClusterCount && index === limitedGroups.length - 1
+    const isSingletonFallbackGroup = rows.length > 1 && rows.every((row) => {
+      return grouped.get(normalizeAnswer(row.answer) || row.response_id)?.length === 1
+    })
+    const label = isMergedOverflowGroup
       ? 'Mixed response patterns'
+      : isSingletonFallbackGroup
+        ? 'Unclustered singleton responses'
       : `Similar response pattern ${index + 1}`
-    const summary = isMixedGroup
+    const summary = isMergedOverflowGroup
       ? 'Students gave varied answers that could not be separated further without AI clustering.'
+      : isSingletonFallbackGroup
+        ? 'AI clustering was unavailable, so singleton wording variants are grouped together rather than split into artificial clusters.'
       : summarizeAnswerStem(rows[0]?.answer || '')
     return buildClusterFromResponses(label, summary, rows, index, {
       conceptual_alignment: 0,
@@ -304,22 +322,26 @@ export async function clusterLiveQuestionResponses(input: {
       {
         role: 'system',
         content: [
-          'You cluster short student answers for one open-ended classroom question into 2 to 5 reasoning-pattern groups.',
+          'You cluster short student answers for one open-ended classroom question into 1 to 5 reasoning-pattern groups.',
           '',
-          'Your goal is teacher sensemaking — help the teacher quickly see the spread of reasoning in the room.',
+          'Your main job is grouping, not grading.',
+          'Cluster responses by the underlying idea or reasoning pattern students are using.',
           '',
-          'Important: the teacher/reference answer is contextual guidance, not necessarily the only valid answer. Some questions may have multiple defensible interpretations, especially when wording depends on assumptions such as worst-case vs amortized time, implementation details, or level of abstraction.',
+          'Important: this question has a single teacher-provided reference answer, but the question is open-ended and may have multiple valid correct answers.',
+          'Students typed free text. Do not treat the reference answer as the only acceptable answer.',
+          'Different valid answers that reflect sound reasoning should be merged into the same cluster or treated as equally aligned, not split apart or penalised.',
           '',
-          'Do NOT grade students. Do NOT label responses as simply correct or incorrect. Do NOT cluster only by the final Yes/No answer.',
+          'Prefer fewer, broader clusters. False splits are worse than broad clusters for this live teacher dashboard.',
+          'When unsure whether two responses are meaningfully different, merge them.',
           '',
-          'Instead:',
-          '- Identify the main reasoning pattern used in each cluster.',
-          '- Preserve nuanced or conditionally valid reasoning.',
-          '- Distinguish strong reasoning, partial reasoning, unsupported claims, and misconception-based reasoning.',
-          '- Estimate how closely the reasoning aligns with the lesson goals, target concept, and known misconceptions.',
-          '- If a response is defensible only under a particular interpretation, explain that in teacher_note.',
-          '- If a response has the right final answer but weak reasoning, keep the alignment moderate rather than high.',
-          '- If a response disagrees with the reference answer but gives a defensible interpretation, do not mark it as low alignment purely because of the disagreement.',
+          'Do not split by language, wording, confidence, answer length, writing quality, or minor detail differences.',
+          'Do not create separate clusters just because one answer is more detailed or polished than another.',
+          '',
+          'Only separate responses when they show a meaningfully different concept, misconception, or lack of interpretable reasoning.',
+          'A difference is meaningful only if it would change what the teacher should address next.',
+          '',
+          'After assigning response_ids to clusters, write a short neutral label and one-sentence summary for each cluster.',
+          'Then optionally add teacher_note only if there is a useful misconception, ambiguity, or teaching point to notice.',
           '',
           'Return concise JSON only. Use classroom-safe language.',
         ].join('\n'),
@@ -330,7 +352,7 @@ export async function clusterLiveQuestionResponses(input: {
           `Question id: ${input.questionId}`,
           `Question position: ${input.questionPosition}`,
           `Question prompt:\n${input.questionPrompt}`,
-          `Reference answer:\n${input.correctAnswer || ''}`,
+          `Reference answer (one valid example only — not the only correct answer): \n${input.correctAnswer || ''}`,
           `Lesson concept:\n${input.lessonContext?.lesson_concept || ''}`,
           `Target misconception:\n${input.lessonContext?.target_misconception || ''}`,
           `Strong answer criteria:\n${JSON.stringify(input.lessonContext?.strong_answer_criteria ?? [])}`,
@@ -343,44 +365,41 @@ export async function clusterLiveQuestionResponses(input: {
             clusters: [
               {
                 cluster_id: 'cluster_1',
-                label: 'neutral reasoning label (no True/False prefix)',
+                label: 'neutral reasoning label',
                 summary: 'one-sentence neutral description of the shared reasoning pattern',
                 conceptual_alignment: 0.35,
                 understanding_bucket: 'mixed_reasoning',
-                teacher_note: 'optional note for teacher — only if genuinely useful, else omit or null',
+                teacher_note: 'optional — omit or null unless genuinely useful',
                 response_ids: ['...'],
               },
             ],
           }, null, 2),
           'Rules:',
           '- Every response_id must appear in exactly one cluster.',
-          '- Use 2 to 5 clusters unless there is only 1 response.',
-          '- label = short name of the reasoning pattern.',
-          '- summary = what students in the cluster are generally thinking.',
-          '- teacher_note = what the teacher should notice, especially ambiguity, missing nuance, or conditional validity.',
-          '- Labels must be neutral and descriptive — never start with "True:", "False:", "Yes:", "No:", "Correct:", or "Incorrect:".',
-          '- Labels should describe the reasoning pattern, not the final verdict.',
-          '- Cluster by reasoning pattern, not by final answer alone.',
-          '- Split different lines of reasoning into separate clusters even when they reach the same final answer.',
-          '- Different final answers may both be reasonable if they rely on different interpretations of the question.',
-          '- Treat the reference answer as teacher guidance, not as an absolute answer key.',
-          '- Do not penalize a response only because it differs from the reference answer; evaluate the reasoning quality and assumptions.',
-          '- Explicitly preserve conditional reasoning such as "yes if amortized near-constant time is accepted" or "no if strict worst-case O(1) is required."',
-          '- Separate misconception-based reasoning from defensible alternative interpretations.',
-          '- Different final answers may be clustered together only when the underlying reasoning pattern or misconception is genuinely similar.',
-          '- Do not combine dynamic/static graph confusion, root/order confusion, implementation-dependence, strict worst-case reasoning, amortized-time reasoning, and simple uncertainty into one broad cluster.',
+          '- Use 1 to 5 clusters. Use 1 cluster when responses are conceptually homogeneous.',
+          '- If there are fewer than 4 responses, use 1–2 clusters unless there is a clearly different misconception.',
+          '- Prefer fewer broader clusters. Merge when in doubt.',
+          '- Separate clusters only when the difference would change what the teacher addresses next.',
+          '- Always merge responses that express the same underlying concept in different words or languages.',
+          '- Treat equivalent phrasings as one cluster: e.g. "postorder", "after all neighbors processed", "after descendants", "after recursive calls finish", "reverse topological order" all express the same DFS-finish-time idea.',
+          '- Do not split by: language, wording, answer length, confidence, or writing quality.',
+          '- Confidence is context for the teacher summary only. Do not use confidence as a reason to create separate clusters.',
+          '- label = short name of the reasoning pattern (neutral, no True/False/Correct/Incorrect prefix).',
+          '- summary = what students in the cluster are generally thinking (one sentence, neutral).',
+          '- teacher_note must be actionable and specific. Do not write generic notes such as "review this concept" or "clarify the topic".',
+          '- teacher_note should be null when there is no specific misconception, ambiguity, or teaching move worth surfacing.',
           '- conceptual_alignment is a float from -1.0 to 1.0:',
-          '  - 1.0 = strongly aligned reasoning under the lesson goals',
-          '  - 0.5 to 0.8 = mostly aligned but missing nuance or conditions',
-          '  - 0.0 to 0.4 = partial, vague, unsupported, or mixed reasoning',
-          '  - below 0.0 = reasoning conflicts with the target concept or reflects a clear misconception',
+          '  - 1.0 = clearly aligned with the target concept',
+          '  - 0.5–0.8 = mostly aligned but missing nuance',
+          '  - 0.0–0.4 = partial, vague, or unsupported',
+          '  - below 0.0 = appears to reflect a misconception or conflicts with the target concept',
           '- understanding_bucket must be exactly one of: needs_attention, mixed_reasoning, strong_alignment, unclear.',
-          '- Use strong_alignment only when reasoning is both conceptually sound and sufficiently explained.',
-          '- Use mixed_reasoning for partially correct, conditionally valid, or incomplete reasoning.',
-          '- Use needs_attention for clear misconceptions or reasoning that would likely mislead future learning.',
-          '- Use unclear for responses that are too vague to interpret.',
-          '- teacher_note is optional, but include it when the reasoning is conditionally valid, the answer depends on interpretation, the final answer is right but the reasoning is weak, the response disagrees with the reference answer but is defensible, or the misconception is important for the teacher to address.',
-          '- Summaries should neutrally describe the shared reasoning pattern and be concise.',
+          '- Use strong_alignment only when the shared reasoning clearly matches the target concept and is specific enough to interpret.',
+          '- Use mixed_reasoning for partial, conditional, or incomplete reasoning.',
+          '- Use needs_attention for clear misconceptions.',
+          '- Use unclear only when responses are too vague to interpret.',
+          '- Treat the reference answer as guidance, not an absolute answer key.',
+          '- Do not penalize a response only because it differs from the reference answer; evaluate the reasoning.',
         ].join('\n\n'),
       },
     ],

@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Session questions (3–5 open-ended prompts)
+-- Session questions (1–20 open-ended prompts; enforced by application validation)
 CREATE TABLE IF NOT EXISTS session_questions (
   question_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,

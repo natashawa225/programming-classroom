@@ -23,6 +23,7 @@ import type {
 } from '@/lib/types/database'
 import { formatAnonymizedLabel, generateSessionCode } from '@/lib/utils/codes'
 import { assertTeacherAuthenticated } from '@/lib/teacher-auth'
+import { MAX_SESSION_QUESTIONS } from '@/lib/session-question-limits'
 
 function sessionParticipantCookieName(sessionId: string) {
   return `sd_sp_${sessionId}`
@@ -163,8 +164,8 @@ export async function createSession(
   if (normalizedQuestions.length < 1) {
     throw new Error('Please add at least one question.')
   }
-  if (normalizedQuestions.length > 5) {
-    throw new Error('Please add no more than 5 questions.')
+  if (normalizedQuestions.length > MAX_SESSION_QUESTIONS) {
+    throw new Error(`Please add no more than ${MAX_SESSION_QUESTIONS} questions.`)
   }
 
   const desired = data.sessionCode?.trim() || ''

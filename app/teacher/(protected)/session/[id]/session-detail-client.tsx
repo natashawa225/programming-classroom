@@ -391,9 +391,16 @@ export default function SessionDetailClient({
     )
   }, [liveQuestionAnalyses, viewedQuestion])
 
+  const viewedRevisionResponseCount = useMemo(() => {
+    if (!viewedQuestion) return 0
+    return responses.filter((response) => {
+      return response.question_id === viewedQuestion.question_id && getResponseAttemptType(response) === 'revision'
+    }).length
+  }, [responses, viewedQuestion])
+
   const canCompareRevision = Boolean(
     session.condition === 'treatment' &&
-    viewedRevisionAnalysis
+    (viewedRevisionAnalysis || (session.live_phase === 'session_completed' && viewedRevisionResponseCount > 0))
   )
 
   const activeAnalysis = compareMode === 'revision' && canCompareRevision ? viewedRevisionAnalysis : viewedInitialAnalysis
@@ -668,6 +675,70 @@ export default function SessionDetailClient({
     }
   }
 
+  const handlePostSessionRerunClustering = async (question: SessionQuestion, targetAttemptType: AttemptType) => {
+    const confirmed = window.confirm(
+      'Re-run clustering for this question using the latest prompt? This will update the displayed cluster view, but previous analysis runs will remain saved.'
+    )
+    if (!confirmed) return
+
+    const analysisKey = `${question.question_id}:${targetAttemptType}`
+    setAnalysisStatusByKey((prev) => ({
+      ...prev,
+      [analysisKey]: 'loading',
+    }))
+
+    const response = await fetch('/api/live-question-analysis', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        questionId: question.question_id,
+        attemptType: targetAttemptType,
+        forceRegenerate: true,
+      }),
+    })
+
+    const payload = await response.json().catch(() => null)
+    if (response.status === 202) {
+      return
+    }
+    if (!response.ok) {
+      setAnalysisStatusByKey((prev) => ({
+        ...prev,
+        [analysisKey]: 'failed',
+      }))
+      throw new Error(payload?.error || 'Failed to re-run clustering for this question.')
+    }
+
+    const savedOrEphemeralAnalysis = payload?.saved || (
+      payload?.analysis
+        ? {
+            live_question_analysis_id: `ephemeral-${question.question_id}-${targetAttemptType}-${Date.now()}`,
+            session_id: sessionId,
+            question_id: question.question_id,
+            attempt_type: targetAttemptType,
+            analysis_json: payload.analysis,
+            generated_at: new Date().toISOString(),
+          }
+        : null
+    )
+
+    if (savedOrEphemeralAnalysis) {
+      setLiveQuestionAnalyses((prev) =>
+        mergeByKey(prev, savedOrEphemeralAnalysis, (row) => `${row.question_id}:${row.attempt_type}`)
+      )
+    }
+
+    setAnalysisStatusByKey((prev) => ({
+      ...prev,
+      [analysisKey]: 'success',
+    }))
+
+    if (payload?.persistenceWarning) {
+      setError(payload.persistenceWarning)
+    }
+  }
+
   const handleCompleteSession = async () => {
     await postLiveControl('complete_session')
 
@@ -719,6 +790,15 @@ export default function SessionDetailClient({
   const isViewedAnalysisLoading = viewedAnalysisStatus === 'loading'
   const isViewedAnalysisFailed = viewedAnalysisStatus === 'failed'
   const hasVisibleAnalysis = visibleClusters.length > 0
+  const canPostSessionRerunClustering = Boolean(
+    session.live_phase === 'session_completed' &&
+    viewedQuestion &&
+    viewedResponses.length > 0 &&
+    (viewedAttemptType === 'initial' || session.condition === 'treatment')
+  )
+  const postSessionRerunActionKey = viewedQuestion
+    ? `rerun-clustering-${viewedQuestion.question_id}-${viewedAttemptType}`
+    : 'rerun-clustering'
   const primaryAction = (() => {
     if (session.live_phase === 'not_started') {
       return {
@@ -843,7 +923,7 @@ export default function SessionDetailClient({
               <h2 className="mt-3 max-w-5xl text-[28px] font-semibold leading-[1.45] tracking-tight text-foreground">
                 {viewedQuestion?.prompt || 'No question configured.'}
               </h2>
-              <div className="mt-4 flex flex-wrap items-center gap-2">
+              <div className="mt-4 flex max-h-28 flex-wrap items-center gap-2 overflow-y-auto pr-1">
                 {questions.map((question) => {
                   const isCurrent = currentQuestion?.question_id === question.question_id
                   const isViewed = viewedQuestion?.question_id === question.question_id
@@ -1001,6 +1081,23 @@ export default function SessionDetailClient({
                   )}
                 </div>
                 <div className="flex shrink-0 flex-wrap items-center gap-3">
+                  {canPostSessionRerunClustering && viewedQuestion && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="rounded-full border-[rgba(123,175,212,0.22)] bg-white px-4"
+                      disabled={actionLoading !== null || isViewedAnalysisLoading}
+                      onClick={() =>
+                        runAction(postSessionRerunActionKey, () =>
+                          handlePostSessionRerunClustering(viewedQuestion, viewedAttemptType)
+                        )
+                      }
+                    >
+                      {actionLoading === postSessionRerunActionKey
+                        ? 'Re-running clustering...'
+                        : 'Re-run clustering with latest prompt'}
+                    </Button>
+                  )}
                   {canCompareRevision && (
                     <div className="flex rounded-full bg-[rgba(238,244,249,0.95)] p-1">
                       <button
@@ -1150,6 +1247,7 @@ export default function SessionDetailClient({
                           const blockStartY = -totalTextHeight / 2
                           const countY = blockStartY + labelBlockHeight + gapAfterLabel + countLineHeight / 2
                           const confidenceY = countY + countLineHeight / 2 + gapAfterCount + confidenceLineHeight / 2
+                          const titleText = `${cluster.displayLabel} - ${formatResponsesLabel(cluster.count)} - avg confidence ${cluster.average_confidence.toFixed(1)}/5 - ${getBucketDisplayLabel(cluster.resolvedBucket)}`
 
                           return (
                             <g
@@ -1209,9 +1307,7 @@ export default function SessionDetailClient({
                                   cf. {cluster.average_confidence.toFixed(1)}/5
                                 </text>
                               )}
-                              <title>
-                                {cluster.displayLabel} - {formatResponsesLabel(cluster.count)} - avg confidence {cluster.average_confidence.toFixed(1)}/5 - {getBucketDisplayLabel(cluster.resolvedBucket)}
-                              </title>
+                              <title>{titleText}</title>
                             </g>
                           )
                         })}
