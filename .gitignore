@@ -13,5 +13,5 @@ next.user-config.*
 # Common ignores
 node_modules
 .next/
-.DS_Store.env # Make sure .env is in .gitignore
+.DS_Store
 scripts/generated/

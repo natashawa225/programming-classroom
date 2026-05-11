@@ -1,9 +1,8 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import Link from 'next/link'
 import {
-  BarChart3,
   CheckCircle2,
   ClipboardList,
   Download,
@@ -17,7 +16,6 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
-import { AnalysisDashboard } from '@/components/analysis-dashboard'
 import type { SessionQuestionSummary, SessionSummaryPayload } from '@/lib/session-summary'
 
 function formatConfidence(value: number | null) {
@@ -136,187 +134,6 @@ function getQuestionConfidenceDelta(question: SessionQuestionSummary) {
   }
 
   return question.revision.averageConfidence - question.initial.averageConfidence
-}
-
-function getStoredAnalysisForSummary(payload: any, sessionCondition: 'baseline' | 'treatment') {
-  if (sessionCondition === 'treatment') {
-    return payload?.completedRound2?.summary_json || payload?.completedRound1?.summary_json || null
-  }
-
-  return payload?.completedRound1?.summary_json || null
-}
-
-function getInProgressAnalysisForSummary(payload: any, sessionCondition: 'baseline' | 'treatment') {
-  if (sessionCondition === 'treatment') {
-    return payload?.inProgressRound2 || payload?.inProgressRound1 || null
-  }
-
-  return payload?.inProgressRound1 || null
-}
-
-function getAnalysisRoundForSummary(payload: any, sessionCondition: 'baseline' | 'treatment'): 1 | 2 {
-  if (sessionCondition === 'baseline') return 1
-  if (payload?.completedRound2?.summary_json || payload?.inProgressRound2) return 2
-
-  const responses = Array.isArray(payload?.responses) ? payload.responses : []
-  const hasRevisionResponses = responses.some((response: any) => (response?.round_number ?? 1) === 2)
-  return hasRevisionResponses ? 2 : 1
-}
-
-function SummaryAnalysisSection({
-  sessionId,
-  sessionCondition,
-}: {
-  sessionId: string
-  sessionCondition: 'baseline' | 'treatment'
-}) {
-  const [analysis, setAnalysis] = useState<any>(null)
-  const [analysisRound, setAnalysisRound] = useState<1 | 2>(sessionCondition === 'treatment' ? 2 : 1)
-  const [status, setStatus] = useState<'loading' | 'none' | 'in_progress' | 'completed'>('loading')
-  const [isGenerating, setIsGenerating] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  const loadAnalysisState = async (options?: { quiet?: boolean }) => {
-    try {
-      if (!options?.quiet) setStatus('loading')
-      setError(null)
-
-      const response = await fetch('/api/teacher/analysis-state', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId }),
-      })
-      const payload = await response.json().catch(() => null)
-      if (!response.ok) {
-        throw new Error(payload?.error || 'Failed to load analysis.')
-      }
-
-      const nextAnalysis = getStoredAnalysisForSummary(payload, sessionCondition)
-      const inProgress = getInProgressAnalysisForSummary(payload, sessionCondition)
-      const nextRound = getAnalysisRoundForSummary(payload, sessionCondition)
-      setAnalysisRound(nextRound)
-
-      if (nextAnalysis) {
-        setAnalysis(nextAnalysis)
-        setStatus('completed')
-      } else if (inProgress) {
-        setAnalysis(null)
-        setStatus('in_progress')
-      } else {
-        setAnalysis(null)
-        setStatus('none')
-      }
-    } catch (loadError) {
-      console.error(loadError)
-      setAnalysis(null)
-      setStatus('none')
-      setError(loadError instanceof Error ? loadError.message : 'Failed to load analysis.')
-    }
-  }
-
-  useEffect(() => {
-    void loadAnalysisState()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, sessionCondition])
-
-  useEffect(() => {
-    if (status !== 'in_progress') return
-    const timer = window.setInterval(() => {
-      void loadAnalysisState({ quiet: true })
-    }, 10000)
-    return () => window.clearInterval(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, sessionId, sessionCondition])
-
-  const handleGenerateAnalysis = async () => {
-    try {
-      setIsGenerating(true)
-      setError(null)
-
-      const response = await fetch('/teacher/api/analyze-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionId,
-          roundNumber: analysisRound,
-          forceRegenerate: false,
-        }),
-      })
-
-      const payload = await response.json().catch(() => null)
-      if (!response.ok) {
-        throw new Error(payload?.error || 'Failed to generate analysis.')
-      }
-
-      if (response.status === 202) {
-        setAnalysis(null)
-        setStatus('in_progress')
-        return
-      }
-
-      setAnalysis(payload)
-      setStatus('completed')
-    } catch (generateError) {
-      console.error(generateError)
-      setError(generateError instanceof Error ? generateError.message : 'Failed to generate analysis.')
-    } finally {
-      setIsGenerating(false)
-    }
-  }
-
-  const title = sessionCondition === 'treatment' && analysisRound === 2 ? 'Final AI analysis' : 'AI analysis'
-  const description =
-    sessionCondition === 'treatment' && analysisRound === 2
-      ? 'Round 2 analysis is shown here with the session summary so post-revision results live in one place.'
-      : 'Detailed AI analysis is shown here with the session summary so teachers have one post-session destination.'
-
-  return (
-    <section className="space-y-5">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-slate-500">Detailed analysis</p>
-          <h2 className="mt-2 text-2xl font-semibold tracking-tight text-slate-900">{title}</h2>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">{description}</p>
-        </div>
-        <div className="flex size-10 items-center justify-center rounded-xl bg-sky-50 text-sky-700">
-          <BarChart3 className="size-5" />
-        </div>
-      </div>
-
-      {status === 'loading' ? (
-        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-5 text-sm text-slate-600">
-          Loading analysis...
-        </div>
-      ) : status === 'in_progress' ? (
-        <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-5 text-sm text-sky-900">
-          Analysis is running. This section will refresh automatically.
-        </div>
-      ) : analysis ? (
-        <AnalysisDashboard analysis={analysis} />
-      ) : (
-        <div className="rounded-xl border border-slate-200 bg-slate-50 px-5 py-5">
-          <p className="text-sm leading-6 text-slate-600">
-            No saved analysis is available yet. Generate it here and it will appear in this summary.
-          </p>
-          <Button type="button" onClick={handleGenerateAnalysis} disabled={isGenerating} className="mt-4 rounded-full px-5">
-            {isGenerating ? (
-              <>
-                <Spinner className="size-4" />
-                Generating...
-              </>
-            ) : (
-              <>
-                <BarChart3 className="size-4" />
-                {sessionCondition === 'treatment' && analysisRound === 2 ? 'Generate final analysis' : 'Generate analysis'}
-              </>
-            )}
-          </Button>
-        </div>
-      )}
-
-      {error && <p className="mt-4 text-sm text-destructive">{error}</p>}
-    </section>
-  )
 }
 
 export default function SummaryClient({
@@ -527,8 +344,6 @@ export default function SummaryClient({
             />
           </section>
         )}
-
-        <SummaryAnalysisSection sessionId={sessionId} sessionCondition={sessionCondition} />
 
         <section className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
           <section className="space-y-6">
