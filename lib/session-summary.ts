@@ -70,6 +70,8 @@ type ParsedCluster = {
   count: number
   averageConfidence: number | null
   category: ClusterCategory
+  conceptualAlignment: number | null
+  understandingBucket: string | null
 }
 
 type ParsedLiveAnalysis = {
@@ -122,11 +124,65 @@ function countParticipants(
   return 0
 }
 
-function getClusterCategory(label: string): ClusterCategory {
-  const normalized = String(label || '').trim().toLowerCase()
-  if (normalized.startsWith('true:')) return 'correct'
-  if (normalized.startsWith('false:')) return 'misconception'
-  if (normalized.includes('uncertain') || normalized.includes('depends')) return 'uncertain'
+function getClusterCategory(input: {
+  label: string
+  conceptualAlignment: number | null
+  understandingBucket: string | null
+}): ClusterCategory {
+  const bucket = String(input.understandingBucket || '').trim().toLowerCase()
+  const alignment = input.conceptualAlignment
+  const label = String(input.label || '').trim().toLowerCase()
+
+  // Prefer structured v2 fields
+  if (bucket === 'strong_alignment') return 'correct'
+  if (bucket === 'needs_attention') return 'misconception'
+  if (bucket === 'unclear') return 'uncertain'
+
+  // mixed_reasoning depends on alignment
+  if (bucket === 'mixed_reasoning') {
+    if (alignment !== null && alignment >= 0.6) return 'correct'
+    if (alignment !== null && alignment <= -0.3) return 'misconception'
+    return 'uncertain'
+  }
+
+  // Fallback for older analyses / label-based outputs
+  if (alignment !== null) {
+    if (alignment >= 0.6) return 'correct'
+    if (alignment <= -0.3) return 'misconception'
+  }
+
+  // Label fallback for old and new labels
+  if (
+    label.includes('answer only') ||
+    label.includes('no reasoning') ||
+    label.includes('uncertain') ||
+    label.includes('unclear') ||
+    label.includes('depends')
+  ) {
+    return 'uncertain'
+  }
+
+  if (
+    label.startsWith('true:') ||
+    label.includes('correct answer') ||
+    label.includes('aligned reasoning') ||
+    label.includes('strong reasoning') ||
+    label.includes('correct reasoning')
+  ) {
+    return 'correct'
+  }
+
+  if (
+    label.startsWith('false:') ||
+    label.includes('wrong answer') ||
+    label.includes('incorrect answer') ||
+    label.includes('misconception') ||
+    label.includes('misunderstand') ||
+    label.includes('confusion')
+  ) {
+    return 'misconception'
+  }
+
   return 'uncertain'
 }
 
@@ -141,14 +197,33 @@ function parseCluster(value: unknown): ParsedCluster | null {
   if (!label) return null
 
   const count = Number(raw.count)
+  const responseIds = Array.isArray(raw.response_ids) ? raw.response_ids : []
   const averageConfidence = Number(raw.average_confidence)
+  const conceptualAlignmentRaw = Number(raw.conceptual_alignment)
+  const conceptualAlignment = Number.isFinite(conceptualAlignmentRaw)
+    ? conceptualAlignmentRaw
+    : null
+
+  const understandingBucket =
+    typeof raw.understanding_bucket === 'string' && raw.understanding_bucket.trim()
+      ? raw.understanding_bucket.trim()
+      : null
 
   return {
     label,
     summary: typeof raw.summary === 'string' && raw.summary.trim() ? raw.summary.trim() : null,
-    count: Number.isFinite(count) && count > 0 ? Math.round(count) : 0,
+    count:
+      Number.isFinite(count) && count > 0
+        ? Math.round(count)
+        : responseIds.length,
     averageConfidence: Number.isFinite(averageConfidence) ? roundToOneDecimal(averageConfidence) : null,
-    category: getClusterCategory(label),
+    conceptualAlignment,
+    understandingBucket,
+    category: getClusterCategory({
+      label,
+      conceptualAlignment,
+      understandingBucket,
+    }),
   }
 }
 
