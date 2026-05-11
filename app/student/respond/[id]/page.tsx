@@ -73,7 +73,11 @@ export default function StudentRespondPage() {
     session?.live_phase === 'question_initial_open' || session?.live_phase === 'question_revision_open'
   const activeStepKey = currentQuestion && attemptType ? `${currentQuestion.question_id}:${attemptType}` : null
   const realtimeTables = useMemo(
-    () => [{ table: 'sessions', event: 'UPDATE' as const, filter: `id=eq.${sessionId}` }],
+    () => [
+      { table: 'sessions', event: 'UPDATE' as const, filter: `id=eq.${sessionId}` },
+      { table: 'session_questions', event: '*' as const, filter: `session_id=eq.${sessionId}` },
+      { table: 'responses', event: '*' as const, filter: `session_id=eq.${sessionId}` },
+    ],
     [sessionId]
   )
 
@@ -118,7 +122,7 @@ export default function StudentRespondPage() {
     tables: realtimeTables,
     onChange: async () => {
       try {
-        const response = await fetch('/api/student/session-status', {
+        const response = await fetch('/api/student/respond-state', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -130,12 +134,33 @@ export default function StudentRespondPage() {
           throw new Error(payload?.error || 'Failed to refresh session.')
         }
         const updated = payload?.session as Session
+        const sessionQuestions = (payload?.questions || []) as SessionQuestion[]
+        const participation = payload?.participation
+        if (!participation) {
+          router.replace('/student/join')
+          return
+        }
+
         setSession(updated)
+        setQuestions(sessionQuestions || [])
+        setAnonymizedLabel(participation.anonymized_label)
+        if (process.env.NODE_ENV !== 'production') {
+          // eslint-disable-next-line no-console
+          console.debug('[student-live] refreshed', {
+            sessionId,
+            live_phase: updated.live_phase,
+            current_question_position: updated.current_question_position,
+            attemptType: getAttemptType(updated),
+            activeStepKey,
+            submitted,
+          })
+        }
       } catch (err) {
         console.error(err)
       }
     },
-    pollMs: 15000,
+    pollMs: 5000,
+    pollStrategy: 'always',
     debugLabel: `student-live-${sessionId}`,
   })
 

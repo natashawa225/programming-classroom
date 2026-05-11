@@ -30,6 +30,12 @@ BEGIN
   END;
 
   BEGIN
+    EXECUTE 'ALTER PUBLICATION supabase_realtime ADD TABLE public.session_questions;';
+  EXCEPTION WHEN duplicate_object THEN
+    NULL;
+  END;
+
+  BEGIN
     EXECUTE 'ALTER PUBLICATION supabase_realtime ADD TABLE public.responses;';
   EXCEPTION WHEN duplicate_object THEN
     NULL;
@@ -41,4 +47,3 @@ COMMIT;
 -- After running, if you still don't receive events:
 -- 1) In Supabase Dashboard > Database > Replication, confirm tables are enabled.
 -- 2) Ensure RLS policies (if enabled) allow the realtime user to read rows for your anon JWT.
-
