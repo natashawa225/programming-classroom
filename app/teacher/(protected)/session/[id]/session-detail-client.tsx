@@ -850,26 +850,6 @@ export default function SessionDetailClient({
 
     return null
   })()
-  const secondaryAction = (() => {
-    if (session.live_phase === 'question_initial_closed' && session.condition === 'treatment') {
-      if (isLastQuestion) {
-        return {
-          key: 'complete-session',
-          label: 'End session',
-          action: handleCompleteSession,
-        }
-      }
-
-      return {
-        key: 'next-question',
-        label: 'Next question',
-        action: () => postLiveControl('next_question', getTimerValue()),
-      }
-    }
-
-    return null
-  })()
-
   return (
     <main className="min-h-screen bg-[linear-gradient(180deg,#edf4fa_0%,#f7fbff_100%)] text-foreground">
       <header className="border-b border-[rgba(123,175,212,0.18)] px-6 py-4 lg:px-8">
@@ -990,21 +970,6 @@ export default function SessionDetailClient({
                                   ? 'Opening revision...'
                                   : 'Generating analysis...'
                           : primaryAction.label}
-                      </Button>
-                    )}
-
-                    {secondaryAction && (
-                      <Button
-                        variant="outline"
-                        className="rounded-2xl border-[rgba(123,175,212,0.22)] bg-white"
-                        disabled={actionLoading !== null || isCurrentAnalysisRunning}
-                        onClick={() => runAction(secondaryAction.key, secondaryAction.action)}
-                      >
-                        {actionLoading === secondaryAction.key
-                          ? secondaryAction.key === 'complete-session'
-                            ? 'Ending session...'
-                            : 'Opening next question...'
-                          : secondaryAction.label}
                       </Button>
                     )}
 
@@ -1302,9 +1267,9 @@ export default function SessionDetailClient({
                                   textAnchor="middle"
                                   dominantBaseline="middle"
                                   fill="rgba(33,29,42,0.72)"
-                                  style={{ fontSize: compact ? 18 : 20, fontWeight: 500 }}
+                                  style={{ fontSize: compact ? 25 : 27, fontWeight: 500 }}
                                   >
-                                  cf. {cluster.average_confidence.toFixed(1)}/5
+                                  cf. {cluster.average_confidence.toFixed(1)}
                                 </text>
                               )}
                               <title>{titleText}</title>

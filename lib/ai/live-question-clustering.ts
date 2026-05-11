@@ -42,6 +42,13 @@ type InputResponse = {
   confidence: number
 }
 
+type BareAnswerKind = 'affirm' | 'reject' | 'uncertain'
+type ReferenceDirection = 'affirm' | 'reject' | null
+type ProcessedInputResponse = InputResponse & {
+  bare: boolean
+  bare_answer_kind: BareAnswerKind | null
+}
+
 // --- Backward-compat: map v1 True/False labels to alignment scores ---
 export function inferAlignmentFromV1Label(label: string): number {
   const lower = label.toLowerCase()
@@ -99,6 +106,87 @@ function normalizeAnswer(answer: string) {
     .replace(/\s+/g, ' ')
 }
 
+function normalizeBareText(answer: string) {
+  return String(answer || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[’‘]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/[。！？!?.,，、；;:：]+$/g, '')
+    .replace(/\s+/g, ' ')
+}
+
+function classifyBareAnswer(answer: string): Pick<ProcessedInputResponse, 'bare' | 'bare_answer_kind'> {
+  const normalized = normalizeBareText(answer)
+  if (!normalized) return { bare: false, bare_answer_kind: null }
+
+  const compact = normalized.replace(/\s+/g, '')
+  const affirm = new Set([
+    'yes',
+    'y',
+    'true',
+    'correct',
+    'right',
+    'yeah',
+    'yep',
+    '是',
+    '对',
+    '正确',
+    '對',
+    '正確',
+  ])
+  const reject = new Set([
+    'no',
+    'n',
+    'false',
+    'incorrect',
+    'wrong',
+    '不是',
+    '不对',
+    '不對',
+    '错误',
+    '錯誤',
+    '否',
+  ])
+  const uncertain = new Set([
+    'idk',
+    "i don't know",
+    'i dont know',
+    'i do not know',
+    'dont know',
+    "don't know",
+    'not sure',
+    'unsure',
+    '不知道',
+    '不确定',
+    '不確定',
+  ])
+
+  if (affirm.has(normalized) || affirm.has(compact)) return { bare: true, bare_answer_kind: 'affirm' }
+  if (reject.has(normalized) || reject.has(compact)) return { bare: true, bare_answer_kind: 'reject' }
+  if (uncertain.has(normalized) || uncertain.has(compact)) return { bare: true, bare_answer_kind: 'uncertain' }
+
+  return { bare: false, bare_answer_kind: null }
+}
+
+function inferReferenceDirection(correctAnswer?: string | null): ReferenceDirection {
+  const normalized = normalizeBareText(correctAnswer || '')
+  if (!normalized) return null
+
+  const compact = normalized.replace(/\s+/g, '')
+  const affirmStart = /^(yes|true|correct|right)\b/.test(normalized) || /^(是|对|正确|對|正確)/.test(compact)
+  const rejectStart = /^(no|false|incorrect|wrong)\b/.test(normalized) || /^(不是|不对|不對|错误|錯誤|否)/.test(compact)
+  if (affirmStart && !rejectStart) return 'affirm'
+  if (rejectStart && !affirmStart) return 'reject'
+
+  const affirmStatement = /\b(the answer is|answer is|it is|it's)\s+(yes|true|correct|right)\b/.test(normalized)
+  const rejectStatement = /\b(the answer is|answer is|it is|it's)\s+(no|false|incorrect|wrong)\b/.test(normalized)
+  if (affirmStatement && !rejectStatement) return 'affirm'
+  if (rejectStatement && !affirmStatement) return 'reject'
+
+  return null
+}
+
 function summarizeAnswerStem(answer: string) {
   const normalized = normalizeAnswer(answer)
   if (!normalized) return 'Students expressed a similar idea with overlapping wording.'
@@ -134,6 +222,47 @@ function buildClusterFromResponses(
     response_ids: rows.map((row) => row.response_id),
     ...(v2Fields ?? {}),
   }
+}
+
+function buildBareTeacherNote(rows: InputResponse[]) {
+  const high = rows.filter((row) => row.confidence >= 4).length
+  const medium = rows.filter((row) => row.confidence === 3).length
+  const low = rows.filter((row) => row.confidence <= 2).length
+  const studentLabel = rows.length === 1 ? 'student' : 'students'
+  const responseLabel = rows.length === 1 ? 'response' : 'responses'
+  return `${rows.length} ${studentLabel} gave answer-only ${responseLabel} with no reasoning. Confidence: ${high} high, ${medium} medium, ${low} low. Use this as a confidence/participation signal, not as evidence of reasoning.`
+}
+
+function getBareClusterDescriptor(
+  rows: ProcessedInputResponse[],
+  referenceDirection: ReferenceDirection
+): { label: string; summary: string } {
+  const hasUncertain = rows.some((row) => row.bare_answer_kind === 'uncertain')
+  if (hasUncertain) {
+    return {
+      label: 'Uncertain answer only - no reasoning given',
+      summary: 'Students gave answer-only uncertainty responses without explaining their thinking.',
+    }
+  }
+
+  if (!referenceDirection) {
+    return {
+      label: 'Answer only - no reasoning given',
+      summary: 'Students gave a bare final answer without explaining their reasoning.',
+    }
+  }
+
+  const firstKind = rows[0]?.bare_answer_kind
+  const isCorrectBare = firstKind === referenceDirection
+  return isCorrectBare
+    ? {
+        label: 'Correct answer only - no reasoning given',
+        summary: 'Students gave the expected final answer without explaining their reasoning.',
+      }
+    : {
+        label: 'Wrong answer only - no reasoning given',
+        summary: 'Students gave a final answer that conflicts with the reference direction without explaining their reasoning.',
+      }
 }
 
 export class LiveClusteringError extends Error {
@@ -209,7 +338,159 @@ function sanitizeModelClusters(
     )
   }
 
-  return sanitized.slice(0, 5)
+  if (sanitized.length <= 5) return sanitized
+
+  console.warn('[live-clustering] model returned more than 5 clusters; merging overflow clusters', {
+    cluster_count_before_merge: sanitized.length,
+    overflow_count: sanitized.length - 4,
+  })
+  const kept = sanitized.slice(0, 4)
+  const overflowRows = sanitized
+    .slice(4)
+    .flatMap((cluster) => cluster.response_ids)
+    .map((id: string) => responseMap.get(id)!)
+    .filter(Boolean)
+  kept.push(
+    buildClusterFromResponses(
+      'Additional response patterns',
+      'The model returned more than five clusters, so smaller overflow groups were merged to preserve every response.',
+      overflowRows,
+      4,
+      {
+        conceptual_alignment: 0,
+        understanding_bucket: 'mixed_reasoning',
+        teacher_note: 'Overflow clusters were merged locally because the model returned more than five groups.',
+      }
+    )
+  )
+  return kept
+}
+
+function appendBareTeacherNote(existingNote: string | null | undefined, rows: InputResponse[]) {
+  const note = buildBareTeacherNote(rows)
+  const trimmed = String(existingNote || '').trim()
+  return trimmed ? `${trimmed} ${note}` : note
+}
+
+function getBareClusterKey(response: ProcessedInputResponse, referenceDirection: ReferenceDirection) {
+  if (response.bare_answer_kind === 'uncertain') return 'uncertain'
+  if (!referenceDirection) return 'unknown'
+  return response.bare_answer_kind === referenceDirection ? 'correct' : 'wrong'
+}
+
+function postProcessBareAnswerClusters(
+  clusters: LiveCluster[],
+  responses: ProcessedInputResponse[],
+  referenceDirection: ReferenceDirection
+) {
+  const responseMap = new Map(responses.map((response) => [response.response_id, response]))
+  const processed: LiveCluster[] = []
+
+  for (const cluster of clusters) {
+    const rows = cluster.response_ids
+      .map((id) => responseMap.get(id))
+      .filter(Boolean) as ProcessedInputResponse[]
+    const bareRows = rows.filter((row) => row.bare)
+    const explainedRows = rows.filter((row) => !row.bare)
+
+    if (explainedRows.length > 0) {
+      processed.push(
+        buildClusterFromResponses(cluster.label, cluster.summary, explainedRows, processed.length, {
+          conceptual_alignment: cluster.conceptual_alignment,
+          understanding_bucket: cluster.understanding_bucket,
+          teacher_note: cluster.teacher_note,
+        })
+      )
+    }
+
+    const groupedBareRows = new Map<string, ProcessedInputResponse[]>()
+    for (const row of bareRows) {
+      const key = getBareClusterKey(row, referenceDirection)
+      groupedBareRows.set(key, [...(groupedBareRows.get(key) || []), row])
+    }
+
+    for (const key of ['correct', 'wrong', 'uncertain', 'unknown']) {
+      const groupRows = groupedBareRows.get(key)
+      if (!groupRows || groupRows.length === 0) continue
+      const descriptor = getBareClusterDescriptor(groupRows, referenceDirection)
+      processed.push(
+        buildClusterFromResponses(descriptor.label, descriptor.summary, groupRows, processed.length, {
+          conceptual_alignment: 0,
+          understanding_bucket: 'unclear',
+          teacher_note: appendBareTeacherNote(null, groupRows),
+        })
+      )
+    }
+  }
+
+  return validateExactResponseCoverage(processed, responses)
+}
+
+function validateExactResponseCoverage(clusters: LiveCluster[], responses: ProcessedInputResponse[]) {
+  const expectedIds = new Set(responses.map((response) => response.response_id))
+  const seen = new Set<string>()
+  const duplicateIds = new Set<string>()
+
+  for (const cluster of clusters) {
+    for (const id of cluster.response_ids) {
+      if (seen.has(id)) duplicateIds.add(id)
+      seen.add(id)
+    }
+  }
+
+  const missingIds = [...expectedIds].filter((id) => !seen.has(id))
+  const unknownIds = [...seen].filter((id) => !expectedIds.has(id))
+  if (missingIds.length > 0 || duplicateIds.size > 0 || unknownIds.length > 0) {
+    console.warn('[live-clustering] local cluster coverage repair needed', {
+      missing_response_ids: missingIds,
+      duplicate_response_ids: [...duplicateIds],
+      unknown_response_ids: unknownIds,
+    })
+
+    const responseMap = new Map(responses.map((response) => [response.response_id, response]))
+    const repaired: LiveCluster[] = []
+    const assigned = new Set<string>()
+    for (const cluster of clusters) {
+      const rows = cluster.response_ids
+        .filter((id) => expectedIds.has(id) && !assigned.has(id))
+        .map((id) => responseMap.get(id)!)
+        .filter(Boolean)
+      if (rows.length === 0) continue
+      rows.forEach((row) => assigned.add(row.response_id))
+      repaired.push(
+        buildClusterFromResponses(cluster.label, cluster.summary, rows, repaired.length, {
+          conceptual_alignment: cluster.conceptual_alignment,
+          understanding_bucket: cluster.understanding_bucket,
+          teacher_note: cluster.teacher_note,
+        })
+      )
+    }
+
+    const repairedMissingRows = responses.filter((response) => !assigned.has(response.response_id))
+    if (repairedMissingRows.length > 0) {
+      repaired.push(
+        buildClusterFromResponses(
+          'Additional response patterns',
+          'Responses that were omitted during local validation were merged into a final catch-all group.',
+          repairedMissingRows,
+          repaired.length,
+          {
+            conceptual_alignment: 0,
+            understanding_bucket: 'unclear',
+            teacher_note: 'These responses were added locally to preserve exact response coverage.',
+          }
+        )
+      )
+    }
+
+    return repaired
+  }
+
+  return clusters.map((cluster, index) => ({
+    ...cluster,
+    cluster_id: `cluster_${index + 1}`,
+    count: cluster.response_ids.length,
+  }))
 }
 
 function buildFallbackClusters(
@@ -298,20 +579,27 @@ export async function clusterLiveQuestionResponses(input: {
   responses: InputResponse[]
 }): Promise<LiveQuestionClusterAnalysis> {
   const cleanedResponses = input.responses
-    .map((response) => ({
-      response_id: String(response.response_id),
-      answer: String(response.answer || '').trim(),
-      confidence: Math.max(1, Math.min(5, Math.round(Number(response.confidence) || 0))),
-    }))
+    .map((response): ProcessedInputResponse => {
+      const answer = String(response.answer || '').trim()
+      const bareClassification = classifyBareAnswer(answer)
+      return {
+        response_id: String(response.response_id),
+        answer,
+        confidence: Math.max(1, Math.min(5, Math.round(Number(response.confidence) || 0))),
+        bare: bareClassification.bare,
+        bare_answer_kind: bareClassification.bare_answer_kind,
+      }
+    })
     .filter((response) => response.response_id && response.answer)
 
   if (cleanedResponses.length === 0) {
     throw new LiveClusteringError('no_responses', 'No responses are available for this question attempt.')
   }
 
+  const referenceDirection = inferReferenceDirection(input.correctAnswer)
   const numberedResponses = cleanedResponses
     .map((response, index) => {
-      return `${index + 1}. response_id=${response.response_id}\nconfidence=${response.confidence}\nanswer=${response.answer}`
+      return `${index + 1}. response_id=${response.response_id}\nconfidence=${response.confidence}\nbare=${response.bare}\nanswer=${response.answer}`
     })
     .join('\n\n')
 
@@ -397,7 +685,8 @@ export async function clusterLiveQuestionResponses(input: {
           '- Use strong_alignment only when the shared reasoning clearly matches the target concept and is specific enough to interpret.',
           '- Use mixed_reasoning for partial, conditional, or incomplete reasoning.',
           '- Use needs_attention for clear misconceptions.',
-          '- Use unclear only when responses are too vague to interpret.',
+          '- Responses marked bare=true contain no reasoning. Always place them in a separate cluster from explained responses. Set understanding_bucket to unclear. Do not split bare responses further by confidence.',
+          '- Use unclear for bare responses and for explained responses that are too vague to interpret.',
           '- Treat the reference answer as guidance, not an absolute answer key.',
           '- Do not penalize a response only because it differs from the reference answer; evaluate the reasoning.',
         ].join('\n\n'),
@@ -414,16 +703,24 @@ export async function clusterLiveQuestionResponses(input: {
     const fallback = buildFallbackClusters(cleanedResponses, fallbackReason, result.rawText || null)
     fallback.question_prompt = input.questionPrompt
     fallback.attempt_type = input.attemptType
+    fallback.clusters = postProcessBareAnswerClusters(fallback.clusters, cleanedResponses, referenceDirection)
+    fallback.cluster_count = fallback.clusters.length
     return fallback
   }
 
   const rawClusters = Array.isArray(result.json?.clusters) ? result.json.clusters : []
-  const clusters = sanitizeModelClusters(rawClusters, cleanedResponses)
+  const clusters = postProcessBareAnswerClusters(
+    sanitizeModelClusters(rawClusters, cleanedResponses),
+    cleanedResponses,
+    referenceDirection
+  )
   if (clusters.length === 0) {
     const fallbackReason = 'OpenAI returned cluster JSON, but it could not be mapped to the submitted responses.'
     const fallback = buildFallbackClusters(cleanedResponses, fallbackReason, result.rawText || null)
     fallback.question_prompt = input.questionPrompt
     fallback.attempt_type = input.attemptType
+    fallback.clusters = postProcessBareAnswerClusters(fallback.clusters, cleanedResponses, referenceDirection)
+    fallback.cluster_count = fallback.clusters.length
     return fallback
   }
 

@@ -3,6 +3,7 @@ import { getTeacherSession } from '@/lib/teacher-auth'
 import { clusterLiveQuestionResponses, LiveClusteringError } from '@/lib/ai/live-question-clustering'
 import { getUnionFindQuestionContext } from '@/lib/ai/union-find-question-config'
 import {
+  carryForwardMissingRevisionResponses,
   closeCurrentQuestion,
   createAnalysisRun,
   getLatestQuestionAnalysisRun,
@@ -153,6 +154,26 @@ export async function POST(request: NextRequest) {
     ) {
       await retryOperation(() => closeCurrentQuestion(sessionId, attemptType))
       closedInThisRequest = true
+    }
+
+    const sessionAfterPotentialClose = closedInThisRequest
+      ? await retryOperation(() => getSession(sessionId))
+      : session
+
+    if (
+      session.condition === 'treatment' &&
+      attemptType === 'revision' &&
+      (sessionAfterPotentialClose.live_phase === 'question_revision_closed' ||
+        sessionAfterPotentialClose.live_phase === 'session_completed')
+    ) {
+      const carryForwardResult = await retryOperation(() =>
+        carryForwardMissingRevisionResponses(sessionId, question.question_id)
+      )
+      if (carryForwardResult.carriedForwardCount > 0) {
+        console.info(
+          `[live-analysis] carried_forward_revision_responses session_id=${sessionId} question_id=${question.question_id} initial_count=${carryForwardResult.initialResponseCount} existing_revision_count=${carryForwardResult.existingRevisionCount} carried_forward_count=${carryForwardResult.carriedForwardCount}`
+        )
+      }
     }
 
     const responses = (await retryOperation(() => getSessionResponses(sessionId))).filter((response) => {

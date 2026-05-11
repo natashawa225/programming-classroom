@@ -408,10 +408,104 @@ export async function closeCurrentQuestion(sessionId: string, attemptType: Attem
   })
 }
 
+export async function carryForwardMissingRevisionResponses(sessionId: string, questionId: string) {
+  await assertTeacherAuthenticated()
+  const supabase = createAdminClient()
+
+  const { data: initialRows, error: initialError } = await supabase
+    .from('responses')
+    .select(
+      `
+      response_id,
+      session_id,
+      session_participant_id,
+      question_id,
+      answer,
+      confidence,
+      time_taken_seconds
+    `
+    )
+    .eq('session_id', sessionId)
+    .eq('question_id', questionId)
+    .eq('attempt_type', 'initial')
+
+  if (initialError) throw initialError
+
+  const initialResponses = (initialRows || []).filter((row) => row.session_participant_id)
+  if (initialResponses.length === 0) {
+    return {
+      initialResponseCount: 0,
+      existingRevisionCount: 0,
+      carriedForwardCount: 0,
+    }
+  }
+
+  const { data: revisionRows, error: revisionError } = await supabase
+    .from('responses')
+    .select('session_participant_id')
+    .eq('session_id', sessionId)
+    .eq('question_id', questionId)
+    .eq('attempt_type', 'revision')
+
+  if (revisionError) throw revisionError
+
+  const revisionParticipantIds = new Set(
+    (revisionRows || [])
+      .map((row) => row.session_participant_id)
+      .filter(Boolean)
+  )
+  const missingRevisionRows = initialResponses.filter((row) => {
+    return row.session_participant_id && !revisionParticipantIds.has(row.session_participant_id)
+  })
+
+  if (missingRevisionRows.length === 0) {
+    return {
+      initialResponseCount: initialResponses.length,
+      existingRevisionCount: revisionRows?.length ?? 0,
+      carriedForwardCount: 0,
+    }
+  }
+
+  const { data: insertedRows, error: insertError } = await supabase
+    .from('responses')
+    .upsert(
+      missingRevisionRows.map((row) => ({
+        session_id: sessionId,
+        session_participant_id: row.session_participant_id,
+        question_id: questionId,
+        question_type: 'revision',
+        attempt_type: 'revision',
+        round_number: 2,
+        answer: row.answer,
+        confidence: normalizeConfidence(Number(row.confidence)),
+        explanation: null,
+        is_correct: null,
+        time_taken_seconds: row.time_taken_seconds ?? null,
+        original_response_id: row.response_id,
+      })),
+      {
+        onConflict: 'session_id,session_participant_id,question_id,round_number',
+        ignoreDuplicates: true,
+      }
+    )
+    .select('response_id')
+
+  if (insertError) throw insertError
+
+  return {
+    initialResponseCount: initialResponses.length,
+    existingRevisionCount: revisionRows?.length ?? 0,
+    carriedForwardCount: insertedRows?.length ?? missingRevisionRows.length,
+  }
+}
+
 export async function moveToNextQuestion(sessionId: string, timerSeconds?: number | null) {
   const session = await getSession(sessionId)
   if (session.live_phase !== 'question_initial_closed' && session.live_phase !== 'question_revision_closed') {
     throw new Error('You can only move to the next question after the current step has been closed.')
+  }
+  if (session.condition === 'treatment' && session.live_phase !== 'question_revision_closed') {
+    throw new Error('Open and close revision before moving to the next question.')
   }
   const questions = await getSessionQuestions(sessionId)
   const nextPosition = session.current_question_position + 1
@@ -438,6 +532,20 @@ export async function moveToNextQuestion(sessionId: string, timerSeconds?: numbe
 }
 
 export async function completeSession(sessionId: string) {
+  const session = await getSession(sessionId)
+  const questions = await getSessionQuestions(sessionId)
+  const lastPosition = Math.max(...questions.map((question) => question.position))
+
+  if (questions.length > 0 && session.current_question_position !== lastPosition) {
+    throw new Error('Move through all questions before ending the session.')
+  }
+  if (session.condition === 'treatment' && session.live_phase !== 'question_revision_closed') {
+    throw new Error('Open and close revision for the last question before ending the session.')
+  }
+  if (session.condition === 'baseline' && session.live_phase !== 'question_initial_closed') {
+    throw new Error('Close the last question before ending the session.')
+  }
+
   return updateSessionLiveFields(sessionId, {
     status: 'closed',
     live_phase: 'session_completed',
