@@ -138,10 +138,12 @@ function getClusterCategory(input: {
   if (bucket === 'needs_attention') return 'misconception'
   if (bucket === 'unclear') return 'uncertain'
 
-  // mixed_reasoning depends on alignment
+  // mixed_reasoning: use alignment to decide, default to uncertain (not misconception)
+  // Previously this was too aggressive — mixed_reasoning at 0.3 alignment was being
+  // treated as uncertain when it should surface as a partial/misconception signal.
   if (bucket === 'mixed_reasoning') {
-    if (alignment !== null && alignment >= 0.6) return 'correct'
-    if (alignment !== null && alignment <= -0.3) return 'misconception'
+    if (alignment !== null && alignment >= 0.5) return 'correct'
+    if (alignment !== null && alignment <= -0.1) return 'misconception'
     return 'uncertain'
   }
 
@@ -389,12 +391,13 @@ function extractConceptFromPrompt(prompt: string) {
 }
 
 function deriveFallbackSummary(questionSummaries: SessionQuestionSummary[]) {
-  const misconceptionMap = new Map<string, { count: number; questions: number[] }>()
+  const misconceptionMap = new Map<string, { count: number; questions: number[]; summary: string | null }>()
 
   for (const question of questionSummaries) {
     const label = question.revision?.topIncorrectClusterLabel || question.initial.topIncorrectClusterLabel
+    const summary = question.revision?.topIncorrectClusterSummary || question.initial.topIncorrectClusterSummary
     if (!label) continue
-    const current = misconceptionMap.get(label) || { count: 0, questions: [] }
+    const current = misconceptionMap.get(label) || { count: 0, questions: [], summary: summary || null }
     current.count += 1
     if (!current.questions.includes(question.position)) {
       current.questions.push(question.position)
@@ -403,12 +406,19 @@ function deriveFallbackSummary(questionSummaries: SessionQuestionSummary[]) {
   }
 
   const ranked = Array.from(misconceptionMap.entries()).sort((a, b) => b[1].count - a[1].count)
+
+  // Format as "Label. Description sentence." so frontend sentence-splitting works correctly
   const recurringPatterns =
     ranked.slice(0, 3).map(([label, info]) => {
-      return `${label} appeared in question${info.questions.length === 1 ? '' : 's'} ${info.questions.join(', ')}.`
-    }) || []
+      const description = info.summary
+        ? info.summary
+        : `Appeared in question${info.questions.length === 1 ? '' : 's'} ${info.questions.join(', ')}.`
+      return `${label}. ${description}`
+    })
 
-  const topMisconception = ranked[0]?.[0] || 'the main misconception'
+  const topMisconception = ranked[0]?.[0] || null
+  const topMisconceptionSummary = ranked[0]?.[1]?.summary || null
+
   const improvementQuestion =
     questionSummaries
       .filter((question) => question.revision)
@@ -418,73 +428,104 @@ function deriveFallbackSummary(questionSummaries: SessionQuestionSummary[]) {
         return deltaB - deltaA
       })[0] || questionSummaries[0]
 
+  const nextTeachingRecommendation = topMisconception
+    ? topMisconceptionSummary
+      ? `Address the misconception from Q${ranked[0][1].questions[0]}: ${topMisconceptionSummary} Consider a contrast example that directly shows the difference.`
+      : `Revisit "${topMisconception}" with a worked contrast example at the start of the next class.`
+    : `Open next class with a short recap of the session's core concept.`
+
   return {
     recurringPatterns:
       recurringPatterns.length > 0
         ? recurringPatterns
-        : ['Student answers showed a small set of recurring misconception patterns across the session.'],
-    sessionTakeaway: `Students showed improvement in ${extractConceptFromPrompt(improvementQuestion?.prompt || '')}, but struggled with ${topMisconception}.`,
-    nextTeachingRecommendation: `Revisit ${topMisconception} with a contrast example.`,
+        : ['Students showed recurring misconception patterns across the session. Review cluster summaries per question for details.'],
+    sessionTakeaway: `Students showed improvement in ${extractConceptFromPrompt(improvementQuestion?.prompt || '')}, but struggled with ${topMisconception || 'core concepts'}.`,
+    nextTeachingRecommendation,
   }
 }
 
 function sanitizeOpenAISummary(value: unknown, fallback: ReturnType<typeof deriveFallbackSummary>) {
   const input = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
-  const recurringPatterns = Array.isArray(input.recurringPatterns)
-    ? input.recurringPatterns.map((entry) => String(entry || '').trim()).filter(Boolean).slice(0, 3)
-    : []
+
+  // recurringPatterns: must be "Label. Description." format — validate each entry has a period separator
+  const rawPatterns = Array.isArray(input.recurringPatterns) ? input.recurringPatterns : []
+  const recurringPatterns = rawPatterns
+    .map((entry) => String(entry || '').trim())
+    .filter((entry) => entry.length > 0)
+    .slice(0, 3)
+
   const sessionTakeaway =
     typeof input.sessionTakeaway === 'string' && input.sessionTakeaway.trim()
       ? input.sessionTakeaway.trim()
       : fallback.sessionTakeaway
 
+  const nextTeachingRecommendation =
+    typeof input.nextTeachingRecommendation === 'string' && input.nextTeachingRecommendation.trim()
+      ? input.nextTeachingRecommendation.trim()
+      : fallback.nextTeachingRecommendation
+
   return {
     recurringPatterns: recurringPatterns.length > 0 ? recurringPatterns : fallback.recurringPatterns,
     sessionTakeaway,
-    nextTeachingRecommendation: fallback.nextTeachingRecommendation,
+    nextTeachingRecommendation,
   }
 }
 
-async function generateOpenAISummary(questionSummaries: SessionQuestionSummary[], fallback: ReturnType<typeof deriveFallbackSummary>) {
+async function generateOpenAISummary(
+  questionSummaries: SessionQuestionSummary[],
+  fallback: ReturnType<typeof deriveFallbackSummary>
+) {
+  // Pass richer per-question context: both correct and misconception clusters,
+  // plus delta between rounds so the model can reason about what changed.
   const compactQuestionData = questionSummaries.map((question) => ({
     position: question.position,
-    topMisconception: question.revision?.topIncorrectClusterLabel || question.initial.topIncorrectClusterLabel,
-    misconceptionSummary: question.revision?.topIncorrectClusterSummary || question.initial.topIncorrectClusterSummary,
+    prompt: question.prompt.slice(0, 120),
+    initial: {
+      correctCluster: question.initial.topCorrectClusterLabel,
+      correctSummary: question.initial.topCorrectClusterSummary,
+      misconceptionCluster: question.initial.topIncorrectClusterLabel,
+      misconceptionSummary: question.initial.topIncorrectClusterSummary,
+      correctCount: question.initial.correctCount,
+      misconceptionCount: question.initial.incorrectCount,
+      uncertainCount: question.initial.uncertainCount,
+    },
+    revision: question.revision
+      ? {
+          correctCluster: question.revision.topCorrectClusterLabel,
+          correctSummary: question.revision.topCorrectClusterSummary,
+          misconceptionCluster: question.revision.topIncorrectClusterLabel,
+          misconceptionSummary: question.revision.topIncorrectClusterSummary,
+          correctCount: question.revision.correctCount,
+          misconceptionCount: question.revision.incorrectCount,
+          uncertainCount: question.revision.uncertainCount,
+          misconceptionShift: question.misconceptionShift,
+        }
+      : null,
   }))
 
   const result = await openaiChatJson({
-    timeoutMs: 18000,
-    maxTokens: 500,
+    timeoutMs: 20000,
+    maxTokens: 700,
     messages: [
       {
         role: 'system',
-        content:
-          `You summarize a classroom session for a teacher.
+        content: `You summarize a classroom session for a teacher preparing their next lesson.
 
-Return JSON only with:
-- recurringPatterns: 2–3 short conceptual misconceptions shared across questions
-- sessionTakeaway: one short sentence capturing the core misunderstanding
+Return JSON only with exactly these three fields:
+- recurringPatterns: array of 2–3 strings, each in the format "Short label. One concrete sentence explaining the thinking error and which questions it appeared in."
+- sessionTakeaway: one sentence (max 20 words) capturing the single most important thing the teacher should know about this class.
+- nextTeachingRecommendation: one concrete, specific action the teacher should take at the start of next class. Name the concept, suggest a specific move (e.g. "show a counterexample of X", "cold-call on the difference between X and Y"). Max 30 words.
 
 Rules:
-- Focus on underlying thinking errors, not question-specific wording
-- Use abstract, reusable labels (e.g., "direct-only thinking", "local vs global confusion")
-- Do NOT repeat question text
-- Do NOT describe individual questions
-- Do NOT restate student answers
-- Keep each pattern under 10 words
-- Keep the takeaway under 15 words
-- Prioritize patterns that affect multiple questions
-`,
+- recurringPatterns must describe the underlying thinking error, not just restate the question topic.
+- Each pattern string must have exactly two parts separated by a period and space: a short label (4–7 words), then one sentence of explanation.
+- sessionTakeaway must reflect the whole session, not just one question.
+- nextTeachingRecommendation must be specific enough that the teacher knows exactly what to do. Never say "revisit" or "review" without naming the specific concept and teaching move.
+- If revision data is available, prioritize misconceptions that persisted after revision (misconceptionShift shows no improvement).`,
       },
       {
         role: 'user',
-        content: JSON.stringify({
-          questions: compactQuestionData,
-          fallbackReference: {
-            recurringPatterns: fallback.recurringPatterns,
-            sessionTakeaway: fallback.sessionTakeaway,
-          },
-        }),
+        content: JSON.stringify({ questions: compactQuestionData }),
       },
     ],
   })

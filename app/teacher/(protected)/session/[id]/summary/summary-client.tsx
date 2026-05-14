@@ -149,6 +149,7 @@ export default function SummaryClient({
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [expandedQuestionId, setExpandedQuestionId] = useState<string | null>(null)
 
   const isBaseline = sessionCondition === 'baseline'
   const patternCards = useMemo(
@@ -378,47 +379,83 @@ export default function SummaryClient({
                 </div>
               </div>
 
-              <div className="mt-5 grid gap-5 2xl:grid-cols-2">
+              <div className="mt-5 space-y-3">
                 {summary.questionSummaries.map((question) => {
                   const confidenceDelta = getQuestionConfidenceDelta(question)
+                  const isExpanded = expandedQuestionId === question.questionId
 
                   return (
-                    <article key={question.questionId} className="rounded-2xl border border-slate-200 bg-slate-50 p-5 shadow-sm">
-                      <div className="flex items-start justify-between gap-3">
-                        <Badge className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-700 shadow-none">
-                          Q{question.position}
-                        </Badge>
-                        {!isBaseline && question.misconceptionShift ? (
-                          <Badge className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 shadow-none">
-                            Shift: {question.misconceptionShift}
+                    <article key={question.questionId} className="rounded-2xl border border-slate-200 bg-slate-50 shadow-sm">
+                      <div className="flex flex-col gap-3 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
+                        <div className="flex min-w-0 items-start gap-3">
+                          <Badge className="mt-0.5 shrink-0 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-700 shadow-none">
+                            Q{question.position}
                           </Badge>
-                        ) : null}
-                      </div>
-
-                      <h3 className="mt-4 text-lg font-semibold tracking-tight text-slate-900">{truncatePrompt(question.prompt)}</h3>
-
-                      <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                        <InsightRow label="Responses" value={String(question.initial.responseCount)} />
-                        <InsightRow label="Avg confidence" value={formatConfidence(question.initial.averageConfidence)} />
-                        <InsightRow label="Top correct cluster" value={question.initial.topCorrectClusterLabel || 'None detected'} />
-                        <InsightRow label="Top misconception" value={question.initial.topIncorrectClusterLabel || 'None detected'} />
-                      </div>
-
-                      <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
-                        <p className="text-sm font-medium text-amber-800">Misconception summary</p>
-                        <p className="mt-2 text-sm leading-7 text-amber-900/80">
-                          {question.initial.topIncorrectClusterSummary || 'No misconception summary was generated for this question.'}
-                        </p>
-                      </div>
-
-                      {!isBaseline && question.revision ? (
-                        <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
-                          <div className="grid gap-3 sm:grid-cols-2">
-                            <InsightRow label="Revision responses" value={String(question.revision.responseCount)} />
-                            <InsightRow label="Revision confidence" value={formatConfidence(question.revision.averageConfidence)} />
-                            <InsightRow label="Confidence change" value={formatDelta(confidenceDelta)} />
-                            <InsightRow label="Revision misconception" value={question.revision.topIncorrectClusterLabel || 'None detected'} />
+                          <div className="min-w-0">
+                            <h3 className="text-sm font-semibold leading-6 text-slate-900">{truncatePrompt(question.prompt)}</h3>
+                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                              <span>{question.initial.responseCount} initial responses</span>
+                              <span className="text-slate-300">•</span>
+                              <span>{formatConfidence(question.initial.averageConfidence)} avg confidence</span>
+                              <span className="text-slate-300">•</span>
+                              <span className="font-medium text-amber-700">
+                                {question.initial.topIncorrectClusterLabel || 'None detected'}
+                              </span>
+                            </div>
                           </div>
+                        </div>
+
+                        <div className="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">
+                          {!isBaseline && question.misconceptionShift ? (
+                            <Badge className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 shadow-none">
+                              Shift: {question.misconceptionShift}
+                            </Badge>
+                          ) : null}
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="rounded-full border-slate-200 bg-white px-4"
+                            aria-expanded={isExpanded}
+                            onClick={() => setExpandedQuestionId(isExpanded ? null : question.questionId)}
+                          >
+                            {isExpanded ? 'Hide details' : 'View details'}
+                          </Button>
+                        </div>
+                      </div>
+
+                      {isExpanded ? (
+                        <div className="border-t border-slate-200 px-4 py-4">
+                          <div className="rounded-xl border border-slate-200 bg-white p-4">
+                            <p className="text-sm font-medium text-slate-500">Full prompt</p>
+                            <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-slate-800">{question.prompt}</p>
+                          </div>
+
+                          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                            <InsightRow label="Initial responses" value={String(question.initial.responseCount)} />
+                            <InsightRow label="Initial avg confidence" value={formatConfidence(question.initial.averageConfidence)} />
+                            <InsightRow label="Top correct cluster" value={question.initial.topCorrectClusterLabel || 'None detected'} />
+                            <InsightRow label="Top misconception" value={question.initial.topIncorrectClusterLabel || 'None detected'} />
+                          </div>
+
+                          <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+                            <p className="text-sm font-medium text-amber-800">Misconception summary</p>
+                            <p className="mt-2 text-sm leading-7 text-amber-900/80">
+                              {question.initial.topIncorrectClusterSummary || 'No misconception summary was generated for this question.'}
+                            </p>
+                          </div>
+
+                          {!isBaseline && question.revision ? (
+                            <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+                              <p className="mb-3 text-sm font-medium text-emerald-800">Revision details</p>
+                              <div className="grid gap-3 sm:grid-cols-2">
+                                <InsightRow label="Revision responses" value={String(question.revision.responseCount)} />
+                                <InsightRow label="Revision confidence" value={formatConfidence(question.revision.averageConfidence)} />
+                                <InsightRow label="Confidence change" value={formatDelta(confidenceDelta)} />
+                                <InsightRow label="Revision misconception" value={question.revision.topIncorrectClusterLabel || 'None detected'} />
+                              </div>
+                            </div>
+                          ) : null}
                         </div>
                       ) : null}
                     </article>
