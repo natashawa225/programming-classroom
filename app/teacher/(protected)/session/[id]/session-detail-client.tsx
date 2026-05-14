@@ -199,26 +199,55 @@ function getBubbleRadius(count: number, maxCount: number) {
   return clamp(60 + normalized * 72, 60, 132)
 }
 
+function stableHash(value: string) {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
 function getClusterMapPlacements(
   clusters: LiveAnalysisPayload['clusters'],
   version: LiveAnalysisPayload['version'],
   width: number,
-  height: number
+  height: number,
+  options?: {
+    neutralHorizontalOrder?: boolean
+    seed?: string
+  }
 ) {
   if (!clusters.length || width <= 0 || height <= 0) return new Map<string, BubblePlacement>()
 
-  const sorted = clusters.slice().sort((a, b) => b.count - a.count)
+  const sorted = clusters.slice().sort((a, b) => {
+    if (options?.neutralHorizontalOrder) {
+      const seed = options.seed || 'cluster-map'
+      const aHash = stableHash(`${seed}-${a.cluster_id}`)
+      const bHash = stableHash(`${seed}-${b.cluster_id}`)
+      if (aHash !== bHash) return aHash - bHash
+      return a.cluster_id.localeCompare(b.cluster_id)
+    }
+
+    return b.count - a.count
+  })
   const maxCount = sorted.reduce((max, cluster) => Math.max(max, cluster.count), 0)
   const padding = 36
   const placements = new Map<string, BubblePlacement>()
 
-  sorted.forEach((cluster) => {
+  sorted.forEach((cluster, index) => {
     const radius = getBubbleRadius(cluster.count, maxCount)
     const rendered = resolveRenderedCluster(cluster, version)
     const normalizedConfidence = clamp((cluster.average_confidence - 1) / 4, 0, 1)
     const baseY = CHART_AXIS_BOTTOM - normalizedConfidence * (CHART_AXIS_BOTTOM - 92)
-    const x = getClusterBucketX(rendered) * width
-    const y = rendered.resolvedBucket === 'unclear' ? baseY + 18 : baseY
+    const slotWidth = (CHART_AXIS_RIGHT - CHART_AXIS_LEFT) / (sorted.length + 1)
+    const neutralX = CHART_AXIS_LEFT + slotWidth * (index + 1)
+    const x = options?.neutralHorizontalOrder ? neutralX : getClusterBucketX(rendered) * width
+    const y = options?.neutralHorizontalOrder
+      ? baseY
+      : rendered.resolvedBucket === 'unclear'
+        ? baseY + 18
+        : baseY
 
     placements.set(cluster.cluster_id, {
       radius,
@@ -403,14 +432,14 @@ export default function SessionDetailClient({
     (viewedRevisionAnalysis || (session.live_phase === 'session_completed' && viewedRevisionResponseCount > 0))
   )
 
-  const activeAnalysis = compareMode === 'revision' && canCompareRevision ? viewedRevisionAnalysis : viewedInitialAnalysis
+  const viewedAttemptType: AttemptType =
+    compareMode === 'revision' && canCompareRevision ? 'revision' : 'initial'
+  const activeAnalysis = viewedAttemptType === 'revision' ? viewedRevisionAnalysis : viewedInitialAnalysis
   const currentAttemptAnalysis = attemptType === 'revision' ? currentRevisionAnalysis : currentInitialAnalysis
   const currentAnalysisKey = currentQuestion ? `${currentQuestion.question_id}:${attemptType}` : null
   const currentAnalysisStatus =
     (currentAnalysisKey ? analysisStatusByKey[currentAnalysisKey] : null) ||
     (currentAttemptAnalysis ? 'success' : 'idle')
-  const viewedAttemptType: AttemptType =
-    compareMode === 'revision' && canCompareRevision ? 'revision' : 'initial'
   const viewedResponses = useMemo(() => {
     if (!viewedQuestion) return []
     return responses
@@ -763,6 +792,10 @@ export default function SessionDetailClient({
       ? 'Revision shown'
       : 'Responses shown'
   const visibleClusters = activeAnalysis?.clusters ?? []
+  const useTreatmentInitialNeutralLayout = Boolean(
+    session.condition === 'treatment' &&
+    viewedAttemptType === 'initial'
+  )
   const renderedVisibleClusters = useMemo(
     () =>
       activeAnalysis
@@ -773,9 +806,18 @@ export default function SessionDetailClient({
   const bubblePlacements = useMemo(
     () =>
       activeAnalysis
-        ? getClusterMapPlacements(visibleClusters, activeAnalysis.version, CHART_VIEWBOX_WIDTH, CHART_VIEWBOX_HEIGHT)
+        ? getClusterMapPlacements(
+            visibleClusters,
+            activeAnalysis.version,
+            CHART_VIEWBOX_WIDTH,
+            CHART_VIEWBOX_HEIGHT,
+            {
+              neutralHorizontalOrder: useTreatmentInitialNeutralLayout,
+              seed: `${sessionId}-${viewedQuestion?.question_id || 'unknown'}-${viewedAttemptType}`,
+            }
+          )
         : new Map<string, BubblePlacement>(),
-    [activeAnalysis, visibleClusters]
+    [activeAnalysis, sessionId, useTreatmentInitialNeutralLayout, viewedAttemptType, viewedQuestion?.question_id, visibleClusters]
   )
   const closedAttemptType =
     session.live_phase === 'question_revision_closed'
@@ -1044,6 +1086,7 @@ export default function SessionDetailClient({
                   {showV1CompatibilityWarning && (
                     <p className="mt-2 text-xs text-foreground/45">Older v1 analysis is being shown with compatibility placement and cleaned labels.</p>
                   )}
+                  
                 </div>
                 <div className="flex shrink-0 flex-wrap items-center gap-3">
                   {canPostSessionRerunClustering && viewedQuestion && (
@@ -1064,23 +1107,28 @@ export default function SessionDetailClient({
                     </Button>
                   )}
                   {canCompareRevision && (
-                    <div className="flex rounded-full bg-[rgba(238,244,249,0.95)] p-1">
+                    <div className="grid w-[220px] grid-cols-2 rounded-full bg-[rgba(238,244,249,0.95)] p-1">
                       <button
                         type="button"
                         onClick={() => setCompareMode('initial')}
                         className={[
-                          'rounded-full px-4 py-2 text-sm font-medium transition',
-                          compareMode === 'initial' ? 'bg-white text-foreground shadow-sm' : 'text-foreground/58',
+                          'h-9 rounded-full text-center text-sm font-medium transition-colors',
+                          compareMode === 'initial'
+                            ? 'bg-white text-foreground shadow-sm'
+                            : 'text-foreground/58',
                         ].join(' ')}
                       >
                         Initial
                       </button>
+
                       <button
                         type="button"
                         onClick={() => setCompareMode('revision')}
                         className={[
-                          'rounded-full px-4 py-2 text-sm font-medium transition',
-                          compareMode === 'revision' ? 'bg-white text-foreground shadow-sm' : 'text-foreground/58',
+                          'h-9 rounded-full text-center text-sm font-medium transition-colors',
+                          compareMode === 'revision'
+                            ? 'bg-white text-foreground shadow-sm'
+                            : 'text-foreground/58',
                         ].join(' ')}
                       >
                         Revision
@@ -1149,12 +1197,18 @@ export default function SessionDetailClient({
                           <feDropShadow dx="0" dy="10" stdDeviation="12" floodColor="rgba(28,26,36,0.16)" />
                         </filter>
                       </defs>
-                      <rect x="72" y={CHART_LANE_TOP} width={CHART_LANE_WIDTH} height={CHART_LANE_HEIGHT} rx="34" fill="rgba(255,240,236,0.62)" />
-                      <rect x={72 + CHART_LANE_WIDTH + CHART_LANE_GAP} y={CHART_LANE_TOP} width={CHART_LANE_WIDTH} height={CHART_LANE_HEIGHT} rx="34" fill="rgba(242,246,252,0.78)" />
-                      <rect x={72 + (CHART_LANE_WIDTH + CHART_LANE_GAP) * 2} y={CHART_LANE_TOP} width={CHART_LANE_WIDTH} height={CHART_LANE_HEIGHT} rx="34" fill="rgba(236,248,239,0.72)" />
+                      {!useTreatmentInitialNeutralLayout && (
+                        <>
+                          <rect x="72" y={CHART_LANE_TOP} width={CHART_LANE_WIDTH} height={CHART_LANE_HEIGHT} rx="34" fill="rgba(255,240,236,0.62)" />
+                          <rect x={72 + CHART_LANE_WIDTH + CHART_LANE_GAP} y={CHART_LANE_TOP} width={CHART_LANE_WIDTH} height={CHART_LANE_HEIGHT} rx="34" fill="rgba(242,246,252,0.78)" />
+                          <rect x={72 + (CHART_LANE_WIDTH + CHART_LANE_GAP) * 2} y={CHART_LANE_TOP} width={CHART_LANE_WIDTH} height={CHART_LANE_HEIGHT} rx="34" fill="rgba(236,248,239,0.72)" />
+                        </>
+                      )}
                       <line x1={CHART_AXIS_LEFT} y1={CHART_AXIS_BOTTOM} x2={CHART_AXIS_RIGHT} y2={CHART_AXIS_BOTTOM} stroke="rgba(33,29,42,0.16)" strokeWidth="2" />
                       <line x1={CHART_AXIS_LEFT} y1={CHART_AXIS_BOTTOM - 6} x2={CHART_AXIS_LEFT} y2="92" stroke="rgba(33,29,42,0.16)" strokeWidth="2" />
-                      <line x1="600" y1="92" x2="600" y2={CHART_AXIS_BOTTOM + 4} stroke="rgba(33,29,42,0.12)" strokeDasharray="8 10" strokeWidth="2" />
+                      {!useTreatmentInitialNeutralLayout && (
+                        <line x1="600" y1="92" x2="600" y2={CHART_AXIS_BOTTOM + 4} stroke="rgba(33,29,42,0.12)" strokeDasharray="8 10" strokeWidth="2" />
+                      )}
                       <line x1="128" y1="164" x2="1100" y2="164" stroke="rgba(33,29,42,0.08)" strokeDasharray="6 10" strokeWidth="2" />
                       <line x1="128" y1="304" x2="1100" y2="304" stroke="rgba(33,29,42,0.08)" strokeDasharray="6 10" strokeWidth="2" />
                       <line x1="128" y1="444" x2="1100" y2="444" stroke="rgba(33,29,42,0.08)" strokeDasharray="6 10" strokeWidth="2" />
@@ -1170,12 +1224,16 @@ export default function SessionDetailClient({
                       <text x="56" y="518" fill="rgba(33,29,42,0.48)" style={{ fontSize: 13, fontWeight: 500 }}>
                         Low
                       </text>
-                      <text x="176" y="590" textAnchor="middle" fill="rgba(33,29,42,0.68)" style={{ fontSize: 15, fontWeight: 600 }}>
-                        Low
-                      </text>
-                      <text x="1024" y="590" textAnchor="middle" fill="rgba(33,29,42,0.68)" style={{ fontSize: 15, fontWeight: 600 }}>
-                        High
-                      </text>
+                      {!useTreatmentInitialNeutralLayout && (
+                        <>
+                          <text x="176" y="590" textAnchor="middle" fill="rgba(33,29,42,0.68)" style={{ fontSize: 15, fontWeight: 600 }}>
+                            Low
+                          </text>
+                          <text x="1024" y="590" textAnchor="middle" fill="rgba(33,29,42,0.68)" style={{ fontSize: 15, fontWeight: 600 }}>
+                            High
+                          </text>
+                        </>
+                      )}
 
                       {renderedVisibleClusters
                         .slice()
