@@ -59,6 +59,7 @@ export default function StudentRespondPage() {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
+  const [originalResponseId, setOriginalResponseId] = useState<string | null>(null)
   const [startTimeMs, setStartTimeMs] = useState<number>(Date.now())
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null)
   const activeStepKeyRef = useRef<string | null>(null)
@@ -186,6 +187,7 @@ export default function StudentRespondPage() {
           setConfidence(null)
           setSubmitted(false)
           setNote(null)
+          setOriginalResponseId(null)
           setStartTimeMs(Date.now())
           activeStepKeyRef.current = nextStepKey
         }
@@ -199,6 +201,7 @@ export default function StudentRespondPage() {
         }
         setNote(null)
         setSubmitted(false)
+        setOriginalResponseId(null)
         setStartTimeMs(Date.now())
         activeStepKeyRef.current = nextStepKey
       }
@@ -228,14 +231,16 @@ export default function StudentRespondPage() {
             setConfidence(prefill.round2Response.confidence)
             setSubmitted(true)
             setNote('Answer submitted')
+            setOriginalResponseId(prefill.round2Response.original_response_id || null)
             return
           }
 
           if (prefill.round1Response) {
-            if (stepChanged || !submitted) {
+            if (stepChanged) {
               setAnswer(prefill.round1Response.answer)
               setConfidence(prefill.round1Response.confidence)
               setNote('Your original answer has been loaded for revision.')
+              setOriginalResponseId(prefill.round1Response.response_id)
             }
             return
           }
@@ -244,6 +249,7 @@ export default function StudentRespondPage() {
             setAnswer('')
             setConfidence(null)
             setNote('No earlier answer was found, so you can answer from scratch.')
+            setOriginalResponseId(null)
           }
           return
         }
@@ -272,12 +278,14 @@ export default function StudentRespondPage() {
           setConfidence(existing.confidence)
           setSubmitted(true)
           setNote('Answer submitted')
+          setOriginalResponseId(existing.original_response_id || null)
           return
         }
 
         if (questionChanged) {
           setAnswer('')
           setConfidence(null)
+          setOriginalResponseId(null)
         }
       } catch (err) {
         console.error(err)
@@ -325,6 +333,19 @@ export default function StudentRespondPage() {
     try {
       setSubmitting(true)
       setError(null)
+      if (process.env.NODE_ENV !== 'production') {
+        // eslint-disable-next-line no-console
+        console.debug('[student-submit] sending', {
+          sessionId,
+          questionId: currentQuestion.question_id,
+          attemptType,
+          live_phase: session.live_phase,
+          answerLength: answer.trim().length,
+          answerPreview: answer.trim().slice(0, 80),
+          confidence,
+          originalResponseId,
+        })
+      }
 
       const response = await fetch('/api/student/submit-response', {
         method: 'POST',
@@ -336,7 +357,9 @@ export default function StudentRespondPage() {
           questionId: currentQuestion.question_id,
           answerText: answer,
           confidence,
+          attemptType,
           timeTakenSeconds: Math.max(0, Math.floor((Date.now() - startTimeMs) / 1000)),
+          originalResponseId,
         }),
       })
       const payload = await response.json().catch(() => null)
@@ -349,6 +372,9 @@ export default function StudentRespondPage() {
       }
       setSubmitted(true)
       setNote('Answer submitted')
+      if (payload?.response?.original_response_id) {
+        setOriginalResponseId(payload.response.original_response_id)
+      }
     } catch (err) {
       console.error(err)
       setError(err instanceof Error ? err.message : 'Failed to submit your answer.')

@@ -965,6 +965,16 @@ export async function submitResponse(
     .limit(1)
 
   if (responseLookupError) throw responseLookupError
+  if (process.env.NODE_ENV !== 'production') {
+    // eslint-disable-next-line no-console
+    console.debug('[student-submit-db] existing response lookup', {
+      sessionId,
+      questionId,
+      sessionParticipantId,
+      attemptType: requestedAttemptType,
+      existingResponseFound: Boolean(existingResponse && existingResponse.length > 0),
+    })
+  }
   if (existingResponse && existingResponse.length > 0) {
     throw new Error(
       requestedAttemptType === 'revision'
@@ -1035,6 +1045,7 @@ export async function submitStudentResponse(
     questionId: string
     answerText: string
     confidence: number
+    attemptType?: AttemptType | null
     timeTakenSeconds?: number | null
     originalResponseId?: string | null
   }
@@ -1050,6 +1061,13 @@ export async function submitStudentResponse(
 
   if (!attemptType) {
     throw new Error('This question is not accepting responses right now.')
+  }
+  if (data.attemptType && data.attemptType !== attemptType) {
+    throw new Error(
+      data.attemptType === 'revision'
+        ? 'Revision is not open right now.'
+        : 'The current question is not open for initial responses right now.'
+    )
   }
 
   const roundNumber = getRoundNumberForAttemptType(attemptType)
@@ -1068,6 +1086,20 @@ export async function submitStudentResponse(
 
     if (originalError) throw originalError
     originalResponseId = original?.response_id || null
+  }
+
+  if (process.env.NODE_ENV !== 'production') {
+    // eslint-disable-next-line no-console
+    console.debug('[student-submit-db] resolved attempt', {
+      sessionId,
+      questionId: data.questionId,
+      requestedAttemptType: data.attemptType ?? null,
+      allowedAttemptType: attemptType,
+      answerLength: String(data.answerText || '').trim().length,
+      confidence: data.confidence,
+      sessionParticipantId: participation.session_participant_id,
+      originalResponseId,
+    })
   }
 
   const inserted = await submitResponse(
@@ -1095,7 +1127,43 @@ export async function submitStudentResponse(
       .eq('response_id', inserted.response_id)
   }
 
-  return inserted
+  const { data: saved, error: savedError } = await adminSupabase
+    .from('responses')
+    .select(
+      `
+      response_id,
+      session_id,
+      session_participant_id,
+      question_id,
+      question_type,
+      attempt_type,
+      round_number,
+      answer,
+      confidence,
+      explanation,
+      is_correct,
+      time_taken_seconds,
+      original_response_id,
+      created_at
+    `
+    )
+    .eq('response_id', inserted.response_id)
+    .single()
+
+  if (savedError) throw savedError
+
+  if (process.env.NODE_ENV !== 'production') {
+    // eslint-disable-next-line no-console
+    console.debug('[student-submit-db] saved response', {
+      responseId: saved.response_id,
+      attemptType: saved.attempt_type,
+      answerLength: String(saved.answer || '').length,
+      confidence: saved.confidence,
+      originalResponseId: saved.original_response_id,
+    })
+  }
+
+  return saved as Response
 }
 
 export async function getStudentResponse(
