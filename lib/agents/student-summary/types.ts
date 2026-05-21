@@ -175,10 +175,12 @@ export type StudentSummaryJson = {
 export type GenerateStudentSummariesResult = {
   ok: boolean
   analysis_status: 'ok' | 'fallback' | 'partial'
+  source?: 'openai' | 'fallback' | 'mixed'
   memberships_upserted: number
   cluster_feedback_cards_created: number
   summaries_created: number
   fallback_cards_created: number
+  fallback_warnings?: string[]
   warnings: string[]
   errors: string[]
 }

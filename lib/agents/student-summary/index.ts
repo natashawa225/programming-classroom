@@ -8,41 +8,13 @@ import { syncStudentClusterMembershipsForQuestion } from './clustering-agent'
 import { updateMisconceptionMemoryFromSession } from './misconception-memory-agent'
 import { getOrCreateStudentSummary } from './synthesis-agent'
 import type { GenerateStudentSummariesResult } from './types'
+import { formatAgentError, runWithConcurrency } from './reliability'
 
 export { syncStudentClusterMembershipsForQuestion } from './clustering-agent'
 export { generateClusterFeedbackCard } from './cluster-feedback-agent'
 export { updateMisconceptionMemoryFromSession } from './misconception-memory-agent'
 export { computeStudentImprovement } from './improvement-agent'
 export { getOrCreateStudentSummary } from './synthesis-agent'
-
-function formatAgentError(error: unknown) {
-  if (error instanceof Error && error.message.trim()) return error.message
-  if (error && typeof error === 'object') {
-    const candidate = error as {
-      message?: unknown
-      details?: unknown
-      hint?: unknown
-      code?: unknown
-      error?: unknown
-    }
-    const parts = [
-      candidate.message,
-      candidate.details,
-      candidate.hint,
-      candidate.code,
-      candidate.error,
-    ]
-      .map((part) => (typeof part === 'string' ? part.trim() : ''))
-      .filter(Boolean)
-
-    if (parts.length > 0) return parts.join(' | ')
-
-    try {
-      return JSON.stringify(error)
-    } catch {}
-  }
-  return String(error || 'Unknown error')
-}
 
 export async function generateStudentSummariesForSession(sessionId: string): Promise<GenerateStudentSummariesResult> {
   const supabase = createAdminClient()
@@ -87,31 +59,37 @@ export async function generateStudentSummariesForSession(sessionId: string): Pro
     membershipsUpserted += sync.upserted
     warnings.push(...sync.warnings)
 
-    for (const cluster of sync.clusters) {
-      try {
-        const result = await generateClusterFeedbackCard({
-          sessionId,
-          questionId: analysis.question_id,
-          attemptType,
-          questionText: question.prompt,
-          correctAnswer: question.correct_answer,
-          cluster,
-        })
+    const clusterResults = await runWithConcurrency(sync.clusters, 2, async (cluster) => {
+      const result = await generateClusterFeedbackCard({
+        sessionId,
+        questionId: analysis.question_id,
+        attemptType,
+        questionText: question.prompt,
+        correctAnswer: question.correct_answer,
+        cluster,
+      })
+      return { cluster, result }
+    })
+
+    for (const [index, settled] of clusterResults.entries()) {
+      if (settled.status === 'fulfilled') {
+        const { result } = settled.value
         if (result.created) cardsCreated += 1
         if (result.fallbackUsed) fallbackCardsUsed += 1
         if (result.created && result.fallbackUsed) fallbackCardsCreated += 1
-      } catch (error) {
+      } else {
+        const error = settled.reason
         const message = formatAgentError(error)
         console.error('[student-summary] cluster feedback generation failed', {
           sessionId,
           questionId: analysis.question_id,
           attemptType,
-          clusterId: cluster.clusterId,
+          clusterId: sync.clusters[index]?.clusterId,
           error,
           message,
         })
-        errors.push(`Feedback generation failed for ${analysis.question_id}/${cluster.clusterId}: ${message}`)
-        warnings.push(`Fallback feedback was needed for ${cluster.label || cluster.clusterId}.`)
+        errors.push(`Feedback generation failed for ${analysis.question_id}/${sync.clusters[index]?.clusterId || 'unknown_cluster'}: ${message}`)
+        warnings.push('Some cluster feedback could not be generated and may be unavailable for student summaries.')
       }
     }
   }
@@ -126,17 +104,29 @@ export async function generateStudentSummariesForSession(sessionId: string): Pro
 
   if (participantsError) throw participantsError
 
-  for (const participant of participants || []) {
-    if (!participant.participant_id) continue
-    try {
-      const result = await getOrCreateStudentSummary({
-        sessionId,
-        participantId: participant.participant_id,
-      })
+  const participantRows = (participants || []).filter((participant: any) => participant.participant_id)
+  const participantResults = await runWithConcurrency(participantRows, 2, async (participant: any) => {
+    const result = await getOrCreateStudentSummary({
+      sessionId,
+      participantId: participant.participant_id,
+    })
+    return { participantId: participant.participant_id, result }
+  })
+
+  for (const [index, settled] of participantResults.entries()) {
+    if (settled.status === 'fulfilled') {
+      const { result } = settled.value
       if (result.created) summariesCreated += 1
-    } catch (error) {
-      const message = formatAgentError(error)
-      errors.push(`Summary failed for participant ${participant.participant_id}: ${message}`)
+    } else {
+      const participantId = participantRows[index]?.participant_id || 'unknown'
+      const message = formatAgentError(settled.reason)
+      console.error('[student-summary] participant summary generation failed', {
+        sessionId,
+        participantId,
+        error: settled.reason,
+        message,
+      })
+      errors.push(`Summary failed for participant ${participantId}: ${message}`)
     }
   }
 
@@ -150,10 +140,12 @@ export async function generateStudentSummariesForSession(sessionId: string): Pro
   return {
     ok: true,
     analysis_status: analysisStatus,
+    source: fallbackCardsUsed > 0 ? 'mixed' : analysisStatus === 'fallback' ? 'fallback' : 'openai',
     memberships_upserted: membershipsUpserted,
     cluster_feedback_cards_created: cardsCreated,
     summaries_created: summariesCreated,
     fallback_cards_created: fallbackCardsCreated,
+    fallback_warnings: warnings.filter((warning) => warning.toLowerCase().includes('fallback')),
     warnings,
     errors,
   }

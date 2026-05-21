@@ -3,6 +3,7 @@ import { createAdminClient } from '@/lib/supabase/server'
 import type { AttemptType } from '@/lib/types/database'
 import type { ClusterFeedbackCard, ParsedCluster } from './types'
 import { ClusterFeedbackSchema, parseClusterFeedbackOrFallback } from './schemas'
+import { retryOpenAIJson } from './reliability'
 
 const STUDENT_SUMMARY_MODEL_VERSION = 'cluster_feedback_v1'
 
@@ -14,13 +15,32 @@ function fallbackCard(input: {
   modelVersion: string
   fallbackReason?: string | null
 }): Omit<ClusterFeedbackCard, 'id'> {
+  const label = String(input.cluster.label || '').toLowerCase()
+  const summary = String(input.cluster.summary || '').toLowerCase()
+  const noReasoning = label.includes('answer only') || summary.includes('no reasoning') || summary.includes('bare')
+  const unclear =
+    input.cluster.understandingBucket === 'unclear' ||
+    label.includes('unclear') ||
+    label.includes('irrelevant') ||
+    summary.includes('unclear') ||
+    summary.includes('not related')
   const feedback = ClusterFeedbackSchema.parse({
     student_title: 'Review this reasoning pattern',
     reasoning_pattern: input.cluster.label || 'This answer follows a common reasoning pattern.',
-    what_you_understood: 'Your answer shows an attempt to use the relevant concept.',
-    likely_gap: input.cluster.summary || 'One part of the reasoning may need more evidence.',
-    micro_hint: 'Check the key condition in the question and explain why it applies.',
-    try_again_prompt: 'Try rewriting your answer with one extra sentence explaining the final step.',
+    what_you_understood: noReasoning
+      ? 'No reasoning was provided, so the system could not infer understanding from this response.'
+      : unclear
+        ? 'The response was unclear or not related enough to generate specific feedback.'
+        : 'Your answer shows an attempt to use the relevant concept.',
+    likely_gap: noReasoning || unclear
+      ? 'There is not enough explanation here to identify the reasoning clearly.'
+      : input.cluster.summary || 'AI feedback was unavailable for this cluster. Please review your answer and compare it with the class explanation.',
+    micro_hint: noReasoning || unclear
+      ? 'Add one sentence explaining why your answer should be true.'
+      : 'Check the key condition in the question and explain why it applies.',
+    try_again_prompt: noReasoning || unclear
+      ? 'Try rewriting your answer with the reason included.'
+      : 'Try rewriting your answer with one extra sentence explaining the final step.',
     counterexample: 'Compare your answer with a case where the key condition changes the outcome.',
     confidence_check: 'Before trusting the answer, check whether each step is supported by the question.',
     teacher_note: 'Fallback cluster feedback was used because AI feedback generation failed or returned invalid JSON.',
@@ -77,13 +97,10 @@ export async function generateClusterFeedbackCard(input: {
     modelVersion: STUDENT_SUMMARY_MODEL_VERSION,
   })
 
-  const result = await openaiChatJson({
-    maxTokens: 650,
-    timeoutMs: 60000,
-    messages: [
-      {
-        role: 'system',
-        content: [
+  const messages = [
+    {
+      role: 'system' as const,
+      content: [
           'You generate short, supportive feedback for ONE anonymized cluster of student answers.',
           '',
           'Your job is to describe the reasoning pattern, not judge individual students.',
@@ -106,11 +123,11 @@ export async function generateClusterFeedbackCard(input: {
           '- Then identify the smallest missing idea or next step.',
           '- Then give one micro-hint or self-check question.',
           '- Prefer "check whether..." or "try explaining..." over direct correction.',
-        ].join('\n'),
-      },
-      {
-        role: 'user',
-        content: [
+      ].join('\n'),
+    },
+    {
+      role: 'user' as const,
+      content: [
           `Question:\n${input.questionText}`,
           '',
           `Reference answer / expected concept:\n${input.correctAnswer || 'Not provided'}`,
@@ -138,10 +155,23 @@ export async function generateClusterFeedbackCard(input: {
             teacher_note: 'private teacher-facing note: what this cluster suggests and how teacher might respond',
             safety_notes: 'uncertainty/limits, e.g. if representative answers are too short or mixed'
           }, null, 2),
-        ].join('\n'),
-      },
-    ]
-  })
+      ].join('\n'),
+    },
+  ]
+
+  const result = await retryOpenAIJson(
+    () => openaiChatJson({
+      maxTokens: 650,
+      timeoutMs: 60000,
+      messages,
+    }),
+    {
+      operation: 'cluster_feedback',
+      sessionId: input.sessionId,
+      questionId: input.questionId,
+      clusterId: input.cluster.clusterId,
+    }
+  )
 
   if (result.ok) {
     const fallbackFeedback = {
@@ -164,6 +194,13 @@ export async function generateClusterFeedbackCard(input: {
       fallback_reason: parsed.reason,
     }
   } else {
+    console.warn('[student-summary] using fallback cluster feedback', {
+      sessionId: input.sessionId,
+      questionId: input.questionId,
+      attemptType: input.attemptType,
+      clusterId: input.cluster.clusterId,
+      error: result.error,
+    })
     card = fallbackCard({
       sessionId: input.sessionId,
       questionId: input.questionId,

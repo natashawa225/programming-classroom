@@ -119,6 +119,323 @@ function statusTone(status: string): PaletteTone {
   return status === 'Completed' ? 'blue' : 'yellow'
 }
 
+function safeFilenamePart(value: string | null | undefined) {
+  return String(value || 'unknown')
+    .trim()
+    .replace(/[^a-z0-9_-]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase() || 'unknown'
+}
+
+type PdfTextItem = {
+  kind: 'text'
+  text: string
+  x: number
+  y: number
+  size: number
+  bold?: boolean
+}
+
+type PdfRuleItem = {
+  kind: 'rule'
+  x1: number
+  x2: number
+  y: number
+}
+
+type PdfItem = PdfTextItem | PdfRuleItem
+
+function isCjkCharacter(char: string) {
+  const code = char.codePointAt(0) || 0
+  return (
+    (code >= 0x3400 && code <= 0x4dbf) ||
+    (code >= 0x4e00 && code <= 0x9fff) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0x3040 && code <= 0x30ff) ||
+    (code >= 0xac00 && code <= 0xd7af)
+  )
+}
+
+function pdfCharWidthUnit(char: string) {
+  if (/\s/.test(char)) return 0.28
+  if (isCjkCharacter(char)) return 1
+  if (/[A-Z]/.test(char)) return 0.62
+  if (/[a-z0-9]/.test(char)) return 0.52
+  if (/[,.;:!?'"()[\]{}\-_/\\]/.test(char)) return 0.34
+  return 0.62
+}
+
+function approximatePdfTextWidth(text: string, size: number) {
+  return Array.from(text).reduce((sum, char) => sum + pdfCharWidthUnit(char) * size, 0)
+}
+
+function tokenizePdfText(text: string) {
+  const tokens: string[] = []
+  let current = ''
+
+  for (const char of Array.from(text)) {
+    if (/\s/.test(char)) {
+      if (current) {
+        tokens.push(current)
+        current = ''
+      }
+      tokens.push(' ')
+    } else if (isCjkCharacter(char)) {
+      if (current) {
+        tokens.push(current)
+        current = ''
+      }
+      tokens.push(char)
+    } else {
+      current += char
+    }
+  }
+
+  if (current) tokens.push(current)
+  return tokens
+}
+
+function splitOversizedPdfToken(token: string, maxWidth: number, size: number) {
+  const parts: string[] = []
+  let current = ''
+
+  for (const char of Array.from(token)) {
+    const candidate = `${current}${char}`
+    if (current && approximatePdfTextWidth(candidate, size) > maxWidth) {
+      parts.push(current)
+      current = char
+    } else {
+      current = candidate
+    }
+  }
+
+  if (current) parts.push(current)
+  return parts
+}
+
+function wrapPdfText(text: string, maxWidth: number, size: number) {
+  const paragraphs = String(text || '—')
+    .replace(/\t/g, ' ')
+    .split(/\r?\n/)
+  const lines: string[] = []
+
+  for (const paragraph of paragraphs) {
+    const clean = paragraph.replace(/\s+/g, ' ').trim()
+    if (!clean) {
+      lines.push('')
+      continue
+    }
+
+    let current = ''
+
+    for (const token of tokenizePdfText(clean)) {
+      if (token === ' ' && !current) continue
+
+      const tokenWidth = approximatePdfTextWidth(token, size)
+      if (tokenWidth > maxWidth) {
+        if (current) {
+          lines.push(current.trimEnd())
+          current = ''
+        }
+        lines.push(...splitOversizedPdfToken(token, maxWidth, size))
+      } else if (!current) {
+        current = token
+      } else if (approximatePdfTextWidth(`${current}${token}`, size) <= maxWidth) {
+        current = `${current}${token}`
+      } else {
+        lines.push(current.trimEnd())
+        current = token.trimStart()
+      }
+    }
+
+    if (current) lines.push(current.trimEnd())
+  }
+
+  return lines.length > 0 ? lines : ['—']
+}
+
+function pdfHexString(text: string) {
+  const hex = ['FEFF']
+  for (let index = 0; index < text.length; index += 1) {
+    hex.push(text.charCodeAt(index).toString(16).padStart(4, '0').toUpperCase())
+  }
+  return `<${hex.join('')}>`
+}
+
+function buildStudentSummaryPdf(input: {
+  session: StudentHistorySession
+  participantId: string | null
+}) {
+  const pageWidth = 595.28
+  const pageHeight = 841.89
+  const margin = 48
+  const contentWidth = pageWidth - margin * 2
+  const pages: PdfItem[][] = [[]]
+  let y = margin
+
+  const currentPage = () => pages[pages.length - 1]
+  const addPage = () => {
+    pages.push([])
+    y = margin
+  }
+
+  const addText = (
+    text: string,
+    options: {
+      size?: number
+      bold?: boolean
+      indent?: number
+      gapAfter?: number
+      lineHeight?: number
+    } = {}
+  ) => {
+    const size = options.size ?? 10
+    const indent = options.indent ?? 0
+    const lineHeight = options.lineHeight ?? size * 1.45
+    const lines = wrapPdfText(text, contentWidth - indent, size)
+
+    for (const line of lines) {
+      if (y + lineHeight > pageHeight - margin) addPage()
+      currentPage().push({
+        kind: 'text',
+        text: line || ' ',
+        x: margin + indent,
+        y,
+        size,
+        bold: options.bold,
+      })
+      y += lineHeight
+    }
+
+    y += options.gapAfter ?? 8
+  }
+
+  const addRule = () => {
+    if (y + 20 > pageHeight - margin) addPage()
+    y += 6
+    currentPage().push({
+      kind: 'rule',
+      x1: margin,
+      x2: pageWidth - margin,
+      y,
+    })
+    y += 16
+  }
+
+  const addAnswer = (label: string, answer: StudentHistoryAnswer | null, emptyText?: string) => {
+    addText(label, { size: 10, bold: true, gapAfter: 4 })
+    if (!answer) {
+      addText(emptyText || 'Not submitted', { size: 10, indent: 12, gapAfter: 12 })
+      return
+    }
+    addText(`Confidence: ${answer.confidence}/5`, { size: 9, indent: 12, gapAfter: 4 })
+    addText(answer.answer, { size: 10, indent: 12, gapAfter: 12 })
+  }
+
+  addText('Student Session Summary', { size: 20, bold: true, gapAfter: 14, lineHeight: 24 })
+  addText(`Participant ID: ${input.participantId || 'Unknown'}`, { size: 10, gapAfter: 4 })
+  addText(`Session code: ${input.session.sessionCode}`, { size: 10, gapAfter: 4 })
+  addText(`Condition: ${input.session.condition}`, { size: 10, gapAfter: 4 })
+  addText(`Status: ${formatStatus(input.session)}`, { size: 10, gapAfter: 4 })
+  addText(`Joined: ${formatDate(input.session.joinedAt)}`, { size: 10, gapAfter: 14 })
+
+  if (input.session.question) {
+    addText('Session prompt', { size: 12, bold: true, gapAfter: 5 })
+    addText(input.session.question, { size: 10, gapAfter: 14 })
+  }
+
+  addRule()
+
+  if (input.session.questions.length === 0) {
+    addText('No question details are available for this session.', { size: 10 })
+  } else if (input.session.responseCount + input.session.revisionResponseCount === 0) {
+    addText('No responses recorded for this session yet.', { size: 10 })
+  } else {
+    input.session.questions
+      .slice()
+      .sort((a, b) => a.position - b.position)
+      .forEach((question, index) => {
+        if (index > 0) addRule()
+        addText(`Question ${question.position}`, { size: 13, bold: true, gapAfter: 6 })
+        addText(question.prompt, { size: 10, gapAfter: 12 })
+        addAnswer(input.session.condition === 'baseline' ? 'Your response' : 'Initial response', question.initialAnswer)
+        if (input.session.condition === 'treatment') {
+          addAnswer('Revision response', question.revisionAnswer, 'No revision submitted')
+        }
+      })
+  }
+
+  pages.forEach((page, index) => {
+    page.push({
+      kind: 'text',
+      text: `Generated from MeshQuiz student summary · Page ${index + 1} of ${pages.length}`,
+      x: margin,
+      y: pageHeight - 28,
+      size: 8,
+    })
+  })
+
+  const objects: string[] = []
+  const addObject = (body: string) => {
+    objects.push(body)
+    return objects.length
+  }
+
+  const catalogId = addObject('<< /Type /Catalog /Pages 2 0 R >>')
+  const pagesId = addObject('')
+  const fontRegularId = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+  const fontBoldId = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>')
+  const pageIds: number[] = []
+
+  for (const page of pages) {
+    const commands = page
+      .map((item) => {
+        if (item.kind === 'rule') {
+          const pdfY = pageHeight - item.y
+          return `0.82 0.82 0.82 RG 0.8 w ${item.x1.toFixed(2)} ${pdfY.toFixed(2)} m ${item.x2.toFixed(2)} ${pdfY.toFixed(2)} l S`
+        }
+
+        const line = item
+        const font = line.bold ? 'F2' : 'F1'
+        const pdfY = pageHeight - line.y
+        return `BT /${font} ${line.size} Tf 1 0 0 1 ${line.x.toFixed(2)} ${pdfY.toFixed(2)} Tm ${pdfHexString(line.text)} Tj ET`
+      })
+      .join('\n')
+    const contentId = addObject(`<< /Length ${commands.length} >>\nstream\n${commands}\nendstream`)
+    const pageId = addObject(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 ${fontRegularId} 0 R /F2 ${fontBoldId} 0 R >> >> /Contents ${contentId} 0 R >>`)
+    pageIds.push(pageId)
+  }
+
+  objects[pagesId - 1] = `<< /Type /Pages /Kids [${pageIds.map((id) => `${id} 0 R`).join(' ')}] /Count ${pageIds.length} >>`
+
+  let pdf = '%PDF-1.4\n'
+  const offsets = [0]
+  objects.forEach((body, index) => {
+    offsets.push(pdf.length)
+    pdf += `${index + 1} 0 obj\n${body}\nendobj\n`
+  })
+  const xrefOffset = pdf.length
+  pdf += `xref\n0 ${objects.length + 1}\n`
+  pdf += '0000000000 65535 f \n'
+  offsets.slice(1).forEach((offset) => {
+    pdf += `${String(offset).padStart(10, '0')} 00000 n \n`
+  })
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`
+
+  return new Blob([pdf], { type: 'application/pdf' })
+}
+
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
 function formatDate(value: string) {
   if (!value) return 'Unknown date'
   return new Intl.DateTimeFormat(undefined, {
@@ -199,6 +516,7 @@ export default function StudentSessions() {
   const [expandedSessionId, setExpandedSessionId] = useState<string | null>(null)
   const [summaryBySessionId, setSummaryBySessionId] = useState<Record<string, StudentSummary>>({})
   const [summaryLoadingId, setSummaryLoadingId] = useState<string | null>(null)
+  const [pdfGeneratingId, setPdfGeneratingId] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -295,15 +613,26 @@ export default function StudentSessions() {
     }
   }
 
-  const handleExportPdf = () => {
-    window.print()
+  const handleExportPdf = async (session: StudentHistorySession) => {
+    try {
+      setPdfGeneratingId(session.sessionParticipantId)
+      setError(null)
+
+      const pdfBlob = buildStudentSummaryPdf({ session, participantId })
+      downloadBlob(pdfBlob, `student-summary-${safeFilenamePart(participantId)}-${safeFilenamePart(session.sessionCode)}.pdf`)
+    } catch (err) {
+      console.error('Error exporting PDF:', err)
+      setError(err instanceof Error ? err.message : 'Unable to export this session as a PDF.')
+    } finally {
+      setPdfGeneratingId(null)
+    }
   }
 
   if (loading) {
     return (
       <main className="flex min-h-screen items-center justify-center" style={{ backgroundColor: '#fbfbfa' }}>
-        <div className="rounded-2xl border px-5 py-4 text-sm" style={toneStyle('yellow')}>
-          <p style={{ color: palette.yellow.badgeText }}>Loading...</p>
+        <div className="text-xl">
+          <p>Loading...</p>
         </div>
       </main>
     )
@@ -453,11 +782,12 @@ export default function StudentSessions() {
                           <Button
                             type="button"
                             variant="outline"
-                            onClick={handleExportPdf}
+                            onClick={() => handleExportPdf(session)}
                             className="student-summary-print-hide w-full lg:w-auto"
                             style={badgeStyle('purple')}
+                            disabled={pdfGeneratingId === session.sessionParticipantId}
                           >
-                            Export as PDF
+                            {pdfGeneratingId === session.sessionParticipantId ? 'Generating PDF...' : 'Export as PDF'}
                           </Button>
                         </div>
                       </div>

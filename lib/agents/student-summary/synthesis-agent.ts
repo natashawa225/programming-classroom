@@ -4,6 +4,7 @@ import { createAdminClient } from '@/lib/supabase/server'
 import type { ClusterFeedbackCard, StudentSummaryJson } from './types'
 import { computeStudentImprovement } from './improvement-agent'
 import { parseStudentSummaryPolishOrFallback } from './schemas'
+import { retryOpenAIJson } from './reliability'
 
 export const STUDENT_SUMMARY_SCHEMA_VERSION = '2026-05-22-v2'
 const SUMMARY_MODEL_VERSION = 'student_summary_template_v2'
@@ -95,6 +96,7 @@ export async function getOrCreateStudentSummary(input: {
     return { summary: existing.summary_json as StudentSummaryJson, created: false }
   }
 
+  let usedFallbackClusterFeedback = false
   const questionCards = improvements.map((item) => {
     const feedback =
       (item.revision_cluster_id
@@ -104,6 +106,7 @@ export async function getOrCreateStudentSummary(input: {
         ? cardsByKey.get(`${item.question_id}:initial:${item.initial_cluster_id}`)
         : null) ||
       null
+    if (feedback?.fallback_used) usedFallbackClusterFeedback = true
 
     return {
       question_id: item.question_id,
@@ -150,8 +153,9 @@ export async function getOrCreateStudentSummary(input: {
 
   const warnings = compact([
     missingFeedback ? 'Cluster feedback is not available yet because analysis has not been generated for this session.' : null,
+    usedFallbackClusterFeedback ? 'Some feedback used fallback analysis because AI output was unavailable.' : null,
   ])
-  let analysisStatus: StudentSummaryJson['analysis_status'] = missingFeedback ? 'partial' : 'ok'
+  let analysisStatus: StudentSummaryJson['analysis_status'] = usedFallbackClusterFeedback ? 'fallback' : missingFeedback ? 'partial' : 'ok'
   let fallbackUsed = false
   let fallbackReason: string | null = null
 
@@ -188,8 +192,8 @@ export async function getOrCreateStudentSummary(input: {
       'Ask your teacher about any cluster feedback that does not match what you intended.',
     ],
     analysis_status: analysisStatus,
-    fallback_used: fallbackUsed,
-    fallback_reason: fallbackReason,
+    fallback_used: usedFallbackClusterFeedback || fallbackUsed,
+    fallback_reason: usedFallbackClusterFeedback ? 'Some cluster feedback used fallback analysis because AI output was unavailable.' : fallbackReason,
     warnings,
     safety_notes: 'Generated from your answers, confidence, cluster memberships, cached cluster feedback, and student-level misconception memory.',
   }
@@ -239,13 +243,10 @@ export async function getOrCreateStudentSummary(input: {
       }),
       student_misconception_memory: studentMemory || [],
     }
-    const result = await openaiChatJson({
-      maxTokens: 800,
-      timeoutMs: 60000,
-      messages: [
-        {
-          role: 'system',
-          content: [
+    const messages = [
+      {
+        role: 'system' as const,
+        content: [
             'You write concise student-facing learning summaries from structured quiz evidence.',
             'You are not grading the student. You are helping them reflect and decide what to practice next.',
             'Rules:',
@@ -262,11 +263,11 @@ export async function getOrCreateStudentSummary(input: {
             '- Point out one review priority.',
             '- Explain how revision changed the reasoning when revision data exists.',
             '- Give 2-3 concrete next steps.',
-          ].join('\n'),
-        },
-        {
-          role: 'user',
-          content: [
+        ].join('\n'),
+      },
+      {
+        role: 'user' as const,
+        content: [
             `Structured student evidence:\n${JSON.stringify(summaryInput, null, 2)}`,
             'Return exactly this JSON shape:',
             JSON.stringify({
@@ -283,10 +284,21 @@ export async function getOrCreateStudentSummary(input: {
               recommended_next_steps: ['specific action 1', 'specific action 2', 'specific action 3'],
               safety_notes: 'uncertainty or limits',
             }, null, 2),
-          ].join('\n\n'),
-        },
-      ],
-    })
+        ].join('\n\n'),
+      },
+    ]
+    const result = await retryOpenAIJson(
+      () => openaiChatJson({
+        maxTokens: 800,
+        timeoutMs: 60000,
+        messages,
+      }),
+      {
+        operation: 'student_summary_polish',
+        sessionId: input.sessionId,
+        participantId: input.participantId,
+      }
+    )
 
     if (result.ok) {
       const parsed = parseStudentSummaryPolishOrFallback(result.json)
@@ -309,6 +321,11 @@ export async function getOrCreateStudentSummary(input: {
     } else {
       fallbackUsed = true
       fallbackReason = result.error
+      console.warn('[student-summary] using deterministic participant summary fallback', {
+        sessionId: input.sessionId,
+        participantId: input.participantId,
+        error: result.error,
+      })
     }
   }
 
