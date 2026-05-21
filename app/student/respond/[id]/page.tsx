@@ -63,6 +63,11 @@ export default function StudentRespondPage() {
   const [startTimeMs, setStartTimeMs] = useState<number>(Date.now())
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null)
   const activeStepKeyRef = useRef<string | null>(null)
+  const savedDraftRef = useRef<{
+    stepKey: string | null
+    answer: string
+    confidence: number | null
+  }>({ stepKey: null, answer: '', confidence: null })
 
   const currentQuestion = useMemo(() => {
     if (!session) return null
@@ -73,6 +78,10 @@ export default function StudentRespondPage() {
   const canEdit =
     session?.live_phase === 'question_initial_open' || session?.live_phase === 'question_revision_open'
   const activeStepKey = currentQuestion && attemptType ? `${currentQuestion.question_id}:${attemptType}` : null
+  const hasUnsavedChanges =
+    Boolean(canEdit && !submitted && activeStepKey) &&
+    savedDraftRef.current.stepKey === activeStepKey &&
+    (answer !== savedDraftRef.current.answer || confidence !== savedDraftRef.current.confidence)
   const realtimeTables = useMemo(
     () => [
       { table: 'sessions', event: 'UPDATE' as const, filter: `id=eq.${sessionId}` },
@@ -190,6 +199,7 @@ export default function StudentRespondPage() {
           setOriginalResponseId(null)
           setStartTimeMs(Date.now())
           activeStepKeyRef.current = nextStepKey
+          savedDraftRef.current = { stepKey: nextStepKey, answer: '', confidence: null }
         }
         return
       }
@@ -204,6 +214,11 @@ export default function StudentRespondPage() {
         setOriginalResponseId(null)
         setStartTimeMs(Date.now())
         activeStepKeyRef.current = nextStepKey
+        savedDraftRef.current = {
+          stepKey: nextStepKey,
+          answer: questionChanged ? '' : answer,
+          confidence: questionChanged ? null : confidence,
+        }
       }
 
       try {
@@ -232,6 +247,11 @@ export default function StudentRespondPage() {
             setSubmitted(true)
             setNote('Answer submitted')
             setOriginalResponseId(prefill.round2Response.original_response_id || null)
+            savedDraftRef.current = {
+              stepKey: nextStepKey,
+              answer: prefill.round2Response.answer,
+              confidence: prefill.round2Response.confidence,
+            }
             return
           }
 
@@ -241,6 +261,11 @@ export default function StudentRespondPage() {
               setConfidence(null)
               setNote('Your original answer has been loaded for revision.')
               setOriginalResponseId(prefill.round1Response.response_id)
+              savedDraftRef.current = {
+                stepKey: nextStepKey,
+                answer: prefill.round1Response.answer,
+                confidence: null,
+              }
             }
             return
           }
@@ -250,6 +275,7 @@ export default function StudentRespondPage() {
             setConfidence(null)
             setNote('No earlier answer was found, so you can answer from scratch.')
             setOriginalResponseId(null)
+            savedDraftRef.current = { stepKey: nextStepKey, answer: '', confidence: null }
           }
           return
         }
@@ -279,6 +305,11 @@ export default function StudentRespondPage() {
           setSubmitted(true)
           setNote('Answer submitted')
           setOriginalResponseId(existing.original_response_id || null)
+          savedDraftRef.current = {
+            stepKey: nextStepKey,
+            answer: existing.answer,
+            confidence: existing.confidence,
+          }
           return
         }
 
@@ -286,6 +317,7 @@ export default function StudentRespondPage() {
           setAnswer('')
           setConfidence(null)
           setOriginalResponseId(null)
+          savedDraftRef.current = { stepKey: nextStepKey, answer: '', confidence: null }
         }
       } catch (err) {
         console.error(err)
@@ -314,6 +346,18 @@ export default function StudentRespondPage() {
     const interval = window.setInterval(tick, 1000)
     return () => window.clearInterval(interval)
   }, [canEdit, session?.current_timer_seconds, session?.timer_started_at, submitted])
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) return
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [hasUnsavedChanges])
 
   const stateCopy = getStateCopy(session, attemptType, submitted)
 
@@ -372,6 +416,11 @@ export default function StudentRespondPage() {
       }
       setSubmitted(true)
       setNote('Answer submitted')
+      savedDraftRef.current = {
+        stepKey: activeStepKey,
+        answer,
+        confidence,
+      }
       if (payload?.response?.original_response_id) {
         setOriginalResponseId(payload.response.original_response_id)
       }
@@ -381,6 +430,13 @@ export default function StudentRespondPage() {
     } finally {
       setSubmitting(false)
     }
+  }
+
+  const handleBackToDashboard = () => {
+    if (hasUnsavedChanges && !window.confirm('You have unsaved changes. Leave this page?')) {
+      return
+    }
+    router.push('/student/sessions')
   }
 
   if (loading) {
@@ -399,7 +455,12 @@ export default function StudentRespondPage() {
             <h1 className="text-3xl font-bold text-foreground">Student View</h1>
             <p className="mt-1 text-sm text-foreground/60">Session {session?.session_code}</p>
           </div>
-          {/* {anonymizedLabel && <Badge variant="outline">{anonymizedLabel}</Badge>} */}
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={handleBackToDashboard}>
+              My sessions
+            </Button>
+            {/* {anonymizedLabel && <Badge variant="outline">{anonymizedLabel}</Badge>} */}
+          </div>
         </div>
 
         <Card className="p-6">

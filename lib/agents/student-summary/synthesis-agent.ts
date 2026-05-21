@@ -26,8 +26,13 @@ export async function getOrCreateStudentSummary(input: {
   participantId: string
 }) {
   const supabase = createAdminClient()
-  const [{ data: responses, error: responsesError }, { data: memberships, error: membershipsError }, { data: cards, error: cardsError }, { data: studentMemory, error: memoryError }] =
+  const [{ data: session, error: sessionError }, { data: responses, error: responsesError }, { data: memberships, error: membershipsError }, { data: cards, error: cardsError }, { data: studentMemory, error: memoryError }] =
     await Promise.all([
+      supabase
+        .from('sessions')
+        .select('condition')
+        .eq('id', input.sessionId)
+        .maybeSingle(),
       supabase
         .from('responses')
         .select('response_id, question_id, attempt_type, answer, confidence, created_at, session_participants:session_participant_id (participant_id)')
@@ -48,10 +53,13 @@ export async function getOrCreateStudentSummary(input: {
         .eq('participant_id', input.participantId),
     ])
 
+  if (sessionError) throw sessionError
   if (responsesError) throw responsesError
   if (membershipsError) throw membershipsError
   if (cardsError) throw cardsError
   if (memoryError) throw memoryError
+  const sessionCondition = session?.condition === 'baseline' ? 'baseline' : 'treatment'
+  const isBaseline = sessionCondition === 'baseline'
 
   const ownResponses = (responses || []).filter((response: any) => {
     const joined = Array.isArray(response.session_participants)
@@ -78,6 +86,7 @@ export async function getOrCreateStudentSummary(input: {
     memberships,
     cards,
     studentMemory,
+    sessionCondition,
     movementLabels: improvements.map((item) => item.movement_label),
     llmPolish: shouldUseLlmPolish(),
     schemaVersion: STUDENT_SUMMARY_SCHEMA_VERSION,
@@ -150,6 +159,36 @@ export async function getOrCreateStudentSummary(input: {
     confidenceDeltas.length > 0
       ? Math.round((confidenceDeltas.reduce((sum, value) => sum + value, 0) / confidenceDeltas.length) * 10) / 10
       : null
+  const confidenceValues = ownResponses
+    .map((response: any) => Number(response.confidence))
+    .filter((value) => Number.isFinite(value))
+  const averageConfidence =
+    confidenceValues.length > 0
+      ? Math.round((confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length) * 10) / 10
+      : null
+  const totalQuestionCount = improvements.length
+  const baselineStrengths = compact([
+    answeredCount > 0 ? 'You participated in the session questions.' : null,
+    totalQuestionCount > 0 ? `You completed ${answeredCount} out of ${totalQuestionCount} question${totalQuestionCount === 1 ? '' : 's'}.` : null,
+    averageConfidence !== null ? 'You submitted confidence ratings that can help you reflect on certainty.' : null,
+  ])
+  const treatmentStrengths = compact([
+    answeredCount > 0 ? 'You participated in the session questions.' : null,
+    improvedCount > 0 ? 'At least one revision moved toward stronger reasoning.' : null,
+    revisedCount > 0 ? 'You used revision opportunities where available.' : null,
+  ])
+  const baselineConfidenceInsight =
+    averageConfidence !== null
+      ? `Your average confidence was ${averageConfidence.toFixed(1)}/5. Use this as a reflection point alongside the class explanation.`
+      : 'No confidence ratings were recorded for this session.'
+  const treatmentConfidenceInsight =
+    avgConfidenceDelta === null
+      ? 'No confidence change is available for this session.'
+      : avgConfidenceDelta > 0
+        ? `Your confidence increased by ${avgConfidenceDelta.toFixed(1)} on average across comparable attempts.`
+        : avgConfidenceDelta < 0
+          ? `Your confidence decreased by ${Math.abs(avgConfidenceDelta).toFixed(1)} on average, which can reflect more careful self-checking.`
+          : 'Your confidence stayed about the same across comparable attempts.'
 
   const warnings = compact([
     missingFeedback ? 'Cluster feedback is not available yet because analysis has not been generated for this session.' : null,
@@ -162,28 +201,25 @@ export async function getOrCreateStudentSummary(input: {
   let summary: StudentSummaryJson = {
     session_id: input.sessionId,
     participant_id: input.participantId,
-    headline: improvedCount > 0 ? 'You used revision to strengthen some reasoning.' : 'Your answers are ready for review.',
-    overall_summary: `You answered ${answeredCount} question${answeredCount === 1 ? '' : 's'}. ${
-      improvedCount > 0
-        ? `${improvedCount} question${improvedCount === 1 ? '' : 's'} showed movement toward stronger alignment.`
-        : 'Use the question cards below to review your reasoning patterns.'
-    }`,
-    strengths: compact([
-      answeredCount > 0 ? 'You participated in the session questions.' : null,
-      improvedCount > 0 ? 'At least one revision moved toward stronger reasoning.' : null,
-      revisedCount > 0 ? 'You used revision opportunities where available.' : null,
-    ]),
+    headline: isBaseline
+      ? 'Your answers are ready for review.'
+      : improvedCount > 0
+        ? 'You used revision to strengthen some reasoning.'
+        : 'Your answers are ready for review.',
+    overall_summary: isBaseline
+      ? `You answered ${answeredCount} question${answeredCount === 1 ? '' : 's'}. Use the question cards below to review your reasoning patterns.`
+      : `You answered ${answeredCount} question${answeredCount === 1 ? '' : 's'}. ${
+          improvedCount > 0
+            ? `${improvedCount} question${improvedCount === 1 ? '' : 's'} showed movement toward stronger alignment.`
+            : 'Use the question cards below to review your reasoning patterns.'
+        }`,
+    strengths: isBaseline ? baselineStrengths : treatmentStrengths,
     needs_practice: needsReview.length > 0
       ? needsReview.slice(0, 3).map((item) => `Review: ${item.question_text}`)
-      : ['For each answer, practice adding the reason or condition that supports it.'],
-    confidence_insight:
-      avgConfidenceDelta === null
-        ? 'No confidence change is available for this session.'
-        : avgConfidenceDelta > 0
-          ? `Your confidence increased by ${avgConfidenceDelta.toFixed(1)} on average across comparable attempts.`
-          : avgConfidenceDelta < 0
-            ? `Your confidence decreased by ${Math.abs(avgConfidenceDelta).toFixed(1)} on average, which can reflect more careful self-checking.`
-            : 'Your confidence stayed about the same across comparable attempts.',
+      : isBaseline
+        ? ['Practice explaining the reason behind each answer, not just the final answer.']
+        : ['For each answer, practice adding the reason or condition that supports it.'],
+    confidence_insight: isBaseline ? baselineConfidenceInsight : treatmentConfidenceInsight,
     pattern_noticed: null,
     question_cards: questionCards,
     recommended_next_steps: [
@@ -198,7 +234,7 @@ export async function getOrCreateStudentSummary(input: {
     safety_notes: 'Generated from your answers, confidence, cluster memberships, cached cluster feedback, and student-level misconception memory.',
   }
 
-  if (shouldUseLlmPolish()) {
+  if (!isBaseline && shouldUseLlmPolish()) {
     const summaryInput = {
       session_id: input.sessionId,
       participant_id: input.participantId,

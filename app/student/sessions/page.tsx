@@ -452,6 +452,10 @@ function formatStatus(session: StudentHistorySession) {
   return session.status ? session.status.charAt(0).toUpperCase() + session.status.slice(1) : 'Active'
 }
 
+function isCompletedSession(session: StudentHistorySession) {
+  return formatStatus(session) === 'Completed'
+}
+
 function movementDisplayLabel(value: string) {
   const labels: Record<string, string> = {
     strong_improvement: 'Strong improvement',
@@ -613,6 +617,15 @@ export default function StudentSessions() {
     }
   }
 
+  const handleSessionAction = (session: StudentHistorySession) => {
+    if (!isCompletedSession(session)) {
+      router.push(`/student/respond/${session.sessionId}`)
+      return
+    }
+
+    void handleViewSession(session)
+  }
+
   const handleExportPdf = async (session: StudentHistorySession) => {
     try {
       setPdfGeneratingId(session.sessionParticipantId)
@@ -754,14 +767,16 @@ export default function StudentSessions() {
                       <Button
                         type="button"
                         variant="outline"
-                        onClick={() => handleViewSession(session)}
+                        onClick={() => handleSessionAction(session)}
                         style={badgeStyle('blue')}
                       >
-                        {summaryLoadingId === session.sessionParticipantId
-                          ? 'Loading...'
-                          : expandedSessionId === session.sessionParticipantId
-                            ? 'Hide Session'
-                            : 'View Session'}
+                        {!isCompletedSession(session)
+                          ? 'Continue live session'
+                          : summaryLoadingId === session.sessionParticipantId
+                            ? 'Loading...'
+                            : expandedSessionId === session.sessionParticipantId
+                              ? 'Hide summary'
+                              : 'View summary'}
                       </Button>
                     </div>
                   </div>
@@ -805,7 +820,9 @@ export default function StudentSessions() {
                             <div className="mb-4 rounded-xl border p-3 text-sm" style={{ ...toneStyle('blue'), color: palette.blue.badgeText }}>
                               <p className="font-semibold">Some analysis is not available yet</p>
                               <p className="mt-1">
-                                Your answers and revisions are shown, but cluster feedback may be missing because the teacher has not generated analysis for this session yet.
+                                {session.condition === 'baseline'
+                                  ? 'Your answers are shown, but cluster feedback may be missing because the teacher has not generated analysis for this session yet.'
+                                  : 'Your answers and revisions are shown, but cluster feedback may be missing because the teacher has not generated analysis for this session yet.'}
                               </p>
                             </div>
                           )}
