@@ -7,7 +7,7 @@ export async function POST() {
     const all = cookieStore.getAll()
 
     for (const c of all) {
-      if (!c.name.startsWith('sd_sp_')) continue
+      if (!c.name.startsWith('sd_sp_') && c.name !== 'sd_participant') continue
 
       for (const path of ['/student', '/']) {
         cookieStore.set(c.name, '', {

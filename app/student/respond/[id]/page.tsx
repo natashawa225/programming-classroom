@@ -238,7 +238,7 @@ export default function StudentRespondPage() {
           if (prefill.round1Response) {
             if (stepChanged) {
               setAnswer(prefill.round1Response.answer)
-              setConfidence(prefill.round1Response.confidence)
+              setConfidence(null)
               setNote('Your original answer has been loaded for revision.')
               setOriginalResponseId(prefill.round1Response.response_id)
             }

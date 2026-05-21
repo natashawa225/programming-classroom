@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getSession, getSessionParticipantForStudent, getSessionQuestions } from '@/lib/supabase/queries'
+import { getSessionParticipantForStudent, getStudentRespondSessionState } from '@/lib/supabase/queries'
 
 export async function POST(request: NextRequest) {
   try {
@@ -10,16 +10,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing sessionId' }, { status: 400 })
     }
 
-    const [session, participation, questions] = await Promise.all([
-      getSession(sessionId),
+    const [state, participation] = await Promise.all([
+      getStudentRespondSessionState(sessionId),
       getSessionParticipantForStudent(sessionId),
-      getSessionQuestions(sessionId),
     ])
 
     return NextResponse.json({
-      session,
+      session: state.session,
       participation,
-      questions,
+      questions: state.questions,
     })
   } catch (error) {
     console.error('student respond-state error', error)

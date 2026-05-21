@@ -1,7 +1,7 @@
 'use server'
 
 import { cookies } from 'next/headers'
-import { createHash, randomBytes } from 'crypto'
+import { createHash, createHmac, randomBytes } from 'crypto'
 import { createAdminClient, createClient } from './server'
 import type {
   AnalysisRun,
@@ -29,6 +29,8 @@ function sessionParticipantCookieName(sessionId: string) {
   return `sd_sp_${sessionId}`
 }
 
+const studentAccountCookieName = 'sd_participant'
+
 function normalizeSessionCode(sessionCode: string) {
   return sessionCode.trim().toUpperCase().replace(/\s+/g, '')
 }
@@ -43,6 +45,34 @@ function createJoinToken() {
 
 function hashJoinToken(token: string) {
   return createHash('sha256').update(token).digest('hex')
+}
+
+function studentAuthSecret() {
+  return (
+    process.env.STUDENT_AUTH_SECRET ||
+    process.env.NEXTAUTH_SECRET ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    'dev-student-auth-secret'
+  )
+}
+
+function signStudentParticipantId(participantId: string) {
+  return createHmac('sha256', studentAuthSecret()).update(participantId).digest('hex')
+}
+
+function encodeStudentAccountCookie(participantId: string) {
+  return `${participantId}.${signStudentParticipantId(participantId)}`
+}
+
+function decodeStudentAccountCookie(value: string | undefined) {
+  if (!value) return null
+  const separator = value.lastIndexOf('.')
+  if (separator <= 0) return null
+
+  const participantId = normalizeParticipantId(value.slice(0, separator))
+  const signature = value.slice(separator + 1)
+  if (!participantId || signature !== signStudentParticipantId(participantId)) return null
+  return participantId
 }
 
 function verifyParticipantPassword(participant: {
@@ -285,6 +315,36 @@ export async function getSessionQuestions(sessionId: string) {
 
   if (error) throw error
   return (data || []) as SessionQuestion[]
+}
+
+export async function getStudentRespondSessionState(sessionId: string) {
+  const supabase = createAdminClient()
+  const [sessionResult, questionsResult] = await Promise.all([
+    supabase
+      .from('sessions')
+      .select('*')
+      .eq('id', sessionId)
+      .maybeSingle(),
+    supabase
+      .from('session_questions')
+      .select('question_id, session_id, position, prompt, correct_answer, timer_seconds, created_at')
+      .eq('session_id', sessionId)
+      .order('position', { ascending: true }),
+  ])
+
+  if (sessionResult.error) throw sessionResult.error
+  if (questionsResult.error) throw questionsResult.error
+  if (!sessionResult.data) {
+    console.warn('student respond-state session lookup miss', {
+      sessionId,
+    })
+    throw new Error('Session not found')
+  }
+
+  return {
+    session: sessionResult.data as Session,
+    questions: (questionsResult.data || []) as SessionQuestion[],
+  }
 }
 
 export async function getCurrentSessionQuestion(sessionId: string) {
@@ -624,42 +684,67 @@ export async function updateSessionStatus(
   return data as Session
 }
 
-// Session Participants (students join with session_code + student_id or name)
-export async function joinSessionWithParticipantCredentials(data: {
-  sessionCode: string
-  participantId: string
-  password: string
-}) {
+async function getParticipantAccount(participantIdInput: string) {
   const supabase = await createClient()
-  const adminSupabase = createAdminClient()
-  const session = await getSessionByCode(normalizeSessionCode(data.sessionCode))
-  if (session.status === 'closed') {
-    throw new Error('This session is closed.')
-  }
-
-  const participantId = normalizeParticipantId(data.participantId)
+  const participantId = normalizeParticipantId(participantIdInput)
   if (!participantId) throw new Error('Please enter your participant ID.')
-  if (!data.password) throw new Error('Please enter your password.')
 
-  const { data: participant, error: participantError } = await supabase
+  const { data: participant, error } = await supabase
     .from('participants')
     .select('id, participant_id, group_name, password_hash, hash_algo, is_active, created_at')
     .eq('participant_id', participantId)
     .maybeSingle()
 
-  if (participantError) throw participantError
+  if (error) throw error
+  return participant as Participant | null
+}
+
+async function setStudentAccountCookie(participantId: string) {
+  const cookieStore = await cookies()
+  cookieStore.set(studentAccountCookieName, encodeStudentAccountCookie(normalizeParticipantId(participantId)), {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+    maxAge: 60 * 60 * 24 * 30,
+  })
+}
+
+export async function getLoggedInParticipantForStudent() {
+  const cookieStore = await cookies()
+  const participantId = decodeStudentAccountCookie(cookieStore.get(studentAccountCookieName)?.value)
+  if (!participantId) return null
+
+  const participant = await getParticipantAccount(participantId)
+  if (!participant || !participant.is_active) return null
+  return participant
+}
+
+export async function loginStudentParticipant(data: {
+  participantId: string
+  password: string
+}) {
+  const participant = await getParticipantAccount(data.participantId)
   if (!participant) throw new Error('Invalid participant ID or password.')
   if (!participant.is_active) throw new Error('This participant account is inactive.')
   if (participant.hash_algo && !['bcrypt', 'sha256'].includes(participant.hash_algo)) {
     throw new Error('Unsupported password hashing algorithm.')
   }
+  if (!data.password) throw new Error('Please enter your password.')
 
   const ok = verifyParticipantPassword(participant, data.password)
   if (!ok) throw new Error('Invalid participant ID or password.')
 
-  if (participant.group_name !== session.condition) {
-    throw new Error('You are not assigned to this session type.')
+  await setStudentAccountCookie(participant.participant_id)
+  return participant
+}
+
+async function joinSessionForParticipant(session: Session, participant: Participant) {
+  const adminSupabase = createAdminClient()
+  if (session.status === 'closed' || session.live_phase === 'session_completed') {
+    throw new Error('This session is closed.')
   }
+  if (!participant.is_active) throw new Error('This participant account is inactive.')
 
   // 1) If cookie exists and is valid for THIS participant, reuse it (stable across refresh).
   const cookieStore = await cookies()
@@ -788,6 +873,179 @@ export async function joinSessionWithParticipantCredentials(data: {
   }
 }
 
+// Session Participants (students join with a participant account + session code)
+export async function joinSessionWithParticipantCredentials(data: {
+  sessionCode: string
+  participantId: string
+  password: string
+}) {
+  const session = await getSessionByCode(normalizeSessionCode(data.sessionCode))
+  const participant = await loginStudentParticipant({
+    participantId: data.participantId,
+    password: data.password,
+  })
+
+  return joinSessionForParticipant(session, participant)
+}
+
+export async function joinSessionWithLoggedInParticipant(data: {
+  sessionCode: string
+}) {
+  const session = await getSessionByCode(normalizeSessionCode(data.sessionCode))
+  const participant = await getLoggedInParticipantForStudent()
+  if (!participant) throw new Error('Please log in before joining a session.')
+
+  return joinSessionForParticipant(session, participant)
+}
+
+export async function getStudentSessionHistory() {
+  const participant = await getLoggedInParticipantForStudent()
+  if (!participant) throw new Error('Please log in to view your sessions.')
+
+  const supabase = createAdminClient()
+  const { data: joins, error: joinsError } = await supabase
+    .from('session_participants')
+    .select(
+      `
+      session_participant_id,
+      session_id,
+      participant_id,
+      anonymized_label,
+      joined_at,
+      sessions:session_id (
+        id,
+        session_code,
+        question,
+        condition,
+        status,
+        live_phase,
+        created_at
+      )
+    `
+    )
+    .eq('participant_id', participant.participant_id)
+    .order('joined_at', { ascending: false })
+
+  if (joinsError) throw joinsError
+
+  const rows = joins || []
+  const sessionIds = Array.from(new Set(rows.map((row) => row.session_id).filter(Boolean)))
+  const participationIds = rows.map((row) => row.session_participant_id).filter(Boolean)
+  const questionsBySession = new Map<string, Array<{
+    question_id: string
+    position: number
+    prompt: string
+  }>>()
+  const responsesByParticipationQuestion = new Map<string, {
+    initialAnswer: {
+      responseId: string
+      answer: string
+      confidence: number
+      createdAt: string
+    } | null
+    revisionAnswer: {
+      responseId: string
+      answer: string
+      confidence: number
+      createdAt: string
+    } | null
+  }>()
+  const countsByParticipation = new Map<string, { initial: number; revision: number }>()
+
+  if (sessionIds.length > 0) {
+    const { data: questions, error: questionsError } = await supabase
+      .from('session_questions')
+      .select('question_id, session_id, position, prompt')
+      .in('session_id', sessionIds)
+      .order('position', { ascending: true })
+
+    if (questionsError) throw questionsError
+
+    for (const question of questions || []) {
+      const list = questionsBySession.get(question.session_id) || []
+      list.push({
+        question_id: question.question_id,
+        position: question.position,
+        prompt: question.prompt,
+      })
+      questionsBySession.set(question.session_id, list)
+    }
+  }
+
+  if (participationIds.length > 0) {
+    const { data: responses, error: responsesError } = await supabase
+      .from('responses')
+      .select('response_id, session_participant_id, question_id, attempt_type, answer, confidence, created_at')
+      .in('session_participant_id', participationIds)
+      .order('created_at', { ascending: true })
+
+    if (responsesError) throw responsesError
+
+    for (const response of responses || []) {
+      const participationId = response.session_participant_id
+      const questionId = response.question_id
+      if (!participationId || !questionId) continue
+
+      const counts = countsByParticipation.get(participationId) || { initial: 0, revision: 0 }
+      if (response.attempt_type === 'revision') counts.revision += 1
+      else counts.initial += 1
+      countsByParticipation.set(participationId, counts)
+
+      const key = `${participationId}:${questionId}`
+      const current = responsesByParticipationQuestion.get(key) || {
+        initialAnswer: null,
+        revisionAnswer: null,
+      }
+      const answer = {
+        responseId: response.response_id as string,
+        answer: response.answer as string,
+        confidence: Number(response.confidence),
+        createdAt: response.created_at as string,
+      }
+
+      if (response.attempt_type === 'revision') {
+        current.revisionAnswer = answer
+      } else {
+        current.initialAnswer = answer
+      }
+      responsesByParticipationQuestion.set(key, current)
+    }
+  }
+
+  return rows.map((row: any) => {
+    const session = Array.isArray(row.sessions) ? row.sessions[0] : row.sessions
+    const counts = countsByParticipation.get(row.session_participant_id) || { initial: 0, revision: 0 }
+    const condition = session?.condition as Session['condition']
+    const sessionCode = (session?.session_code || '') as string
+    const questions = (questionsBySession.get(row.session_id) || []).map((question) => {
+      const answers = responsesByParticipationQuestion.get(`${row.session_participant_id}:${question.question_id}`)
+      return {
+        questionId: question.question_id,
+        position: question.position,
+        prompt: question.prompt,
+        initialAnswer: answers?.initialAnswer || null,
+        revisionAnswer: condition === 'treatment' ? answers?.revisionAnswer || null : null,
+      }
+    })
+
+    return {
+      sessionParticipantId: row.session_participant_id as string,
+      sessionId: row.session_id as string,
+      sessionCode,
+      title: `${condition === 'treatment' ? 'Treatment' : 'Baseline'} session ${sessionCode || row.session_id}`,
+      question: (session?.question || '') as string,
+      condition,
+      status: session?.status as SessionStatus,
+      livePhase: session?.live_phase as SessionLivePhase,
+      joinedAt: row.joined_at as string,
+      questionCount: questions.length,
+      responseCount: counts.initial,
+      revisionResponseCount: counts.revision,
+      questions,
+    }
+  })
+}
+
 export async function getSessionParticipantForStudent(sessionId: string) {
   const supabase = createAdminClient()
   const cookieStore = await cookies()
@@ -851,14 +1109,12 @@ export async function getSessionParticipantCount(sessionId: string) {
   return count ?? 0
 }
 
-export async function getAssignedParticipantCountForSession(sessionId: string) {
+export async function getAssignedParticipantCountForSession(_sessionId: string) {
   await assertTeacherAuthenticated()
-  const session = await getSession(sessionId)
   const supabase = createAdminClient()
   const { count, error } = await supabase
     .from('participants')
     .select('id', { count: 'exact', head: true })
-    .eq('group_name', session.condition)
     .eq('is_active', true)
 
   if (error) throw error

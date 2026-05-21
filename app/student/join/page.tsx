@@ -9,38 +9,35 @@ import { Input } from '@/components/ui/input'
 
 export default function StudentJoin() {
   const router = useRouter()
-  const [sessionCode, setSessionCode] = useState('')
   const [participantId, setParticipantId] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const handleJoin = async (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
     setError(null)
 
     try {
-      const response = await fetch('/api/student/join', {
+      const response = await fetch('/api/student/login', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          sessionCode,
           participantId,
           password,
         }),
       })
       const payload = await response.json().catch(() => null)
       if (!response.ok) {
-        throw new Error(payload?.error || 'Failed to join session.')
+        throw new Error(payload?.error || 'Failed to log in.')
       }
-      const session = payload?.session
 
-      router.push(`/student/respond/${session.id}`)
+      router.push('/student/sessions')
     } catch (err) {
-      console.error('Error joining:', err)
+      console.error('Error logging in:', err)
       setError(err instanceof Error ? err.message : 'An error occurred. Please try again.')
     } finally {
       setLoading(false)
@@ -53,32 +50,16 @@ export default function StudentJoin() {
         {/* Header */}
         <div className="mb-12 text-center">
           <h1 className="text-4xl font-bold text-foreground mb-4">
-            Join a Session
+            Student Login
           </h1>
           <p className="text-lg text-foreground/70">
-            Enter your participant ID, password, and session code
+            Enter your participant ID and password to continue
           </p>
         </div>
 
         {/* Form Card */}
         <Card className="p-8">
-          <form onSubmit={handleJoin} className="space-y-6">
-            <div>
-              <label htmlFor="sessionCode" className="block text-sm font-medium text-foreground mb-3">
-                Session Code
-              </label>
-              <Input
-                id="sessionCode"
-                type="text"
-                value={sessionCode}
-                onChange={(e) => setSessionCode(e.target.value.toUpperCase().replace(/\s+/g, ''))}
-                placeholder="e.g., DATA-STRUCTURES-01"
-                className="w-full text-center text-lg tracking-widest"
-                disabled={loading}
-                required
-              />
-            </div>
-
+          <form onSubmit={handleLogin} className="space-y-6">
             <div>
               <label htmlFor="participantId" className="block text-sm font-medium text-foreground mb-3">
                 Participant ID
@@ -120,16 +101,16 @@ export default function StudentJoin() {
             <Button
               type="submit"
               className="w-full"
-              disabled={loading || !sessionCode.trim() || !participantId.trim() || !password}
+              disabled={loading || !participantId.trim() || !password}
               size="lg"
             >
-              {loading ? 'Joining...' : 'Join Session'}
+              {loading ? 'Logging in...' : 'Log In'}
             </Button>
           </form>
 
           <div className="mt-8 pt-8 border-t border-border/40">
             <p className="text-sm text-foreground/60 text-center">
-              Ask your instructor for the session code.
+              You will enter the session code on your dashboard.
             </p>
           </div>
         </Card>

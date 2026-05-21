@@ -147,7 +147,14 @@ export default function SummaryClient({
 }) {
   const [summary, setSummary] = useState(initialSummary)
   const [isRegenerating, setIsRegenerating] = useState(false)
+  const [isGeneratingStudentSummaries, setIsGeneratingStudentSummaries] = useState(false)
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
+  const [studentSummaryResult, setStudentSummaryResult] = useState<{
+    analysis_status: 'ok' | 'partial' | 'fallback'
+    warnings: string[]
+    errors: string[]
+    fallback_cards_created: number
+  } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [expandedQuestionId, setExpandedQuestionId] = useState<string | null>(null)
 
@@ -169,6 +176,7 @@ export default function SummaryClient({
       setIsRegenerating(true)
       setError(null)
       setStatusMessage(null)
+      setStudentSummaryResult(null)
 
       const response = await fetch('/api/session-summary?force=true', {
         method: 'POST',
@@ -192,6 +200,40 @@ export default function SummaryClient({
       setError(regenError instanceof Error ? regenError.message : 'Failed to regenerate summary.')
     } finally {
       setIsRegenerating(false)
+    }
+  }
+
+  const handleGenerateStudentSummaries = async () => {
+    try {
+      setIsGeneratingStudentSummaries(true)
+      setError(null)
+      setStatusMessage(null)
+      setStudentSummaryResult(null)
+
+      const response = await fetch(`/api/teacher/sessions/${sessionId}/generate-student-summaries`, {
+        method: 'POST',
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(payload?.error || 'Failed to generate student summaries.')
+      }
+
+      const warnings = Array.isArray(payload?.warnings) ? payload.warnings : []
+      const errors = Array.isArray(payload?.errors) ? payload.errors : []
+      setStudentSummaryResult({
+        analysis_status: payload?.analysis_status || 'ok',
+        warnings,
+        errors,
+        fallback_cards_created: Number(payload?.fallback_cards_created || 0),
+      })
+      setStatusMessage(
+        `Student summaries ready: ${payload.memberships_upserted || 0} memberships synced, ${payload.cluster_feedback_cards_created || 0} feedback cards created, ${payload.summaries_created || 0} summaries created.`
+      )
+    } catch (summaryError) {
+      console.error(summaryError)
+      setError('Could not generate student summaries.')
+    } finally {
+      setIsGeneratingStudentSummaries(false)
     }
   }
 
@@ -222,7 +264,7 @@ export default function SummaryClient({
       <Button
         type="button"
         onClick={handleRegenerate}
-        disabled={isRegenerating}
+        disabled={isRegenerating || isGeneratingStudentSummaries}
         className="rounded-full px-5"
       >
         {isRegenerating ? (
@@ -237,8 +279,48 @@ export default function SummaryClient({
           </>
         )}
       </Button>
+      <Button
+        type="button"
+        variant="outline"
+        onClick={handleGenerateStudentSummaries}
+        disabled={isRegenerating || isGeneratingStudentSummaries}
+        className="rounded-full border-slate-200 px-5"
+      >
+        {isGeneratingStudentSummaries ? (
+          <>
+            <Spinner className="size-4" />
+            Generating...
+          </>
+        ) : (
+          <>
+            <Sparkles className="size-4" />
+            Generate Student Summaries
+          </>
+        )}
+      </Button>
       {statusMessage && <p className="text-sm text-slate-500">{statusMessage}</p>}
       {error && <p className="text-sm text-destructive">{error}</p>}
+      {studentSummaryResult && studentSummaryResult.analysis_status !== 'ok' && (
+        <div className="max-w-xl rounded-xl border border-amber-200 bg-amber-50 p-3 text-left text-sm text-amber-900">
+          <p className="font-semibold">
+            {studentSummaryResult.analysis_status === 'fallback'
+              ? 'Student summaries generated with fallback analysis.'
+              : 'Student summaries generated with warnings.'}
+          </p>
+          {studentSummaryResult.fallback_cards_created > 0 && (
+            <p className="mt-1">
+              Some cluster feedback used fallback analysis because AI output was unavailable or invalid.
+            </p>
+          )}
+          {(studentSummaryResult.warnings.length > 0 || studentSummaryResult.errors.length > 0) && (
+            <ul className="mt-2 list-disc space-y-1 pl-4">
+              {[...studentSummaryResult.warnings, ...studentSummaryResult.errors].slice(0, 5).map((message) => (
+                <li key={message}>{message}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   </div>
 
