@@ -25,14 +25,6 @@ export const StudentSummaryPolishSchema = z.object({
     explanation: z.string().default(''),
     self_check: z.string().default('What condition should I check before finalising my answer?'),
   }),
-  question_cards: z.array(z.object({
-    question_id: z.string(),
-    title: z.string(),
-    progress_label: z.string(),
-    what_changed: z.string(),
-    feedback: z.string(),
-    next_step: z.string(),
-  })).default([]),
   recommended_next_steps: z.array(z.string()).default([]),
   safety_notes: z.string().default(''),
 })

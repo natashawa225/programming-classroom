@@ -21,6 +21,11 @@ function formatAttemptLabel(value: 'Revision summary' | 'Initial response summar
   return value || 'No class summary'
 }
 
+function formatBaselineAttemptLabel(value: 'Revision summary' | 'Initial response summary' | null) {
+  if (!value) return 'No class summary'
+  return 'Response summary'
+}
+
 function SummaryRow({
   label,
   value,
@@ -98,6 +103,7 @@ export function StudentSessionSummary({ sessionId }: { sessionId: string }) {
   }
 
   if (!summary) return null
+  const isBaseline = summary.condition === 'baseline'
 
   return (
     <section className="student-summary-print-root mt-6 space-y-6">
@@ -160,16 +166,20 @@ export function StudentSessionSummary({ sessionId }: { sessionId: string }) {
                 <h4 className="mt-2 text-lg font-semibold text-foreground">{question.prompt}</h4>
               </div>
               <div className="flex flex-wrap gap-2">
-                <Badge variant="outline">{formatAttemptLabel(question.finalAnalysisLabel)}</Badge>
+                <Badge variant="outline">
+                  {isBaseline
+                    ? formatBaselineAttemptLabel(question.finalAnalysisLabel)
+                    : formatAttemptLabel(question.finalAnalysisLabel)}
+                </Badge>
                 <div className="rounded-full bg-secondary/25 px-3 py-1.5 text-xs font-medium text-foreground/70">
-                  Confidence {formatConfidence(question.confidence.revised ?? question.confidence.initial)}
+                  Confidence {formatConfidence(isBaseline ? question.confidence.initial : question.confidence.revised ?? question.confidence.initial)}
                 </div>
               </div>
             </div>
 
             <div className="mt-5 grid gap-3 md:grid-cols-2">
-              {summary.condition === 'baseline' ? (
-                <SummaryRow label="Your answer" value={question.yourAnswer} />
+              {isBaseline ? (
+                <SummaryRow label="Your response" value={question.yourAnswer} />
               ) : (
                 <>
                   <SummaryRow label="Your first answer" value={question.yourFirstAnswer} />

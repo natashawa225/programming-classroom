@@ -13,6 +13,19 @@ This first version uses a local TypeScript "cluster-then-feedback" pipeline rath
 
 The expensive LLM call happens once per cluster feedback card, not once per student.
 
+## Idempotent Memory
+
+Misconception aggregates are updated through event tables:
+
+- `misconception_memory_events`
+- `student_misconception_memory_events`
+
+Each event is unique by session, question, attempt, cluster, and misconception key. Re-running teacher generation for the same session therefore does not inflate `evidence_count`.
+
+Global misconception memory only records clusters with concerning evidence: `mixed_reasoning`, `needs_attention`, `unclear`, or `conceptual_alignment < 0.6`. Strong/aligned clusters are not stored as misconceptions just because they have improvement advice.
+
+Student memory records concern evidence idempotently. Strong revision clusters can move existing memories for that same question concept toward `improving` or `resolved`, but only when a new resolution event is inserted.
+
 ## Movement Labels
 
 Student improvement uses deterministic labels:
@@ -52,6 +65,8 @@ Set `ENABLE_STUDENT_SUMMARY_LLM_POLISH=true` to let the synthesis agent polish t
 - student-level misconception memory
 
 It never receives raw class responses, other student IDs, rankings, or private teacher notes.
+
+The optional polish does not generate per-question cards. Those remain deterministic so they preserve the student's actual answers, cluster feedback, and movement labels while reducing token cost.
 
 ## Privacy Rule
 

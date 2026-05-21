@@ -21,6 +21,20 @@ function stringList(value: unknown) {
     .filter(Boolean) as string[]
 }
 
+function asUnderstandingBucket(value: unknown): ParsedCluster['understandingBucket'] {
+  const bucket = asString(value)
+  if (
+    bucket === 'strong_alignment' ||
+    bucket === 'mostly_aligned' ||
+    bucket === 'mixed_reasoning' ||
+    bucket === 'needs_attention' ||
+    bucket === 'unclear'
+  ) {
+    return bucket
+  }
+  return null
+}
+
 export function parseLiveAnalysisClusters(analysisJson: Record<string, unknown> | null | undefined): ParsedCluster[] {
   const clusters = asArray(analysisJson?.clusters)
   return clusters.map((rawCluster, index) => {
@@ -32,9 +46,8 @@ export function parseLiveAnalysisClusters(analysisJson: Record<string, unknown> 
 
     const responseIds = Array.from(new Set([
       ...stringList(cluster.response_ids),
-      ...stringList(cluster.student_ids),
       ...members
-        .map((member) => asString(member.response_id) || asString(member.id))
+        .map((member) => asString(member.response_id))
         .filter(Boolean),
     ])) as string[]
 
@@ -50,7 +63,7 @@ export function parseLiveAnalysisClusters(analysisJson: Record<string, unknown> 
       summary: asString(cluster.summary),
       misconceptionType: asString(cluster.misconception_type),
       conceptualAlignment: asNumber(cluster.conceptual_alignment),
-      understandingBucket: asString(cluster.understanding_bucket) as ParsedCluster['understandingBucket'],
+      understandingBucket: asUnderstandingBucket(cluster.understanding_bucket),
       averageConfidence: asNumber(cluster.average_confidence),
       teacherNote: asString(cluster.teacher_note),
       studentSafeSummary: asString(cluster.student_safe_summary),

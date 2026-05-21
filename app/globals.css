@@ -146,6 +146,16 @@
     width: 100%;
     margin: 0;
     padding: 0;
+    background: white !important;
+    color: black !important;
+    box-shadow: none !important;
+  }
+
+  .student-summary-print-root * {
+    color: black !important;
+    box-shadow: none !important;
+    overflow-wrap: anywhere;
+    word-break: normal;
   }
 
   .student-summary-print-hide {

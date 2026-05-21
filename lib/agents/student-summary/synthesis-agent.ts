@@ -20,21 +20,6 @@ function shouldUseLlmPolish() {
   return String(process.env.ENABLE_STUDENT_SUMMARY_LLM_POLISH || 'false').toLowerCase() === 'true'
 }
 
-function friendlyProgressLabel(value: string) {
-  const labels: Record<string, string> = {
-    strong_improvement: 'Strong improvement',
-    partial_improvement: 'Partly improved',
-    stable_strong: 'Stable and strong',
-    stable_needs_review: 'Review again',
-    possible_regression: 'Compare attempts',
-    confidence_miscalibration: 'Confidence check',
-    no_revision: 'No revision',
-    no_response: 'No response',
-    unclear: 'Unclear',
-  }
-  return labels[value] || 'Unclear'
-}
-
 export async function getOrCreateStudentSummary(input: {
   sessionId: string
   participantId: string
@@ -255,7 +240,7 @@ export async function getOrCreateStudentSummary(input: {
       student_misconception_memory: studentMemory || [],
     }
     const result = await openaiChatJson({
-      maxTokens: 1200,
+      maxTokens: 800,
       timeoutMs: 60000,
       messages: [
         {
@@ -295,16 +280,6 @@ export async function getOrCreateStudentSummary(input: {
                 explanation: '1-2 sentences about a repeated reasoning pattern, or empty string if none',
                 self_check: 'one self-check question',
               },
-              question_cards: [
-                {
-                  question_id: 'same question_id from input',
-                  title: 'short question title',
-              progress_label: 'Strong improvement | Partly improved | Stable and strong | Review again | Compare attempts | Confidence check | No revision | No response | Unclear',
-                  what_changed: '1 sentence',
-                  feedback: '1-2 student-facing sentences',
-                  next_step: 'one concrete next step',
-                },
-              ],
               recommended_next_steps: ['specific action 1', 'specific action 2', 'specific action 3'],
               safety_notes: 'uncertainty or limits',
             }, null, 2),

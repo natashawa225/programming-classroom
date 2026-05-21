@@ -78,7 +78,7 @@ export async function generateClusterFeedbackCard(input: {
   })
 
   const result = await openaiChatJson({
-    maxTokens: 900,
+    maxTokens: 650,
     timeoutMs: 60000,
     messages: [
       {
@@ -144,18 +144,19 @@ export async function generateClusterFeedbackCard(input: {
   })
 
   if (result.ok) {
-    const parsed = parseClusterFeedbackOrFallback(result.json, ClusterFeedbackSchema.parse({
-      student_title: card.student_title || undefined,
-      reasoning_pattern: card.reasoning_pattern || undefined,
-      what_you_understood: card.what_you_understood || undefined,
-      likely_gap: card.likely_gap || undefined,
-      micro_hint: card.micro_hint || undefined,
-      try_again_prompt: card.try_again_prompt || undefined,
-      counterexample: card.counterexample || undefined,
-      confidence_check: card.confidence_check || undefined,
-      teacher_note: card.teacher_note || undefined,
-      safety_notes: card.safety_notes || undefined,
-    }))
+    const fallbackFeedback = {
+      student_title: card.student_title || 'Review this reasoning pattern',
+      reasoning_pattern: card.reasoning_pattern || 'This answer follows a common reasoning pattern.',
+      what_you_understood: card.what_you_understood || 'Your answer shows an attempt to use the relevant concept.',
+      likely_gap: card.likely_gap || 'One part of the reasoning may need more evidence.',
+      micro_hint: card.micro_hint || 'Check the key condition in the question and explain why it applies.',
+      try_again_prompt: card.try_again_prompt || 'Try rewriting your answer with one extra sentence explaining the final step.',
+      counterexample: card.counterexample || 'Compare your answer with a case where the key condition changes the outcome.',
+      confidence_check: card.confidence_check || 'Before trusting the answer, check whether each step is supported by the question.',
+      teacher_note: card.teacher_note || 'Fallback feedback was used or evidence was limited.',
+      safety_notes: card.safety_notes || 'Generated from limited cluster evidence.',
+    }
+    const parsed = parseClusterFeedbackOrFallback(result.json, fallbackFeedback)
     card = {
       ...card,
       ...parsed.data,

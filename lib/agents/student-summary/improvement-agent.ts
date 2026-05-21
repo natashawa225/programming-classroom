@@ -113,11 +113,17 @@ export async function computeStudentImprovement(input: {
   })
 
   function responseFor(questionId: string, attemptType: 'initial' | 'revision') {
-    return ownResponses.find((response: any) => response.question_id === questionId && response.attempt_type === attemptType) || null
+    const matches = ownResponses.filter((response: any) => {
+      return response.question_id === questionId && response.attempt_type === attemptType
+    })
+    return matches[matches.length - 1] || null
   }
 
   function membershipFor(questionId: string, attemptType: 'initial' | 'revision') {
-    return (memberships || []).find((membership: any) => membership.question_id === questionId && membership.attempt_type === attemptType) || null
+    const matches = (memberships || []).filter((membership: any) => {
+      return membership.question_id === questionId && membership.attempt_type === attemptType
+    })
+    return matches[matches.length - 1] || null
   }
 
   return (questions || []).map((question: any) => {

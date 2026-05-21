@@ -15,6 +15,35 @@ export { updateMisconceptionMemoryFromSession } from './misconception-memory-age
 export { computeStudentImprovement } from './improvement-agent'
 export { getOrCreateStudentSummary } from './synthesis-agent'
 
+function formatAgentError(error: unknown) {
+  if (error instanceof Error && error.message.trim()) return error.message
+  if (error && typeof error === 'object') {
+    const candidate = error as {
+      message?: unknown
+      details?: unknown
+      hint?: unknown
+      code?: unknown
+      error?: unknown
+    }
+    const parts = [
+      candidate.message,
+      candidate.details,
+      candidate.hint,
+      candidate.code,
+      candidate.error,
+    ]
+      .map((part) => (typeof part === 'string' ? part.trim() : ''))
+      .filter(Boolean)
+
+    if (parts.length > 0) return parts.join(' | ')
+
+    try {
+      return JSON.stringify(error)
+    } catch {}
+  }
+  return String(error || 'Unknown error')
+}
+
 export async function generateStudentSummariesForSession(sessionId: string): Promise<GenerateStudentSummariesResult> {
   const supabase = createAdminClient()
   const warnings: string[] = []
@@ -72,7 +101,15 @@ export async function generateStudentSummariesForSession(sessionId: string): Pro
         if (result.fallbackUsed) fallbackCardsUsed += 1
         if (result.created && result.fallbackUsed) fallbackCardsCreated += 1
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown cluster feedback error'
+        const message = formatAgentError(error)
+        console.error('[student-summary] cluster feedback generation failed', {
+          sessionId,
+          questionId: analysis.question_id,
+          attemptType,
+          clusterId: cluster.clusterId,
+          error,
+          message,
+        })
         errors.push(`Feedback generation failed for ${analysis.question_id}/${cluster.clusterId}: ${message}`)
         warnings.push(`Fallback feedback was needed for ${cluster.label || cluster.clusterId}.`)
       }
@@ -98,7 +135,7 @@ export async function generateStudentSummariesForSession(sessionId: string): Pro
       })
       if (result.created) summariesCreated += 1
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown student summary error'
+      const message = formatAgentError(error)
       errors.push(`Summary failed for participant ${participant.participant_id}: ${message}`)
     }
   }
