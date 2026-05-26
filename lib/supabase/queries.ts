@@ -1032,7 +1032,7 @@ export async function getStudentSessionHistory() {
       sessionParticipantId: row.session_participant_id as string,
       sessionId: row.session_id as string,
       sessionCode,
-      title: `${condition === 'treatment' ? 'Treatment' : 'Baseline'} session ${sessionCode || row.session_id}`,
+      title: `${condition === 'treatment' ? 'Revision' : 'Standard'} session ${sessionCode || row.session_id}`,
       question: (session?.question || '') as string,
       condition,
       status: session?.status as SessionStatus,

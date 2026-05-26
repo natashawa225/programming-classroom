@@ -335,7 +335,7 @@ function buildStudentSummaryPdf(input: {
   addText('Student Session Summary', { size: 20, bold: true, gapAfter: 14, lineHeight: 24 })
   addText(`Participant ID: ${input.participantId || 'Unknown'}`, { size: 10, gapAfter: 4 })
   addText(`Session code: ${input.session.sessionCode}`, { size: 10, gapAfter: 4 })
-  addText(`Condition: ${input.session.condition}`, { size: 10, gapAfter: 4 })
+  addText(`Session type: ${sessionTypeLabel(input.session.condition)}`, { size: 10, gapAfter: 4 })
   addText(`Status: ${formatStatus(input.session)}`, { size: 10, gapAfter: 4 })
   addText(`Joined: ${formatDate(input.session.joinedAt)}`, { size: 10, gapAfter: 14 })
 
@@ -454,6 +454,10 @@ function formatStatus(session: StudentHistorySession) {
 
 function isCompletedSession(session: StudentHistorySession) {
   return formatStatus(session) === 'Completed'
+}
+
+function sessionTypeLabel(condition: StudentHistorySession['condition']) {
+  return condition === 'treatment' ? 'Revision session' : 'Standard session'
 }
 
 function movementDisplayLabel(value: string) {
@@ -672,7 +676,7 @@ export default function StudentSessions() {
               <p className="text-sm font-medium uppercase tracking-wide text-foreground/50">Join session</p>
               <h2 className="mt-2 text-3xl font-bold text-foreground">Enter your class code</h2>
               <p className="mt-2 text-foreground/65">
-                Your account can join either baseline or treatment sessions. The session code controls the activity flow.
+                Enter the code your teacher shared. The session will open the right activity for your class.
               </p>
             </div>
             <form onSubmit={handleJoinSession} className="w-full max-w-md space-y-3">
@@ -734,7 +738,7 @@ export default function StudentSessions() {
                           className="rounded-full border px-2.5 py-1 text-xs font-medium capitalize"
                           style={badgeStyle(session.condition === 'treatment' ? 'purple' : 'blue')}
                         >
-                          {session.condition}
+                          {sessionTypeLabel(session.condition)}
                         </span>
                         <span
                           className="rounded-full border px-2.5 py-1 text-xs font-medium"

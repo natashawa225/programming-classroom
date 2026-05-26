@@ -49,6 +49,11 @@ type ProcessedInputResponse = InputResponse & {
   bare_answer_kind: BareAnswerKind | null
 }
 
+type ClusterIntegrityContext = {
+  questionId?: string
+  attemptType?: AttemptType
+}
+
 // --- Backward-compat: map v1 True/False labels to alignment scores ---
 export function inferAlignmentFromV1Label(label: string): number {
   const lower = label.toLowerCase()
@@ -233,6 +238,230 @@ function buildBareTeacherNote(rows: InputResponse[]) {
   return `${rows.length} ${studentLabel} gave answer-only ${responseLabel} with no reasoning. Confidence: ${high} high, ${medium} medium, ${low} low. Use this as a confidence/participation signal, not as evidence of reasoning.`
 }
 
+function normalizeFinalClusters(
+  clusters: LiveCluster[],
+  responses: InputResponse[],
+  context: ClusterIntegrityContext = {}
+): LiveCluster[] {
+  const responseMap = new Map(responses.map((response) => [response.response_id, response]))
+  const assigned = new Set<string>()
+  const normalized: LiveCluster[] = []
+
+  for (const cluster of clusters) {
+    const rows: InputResponse[] = []
+    const localSeen = new Set<string>()
+
+    for (const rawId of Array.isArray(cluster.response_ids) ? cluster.response_ids : []) {
+      const id = String(rawId || '').trim()
+      if (!id || localSeen.has(id) || assigned.has(id)) continue
+      const row = responseMap.get(id)
+      if (!row) continue
+      localSeen.add(id)
+      assigned.add(id)
+      rows.push(row)
+    }
+
+    if (rows.length === 0) continue
+
+    normalized.push(
+      buildClusterFromResponses(cluster.label, cluster.summary, rows, normalized.length, {
+        conceptual_alignment: cluster.conceptual_alignment,
+        understanding_bucket: cluster.understanding_bucket,
+        teacher_note: cluster.teacher_note,
+      })
+    )
+  }
+
+  const unassignedRows = responses.filter((response) => !assigned.has(response.response_id))
+  if (unassignedRows.length > 0) {
+    console.warn('[live-clustering] final normalization found unassigned responses', {
+      question_id: context.questionId,
+      attempt_type: context.attemptType,
+      unassigned_response_ids: unassignedRows.map((response) => response.response_id),
+      unassigned_count: unassignedRows.length,
+    })
+
+    if (normalized.length === 0 || normalized.length < 5) {
+      normalized.push(
+        buildClusterFromResponses(
+          'Other response patterns',
+          'Responses that were not assigned by the model were grouped locally to preserve exact response coverage.',
+          unassignedRows,
+          normalized.length,
+          {
+            conceptual_alignment: 0,
+            understanding_bucket: 'unclear',
+            teacher_note: 'These responses were added locally because the model omitted their response_ids.',
+          }
+        )
+      )
+    } else {
+      const smallestIndex = normalized.reduce((bestIndex, cluster, index, array) => {
+        return cluster.count < array[bestIndex].count ? index : bestIndex
+      }, 0)
+      const target = normalized[smallestIndex]
+      const mergedRows = [...target.response_ids, ...unassignedRows.map((row) => row.response_id)]
+        .map((id) => responseMap.get(id)!)
+        .filter(Boolean)
+      normalized[smallestIndex] = buildClusterFromResponses(
+        target.label,
+        target.summary,
+        mergedRows,
+        smallestIndex,
+        {
+          conceptual_alignment: target.conceptual_alignment,
+          understanding_bucket: target.understanding_bucket,
+          teacher_note: target.teacher_note,
+        }
+      )
+    }
+  }
+
+  if (normalized.length <= 5) {
+    return normalized.map((cluster, index) => {
+      const rows = cluster.response_ids.map((id) => responseMap.get(id)!).filter(Boolean)
+      return buildClusterFromResponses(cluster.label, cluster.summary, rows, index, {
+        conceptual_alignment: cluster.conceptual_alignment,
+        understanding_bucket: cluster.understanding_bucket,
+        teacher_note: cluster.teacher_note,
+      })
+    })
+  }
+
+  console.warn('[live-clustering] final normalization merged overflow clusters', {
+    question_id: context.questionId,
+    attempt_type: context.attemptType,
+    cluster_count_before_merge: normalized.length,
+    overflow_count: normalized.length - 4,
+  })
+
+  const kept = normalized.slice(0, 4)
+  const overflowRows = normalized
+    .slice(4)
+    .flatMap((cluster) => cluster.response_ids)
+    .map((id) => responseMap.get(id)!)
+    .filter(Boolean)
+  const merged = [
+    ...kept,
+    buildClusterFromResponses(
+      'Other response patterns',
+      'Additional response groups were merged locally to keep the live view within five clusters.',
+      overflowRows,
+      4,
+      {
+        conceptual_alignment: 0,
+        understanding_bucket: 'mixed_reasoning',
+        teacher_note: 'Overflow clusters were merged locally because the final cluster count exceeded five.',
+      }
+    ),
+  ]
+
+  return merged.map((cluster, index) => {
+    const rows = cluster.response_ids.map((id) => responseMap.get(id)!).filter(Boolean)
+    return buildClusterFromResponses(cluster.label, cluster.summary, rows, index, {
+      conceptual_alignment: cluster.conceptual_alignment,
+      understanding_bucket: cluster.understanding_bucket,
+      teacher_note: cluster.teacher_note,
+    })
+  })
+}
+
+function validateClusterIntegrity(
+  analysis: LiveQuestionClusterAnalysis,
+  responses: InputResponse[]
+) {
+  const expectedIds = new Set(responses.map((response) => response.response_id))
+  const seen = new Set<string>()
+  const duplicateIds = new Set<string>()
+  const unknownIds = new Set<string>()
+  const countMismatches: Array<{ cluster_id: string; count: number; response_id_count: number }> = []
+  let sumCount = 0
+
+  for (const cluster of analysis.clusters) {
+    const ids = Array.isArray(cluster.response_ids) ? cluster.response_ids : []
+    if (cluster.count !== ids.length) {
+      countMismatches.push({
+        cluster_id: cluster.cluster_id,
+        count: cluster.count,
+        response_id_count: ids.length,
+      })
+    }
+    sumCount += cluster.count
+
+    for (const rawId of ids) {
+      const id = String(rawId || '').trim()
+      if (!expectedIds.has(id)) unknownIds.add(id)
+      if (seen.has(id)) duplicateIds.add(id)
+      seen.add(id)
+    }
+  }
+
+  const missingIds = [...expectedIds].filter((id) => !seen.has(id))
+  const ok =
+    analysis.total_responses === responses.length &&
+    sumCount === responses.length &&
+    seen.size === responses.length &&
+    duplicateIds.size === 0 &&
+    unknownIds.size === 0 &&
+    missingIds.length === 0 &&
+    countMismatches.length === 0
+
+  return {
+    ok,
+    sumCount,
+    uniqueAssignedCount: seen.size,
+    duplicateIds: [...duplicateIds],
+    unknownIds: [...unknownIds],
+    missingIds,
+    countMismatches,
+  }
+}
+
+function finalizeClusterAnalysis(
+  analysis: LiveQuestionClusterAnalysis,
+  responses: ProcessedInputResponse[],
+  referenceDirection: ReferenceDirection,
+  context: ClusterIntegrityContext = {}
+): LiveQuestionClusterAnalysis {
+  const normalizedClusters = normalizeFinalClusters(analysis.clusters, responses, context)
+  const finalized: LiveQuestionClusterAnalysis = {
+    ...analysis,
+    total_responses: responses.length,
+    cluster_count: normalizedClusters.length,
+    clusters: normalizedClusters,
+  }
+  const validation = validateClusterIntegrity(finalized, responses)
+  if (validation.ok) return finalized
+
+  console.error('[live-clustering] final cluster integrity validation failed; using deterministic fallback', {
+    question_id: context.questionId,
+    attempt_type: context.attemptType,
+    total_responses: responses.length,
+    cluster_count: finalized.cluster_count,
+    sum_cluster_count: validation.sumCount,
+    unique_assigned_count: validation.uniqueAssignedCount,
+    duplicate_response_ids: validation.duplicateIds,
+    unknown_response_ids: validation.unknownIds,
+    missing_response_ids: validation.missingIds,
+    count_mismatches: validation.countMismatches,
+  })
+
+  const fallback = buildFallbackClusters(
+    responses,
+    'Cluster integrity validation failed after normalization; deterministic fallback used.'
+  )
+  fallback.question_prompt = analysis.question_prompt
+  fallback.attempt_type = analysis.attempt_type
+  fallback.clusters = normalizeFinalClusters(
+    postProcessBareAnswerClusters(fallback.clusters, responses, referenceDirection),
+    responses,
+    context
+  )
+  fallback.total_responses = responses.length
+  fallback.cluster_count = fallback.clusters.length
+  return fallback
+}
+
 function getBareClusterDescriptor(
   rows: ProcessedInputResponse[],
   referenceDirection: ReferenceDirection
@@ -284,10 +513,15 @@ function sanitizeModelClusters(
   const sanitized: LiveCluster[] = []
 
   for (const [index, cluster] of rawClusters.entries()) {
+    const localSeen = new Set<string>()
     const ids = Array.isArray(cluster?.response_ids)
       ? cluster.response_ids
           .map((value: unknown) => String(value || '').trim())
-          .filter((value: string) => value && responseMap.has(value) && !assigned.has(value))
+          .filter((value: string) => {
+            if (!value || localSeen.has(value) || assigned.has(value) || !responseMap.has(value)) return false
+            localSeen.add(value)
+            return true
+          })
       : []
 
     if (ids.length === 0) continue
@@ -705,7 +939,10 @@ export async function clusterLiveQuestionResponses(input: {
     fallback.attempt_type = input.attemptType
     fallback.clusters = postProcessBareAnswerClusters(fallback.clusters, cleanedResponses, referenceDirection)
     fallback.cluster_count = fallback.clusters.length
-    return fallback
+    return finalizeClusterAnalysis(fallback, cleanedResponses, referenceDirection, {
+      questionId: input.questionId,
+      attemptType: input.attemptType,
+    })
   }
 
   const rawClusters = Array.isArray(result.json?.clusters) ? result.json.clusters : []
@@ -721,10 +958,13 @@ export async function clusterLiveQuestionResponses(input: {
     fallback.attempt_type = input.attemptType
     fallback.clusters = postProcessBareAnswerClusters(fallback.clusters, cleanedResponses, referenceDirection)
     fallback.cluster_count = fallback.clusters.length
-    return fallback
+    return finalizeClusterAnalysis(fallback, cleanedResponses, referenceDirection, {
+      questionId: input.questionId,
+      attemptType: input.attemptType,
+    })
   }
 
-  return {
+  return finalizeClusterAnalysis({
     version: 'live_question_clusters_v2',
     question_prompt: input.questionPrompt,
     attempt_type: input.attemptType,
@@ -734,5 +974,8 @@ export async function clusterLiveQuestionResponses(input: {
     fallback_reason: null,
     fallback_debug: null,
     clusters,
-  }
+  }, cleanedResponses, referenceDirection, {
+    questionId: input.questionId,
+    attemptType: input.attemptType,
+  })
 }

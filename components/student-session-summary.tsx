@@ -26,6 +26,10 @@ function formatBaselineAttemptLabel(value: 'Revision summary' | 'Initial respons
   return 'Response summary'
 }
 
+function formatSessionTypeLabel(condition: 'baseline' | 'treatment') {
+  return condition === 'treatment' ? 'Revision session' : 'Standard session'
+}
+
 function SummaryRow({
   label,
   value,
@@ -124,7 +128,7 @@ export function StudentSessionSummary({ sessionId }: { sessionId: string }) {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant="outline">{summary.studentLabel}</Badge>
-            <Badge variant="outline">{summary.condition === 'baseline' ? 'Baseline' : 'Treatment'}</Badge>
+            <Badge variant="outline">{formatSessionTypeLabel(summary.condition)}</Badge>
             <Badge variant="outline">Class reasoning summary</Badge>
           </div>
         </div>

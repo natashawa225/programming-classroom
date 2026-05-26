@@ -997,7 +997,11 @@ export default function SessionDetailClient({
 
                     {primaryAction && (
                       <Button
-                        className="rounded-2xl"
+                      className={
+                        primaryAction.key === 'complete-session'
+                          ? 'rounded-2xl border border-red-500 bg-transparent text-red-600 hover:bg-red-50 hover:text-red-700'
+                          : 'rounded-2xl'
+                      }
                         disabled={actionLoading !== null || isCurrentAnalysisRunning}
                         onClick={() => runAction(primaryAction.key, primaryAction.action)}
                       >
