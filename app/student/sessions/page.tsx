@@ -456,8 +456,8 @@ function isCompletedSession(session: StudentHistorySession) {
   return formatStatus(session) === 'Completed'
 }
 
-function sessionTypeLabel(condition: StudentHistorySession['condition']) {
-  return condition === 'treatment' ? 'Revision session' : 'Standard session'
+function sessionTypeLabel(_condition: StudentHistorySession['condition']) {
+  return 'Session'
 }
 
 function movementDisplayLabel(value: string) {

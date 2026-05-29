@@ -21,13 +21,13 @@ function formatAttemptLabel(value: 'Revision summary' | 'Initial response summar
   return value || 'No class summary'
 }
 
-function formatBaselineAttemptLabel(value: 'Revision summary' | 'Initial response summary' | null) {
+function formatSingleAttemptLabel(value: 'Revision summary' | 'Initial response summary' | null) {
   if (!value) return 'No class summary'
   return 'Response summary'
 }
 
-function formatSessionTypeLabel(condition: 'baseline' | 'treatment') {
-  return condition === 'treatment' ? 'Revision session' : 'Standard session'
+function formatSessionTypeLabel(_condition: 'baseline' | 'treatment') {
+  return 'Session'
 }
 
 function SummaryRow({
@@ -107,7 +107,7 @@ export function StudentSessionSummary({ sessionId }: { sessionId: string }) {
   }
 
   if (!summary) return null
-  const isBaseline = summary.condition === 'baseline'
+  const isSingleAttemptSession = summary.condition === 'baseline'
 
   return (
     <section className="student-summary-print-root mt-6 space-y-6">
@@ -155,7 +155,7 @@ export function StudentSessionSummary({ sessionId }: { sessionId: string }) {
           <div className="rounded-xl bg-secondary/20 p-4">
             <p className="text-xs font-medium uppercase tracking-wide text-foreground/50">Session type</p>
             <p className="mt-2 text-2xl font-semibold text-foreground">
-              {summary.condition === 'baseline' ? 'One-round reflection' : 'Revision reflection'}
+              Session reflection
             </p>
           </div>
         </div>
@@ -171,18 +171,18 @@ export function StudentSessionSummary({ sessionId }: { sessionId: string }) {
               </div>
               <div className="flex flex-wrap gap-2">
                 <Badge variant="outline">
-                  {isBaseline
-                    ? formatBaselineAttemptLabel(question.finalAnalysisLabel)
+                  {isSingleAttemptSession
+                    ? formatSingleAttemptLabel(question.finalAnalysisLabel)
                     : formatAttemptLabel(question.finalAnalysisLabel)}
                 </Badge>
                 <div className="rounded-full bg-secondary/25 px-3 py-1.5 text-xs font-medium text-foreground/70">
-                  Confidence {formatConfidence(isBaseline ? question.confidence.initial : question.confidence.revised ?? question.confidence.initial)}
+                  Confidence {formatConfidence(isSingleAttemptSession ? question.confidence.initial : question.confidence.revised ?? question.confidence.initial)}
                 </div>
               </div>
             </div>
 
             <div className="mt-5 grid gap-3 md:grid-cols-2">
-              {isBaseline ? (
+              {isSingleAttemptSession ? (
                 <SummaryRow label="Your response" value={question.yourAnswer} />
               ) : (
                 <>
