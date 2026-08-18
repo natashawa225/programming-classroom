@@ -1,11 +1,14 @@
 import { cookies } from 'next/headers'
 import { createHmac, timingSafeEqual } from 'crypto'
+import bcrypt from 'bcryptjs'
+import { createAdminClient } from '@/lib/supabase/server'
 
 /**
- * Lightweight, password-based teacher gate for prototypes.
+ * Teacher accounts, backed by the `teachers` table.
  *
- * - Credentials live only in server-side env vars (never NEXT_PUBLIC_).
- * - On successful login we set an HTTP-only cookie containing a signed token.
+ * - Each teacher has their own username + bcrypt-hashed password row.
+ * - On successful login we set an HTTP-only cookie containing a signed token
+ *   that identifies the teacher (teacherId + username), not just "a teacher is logged in".
  * - Teacher pages + teacher-only server actions validate this cookie server-side.
  */
 
@@ -14,10 +17,17 @@ const TEACHER_COOKIE_NAME = 'sd_teacher_session'
 // Teacher pages remain protected by server-side checks.
 const TEACHER_COOKIE_PATH = '/'
 
+export type TeacherAccount = {
+  id: string
+  username: string
+  name: string | null
+}
+
 type TeacherSessionPayload = {
-  v: 1
+  v: 2
   exp: number // unix seconds
-  u?: string // username (optional)
+  teacherId: string
+  username: string
 }
 
 function base64UrlEncode(input: Buffer | string) {
@@ -42,21 +52,22 @@ function constantTimeEqual(a: string, b: string) {
   return timingSafeEqual(aBuf, bBuf)
 }
 
-function getAuthConfig() {
-  const password = process.env.TEACHER_DASHBOARD_PASSWORD || ''
-  const username = process.env.TEACHER_DASHBOARD_USERNAME || ''
-  const maxAgeSeconds =
-    Number(process.env.TEACHER_DASHBOARD_SESSION_MAX_AGE_SECONDS || '') || 60 * 60 * 8 // 8 hours
-
-  if (!password) {
+function sessionSigningKey() {
+  // Sessions are now per-teacher, so the signing key can no longer be derived
+  // from a single shared username/password. Use a dedicated secret, falling
+  // back to the Supabase service role key so existing deployments keep working
+  // without extra config.
+  const secret = process.env.TEACHER_SESSION_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+  if (!secret) {
     throw new Error(
-      'Missing TEACHER_DASHBOARD_PASSWORD. Set it in your server environment variables.'
+      'Missing TEACHER_SESSION_SECRET. Set it in your server environment variables.'
     )
   }
+  return secret
+}
 
-  // Derive a signing key from configured secrets (prototype-friendly; for production use a dedicated secret).
-  const signingKey = `${username}::${password}`
-  return { username, password, signingKey, maxAgeSeconds }
+function sessionMaxAgeSeconds() {
+  return Number(process.env.TEACHER_DASHBOARD_SESSION_MAX_AGE_SECONDS || '') || 60 * 60 * 8 // 8 hours
 }
 
 function sign(payloadB64: string, signingKey: string) {
@@ -80,8 +91,9 @@ function verifySessionToken(token: string, signingKey: string): TeacherSessionPa
 
   try {
     const payload = JSON.parse(base64UrlDecodeToString(payloadB64)) as TeacherSessionPayload
-    if (payload.v !== 1) return null
+    if (payload.v !== 2) return null
     if (typeof payload.exp !== 'number') return null
+    if (typeof payload.teacherId !== 'string' || !payload.teacherId) return null
     const now = Math.floor(Date.now() / 1000)
     if (payload.exp <= now) return null
     return payload
@@ -90,14 +102,14 @@ function verifySessionToken(token: string, signingKey: string): TeacherSessionPa
   }
 }
 
-export function isTeacherUsernameRequired() {
-  return Boolean(process.env.TEACHER_DASHBOARD_USERNAME)
-}
-
-export async function setTeacherSessionCookie(username?: string) {
-  const { signingKey, maxAgeSeconds } = getAuthConfig()
+export async function setTeacherSessionCookie(teacher: TeacherAccount) {
+  const signingKey = sessionSigningKey()
+  const maxAgeSeconds = sessionMaxAgeSeconds()
   const now = Math.floor(Date.now() / 1000)
-  const token = createSessionToken({ v: 1, exp: now + maxAgeSeconds, u: username || undefined }, signingKey)
+  const token = createSessionToken(
+    { v: 2, exp: now + maxAgeSeconds, teacherId: teacher.id, username: teacher.username },
+    signingKey
+  )
   const store = await cookies()
   // Clear any legacy cookie that may have been set with path "/teacher" so we don't end up with
   // multiple cookies with the same name but different paths.
@@ -132,7 +144,7 @@ export async function clearTeacherSessionCookie() {
 }
 
 export async function getTeacherSession(): Promise<TeacherSessionPayload | null> {
-  const { signingKey } = getAuthConfig()
+  const signingKey = sessionSigningKey()
   const store = await cookies()
   const token = store.get(TEACHER_COOKIE_NAME)?.value
   if (!token) return null
@@ -145,14 +157,39 @@ export async function assertTeacherAuthenticated() {
   return session
 }
 
-export function verifyTeacherCredentials(input: { username?: string; password?: string }) {
-  const { username: requiredUsername, password: requiredPassword } = getAuthConfig()
-  const providedPassword = input.password ?? ''
-  const providedUsername = input.username ?? ''
+export async function verifyTeacherCredentials(input: {
+  username?: string
+  password?: string
+}): Promise<TeacherAccount | null> {
+  const username = (input.username ?? '').trim().toLowerCase()
+  const password = input.password ?? ''
+  if (!username || !password) return null
 
-  if (!constantTimeEqual(providedPassword, requiredPassword)) return false
-  if (requiredUsername) {
-    return constantTimeEqual(providedUsername, requiredUsername)
+  const supabase = createAdminClient()
+  const { data, error } = await supabase
+    .from('teachers')
+    .select('id, username, name, password_hash, is_active')
+    .eq('username', username)
+    .maybeSingle()
+
+  if (error) {
+    console.error('teacher login: lookup error', error)
+    return null
   }
-  return true
+  if (!data) {
+    console.warn(`teacher login: no teacher row for username "${username}"`)
+    return null
+  }
+  if (!data.is_active) {
+    console.warn(`teacher login: teacher "${username}" is not active`)
+    return null
+  }
+
+  const ok = await bcrypt.compare(password, data.password_hash)
+  if (!ok) {
+    console.warn(`teacher login: password mismatch for username "${username}"`)
+    return null
+  }
+
+  return { id: data.id, username: data.username, name: data.name }
 }

@@ -1,14 +1,12 @@
 import Link from 'next/link'
 import { redirect } from 'next/navigation'
 import { Card } from '@/components/ui/card'
-import { getTeacherSession, isTeacherUsernameRequired } from '@/lib/teacher-auth'
+import { getTeacherSession } from '@/lib/teacher-auth'
 import TeacherLoginForm from '@/app/teacher/login/login-form'
 
 export default async function TeacherLoginPage() {
   const existing = await getTeacherSession()
   if (existing) redirect('/teacher/dashboard')
-
-  const showUsername = isTeacherUsernameRequired()
 
   return (
     <main className="min-h-screen bg-background flex items-center justify-center">
@@ -16,11 +14,11 @@ export default async function TeacherLoginPage() {
         <div className="mb-10 text-center">
 
           <h1 className="text-3xl font-bold text-foreground mb-2">Teacher Login</h1>
-          <p className="text-sm text-foreground/70">Enter the dashboard password to continue</p>
+          <p className="text-sm text-foreground/70">Sign in with your teacher account to continue</p>
         </div>
 
         <Card className="p-8">
-          <TeacherLoginForm showUsername={showUsername} />
+          <TeacherLoginForm />
 
           <div className="mt-8 pt-6 border-t border-border/40 text-center">
             <Link href="/" className="text-sm text-foreground/60 hover:text-foreground transition-colors">

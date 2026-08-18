@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 
-export default function TeacherLoginForm({ showUsername }: { showUsername: boolean }) {
+export default function TeacherLoginForm() {
   const router = useRouter()
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -43,14 +43,12 @@ export default function TeacherLoginForm({ showUsername }: { showUsername: boole
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
-      {showUsername && (
-        <div>
-          <label htmlFor="username" className="block text-sm font-medium text-foreground mb-3">
-            Username
-          </label>
-          <Input id="username" name="username" type="text" autoComplete="username" required disabled={pending} />
-        </div>
-      )}
+      <div>
+        <label htmlFor="username" className="block text-sm font-medium text-foreground mb-3">
+          Username
+        </label>
+        <Input id="username" name="username" type="text" autoComplete="username" required disabled={pending} />
+      </div>
 
       <div>
         <label htmlFor="password" className="block text-sm font-medium text-foreground mb-3">

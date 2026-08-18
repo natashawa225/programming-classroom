@@ -167,7 +167,7 @@ export async function createSession(
     transferCorrectAnswer?: string
   }
 ) {
-  await assertTeacherAuthenticated()
+  const teacherSession = await assertTeacherAuthenticated()
   const supabase = await createClient()
 
   const questionsInput =
@@ -219,6 +219,7 @@ export async function createSession(
         current_question_position: 1,
         current_timer_seconds: normalizedQuestions[0].timerSeconds,
         timer_started_at: null,
+        teacher_id: teacherSession.teacherId,
       })
       .select()
       .single()
@@ -249,12 +250,13 @@ export async function createSession(
   throw new Error('Unable to generate a unique session code. Please try again.')
 }
 
-export async function getSessionsByTeacher(_teacherId: string) {
+export async function getSessionsByTeacher(teacherId: string) {
   await assertTeacherAuthenticated()
   const supabase = await createClient()
   const { data, error } = await supabase
     .from('sessions')
     .select('*')
+    .eq('teacher_id', teacherId)
     .order('created_at', { ascending: false })
 
   if (error) throw error

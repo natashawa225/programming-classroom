@@ -7,12 +7,12 @@ export async function POST(request: NextRequest) {
     const username = String(body?.username || '').trim()
     const password = String(body?.password || '')
 
-    const ok = verifyTeacherCredentials({ username, password })
-    if (!ok) {
+    const teacher = await verifyTeacherCredentials({ username, password })
+    if (!teacher) {
       return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 })
     }
 
-    await setTeacherSessionCookie(username || undefined)
+    await setTeacherSessionCookie(teacher)
     return NextResponse.json({ ok: true })
   } catch (error) {
     console.error('teacher login error', error)

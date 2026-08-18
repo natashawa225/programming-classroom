@@ -26,6 +26,11 @@ import {
   resolveRenderedCluster,
   type UnderstandingBucket,
 } from '@/lib/live-cluster-rendering'
+import {
+  LayoutDashboard,
+  Loader2,
+  RefreshCw,
+} from 'lucide-react'
 
 type Props = {
   initialSession: Session
@@ -904,16 +909,15 @@ export default function SessionDetailClient({
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-3 lg:justify-end">
+              <div className="flex items-center gap-3">
               <Link href="/teacher/dashboard">
-                <Button variant="outline" className="rounded-full border-[rgba(123,175,212,0.22)] bg-white/80 px-5">
-                  Back
+                <Button variant="ghost" size="sm" className="gap-2 text-slate-600 hover:text-slate-900">
+                  <LayoutDashboard className="size-4" />
+                  Dashboard
                 </Button>
               </Link>
-              <TeacherLogoutButton
-                variant="outline"
-                className="rounded-full border-[rgba(123,175,212,0.22)] bg-white/80 px-5"
-              />
-            </div>
+              </div>
+          </div>
           </div>
           <div className="overflow-x-auto">
             <div className="grid min-w-[720px] grid-cols-5 gap-3 sm:min-w-0 sm:grid-cols-2 lg:grid-cols-5">
@@ -1106,8 +1110,11 @@ export default function SessionDetailClient({
                       }
                     >
                       {actionLoading === postSessionRerunActionKey
-                        ? 'Re-running clustering...'
-                        : 'Re-run clustering with latest prompt'}
+                        ? (
+                          <><Loader2 className="size-3.5 animate-spin" /> Re-running...</>
+                        ) : (
+                          <><RefreshCw className="size-3.5" /> Re-run clustering</>
+                        )}
                     </Button>
                   )}
                   {canCompareRevision && (
@@ -1348,14 +1355,14 @@ export default function SessionDetailClient({
           <aside className="min-w-0 xl:sticky xl:top-24">
             <section className="rounded-2xl bg-white p-4 shadow-[0_10px_24px_rgba(28,26,36,0.045)]">
               <div className="flex items-center justify-between gap-3">
-                <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Selected Group</p>
+                <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">Selected Cluster</p>
                 <Badge className="rounded-full border border-[rgba(123,175,212,0.22)] bg-white px-3 py-1 text-xs font-medium text-foreground/60 shadow-none">
                   {visibleClusters.length} {visibleClusters.length === 1 ? 'group' : 'groups'}
                 </Badge>
               </div>
 
               <div className="mt-3">
-                <p className="text-[11px] uppercase tracking-[0.16em] text-foreground/42">Groups</p>
+                <p className="text-[11px] uppercase tracking-[0.16em] text-foreground/42">Cluster</p>
                 <div className="mt-2 grid max-h-[150px] gap-1.5 overflow-y-auto pr-1">
                   {!hasVisibleAnalysis ? (
                     <p className="rounded-xl bg-[rgba(248,251,255,0.82)] px-3 py-3 text-sm leading-5 text-foreground/58">

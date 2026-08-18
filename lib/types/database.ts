@@ -20,6 +20,15 @@ export interface Participant {
   created_at: string
 }
 
+export interface Teacher {
+  id: string
+  username: string
+  name: string | null
+  password_hash: string
+  is_active: boolean
+  created_at: string
+}
+
 export interface Session {
   id: string
   session_code: string
@@ -36,6 +45,7 @@ export interface Session {
   current_question_position: number
   current_timer_seconds: number | null
   timer_started_at: string | null
+  teacher_id: string | null
   created_at: string
 }
 
