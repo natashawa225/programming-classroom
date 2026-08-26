@@ -136,7 +136,7 @@ export default function CreateSession() {
           <div className="space-y-6">
             {/* Basic Information */}
             <Card className="p-6">
-              <h2 className="text-xl font-semibold text-foreground mb-6">Basic Information</h2>
+              <h2 className="text-xl font-semibold text-foreground mb-6">Question Setup</h2>
               
 	              <div className="space-y-4">
 	                <div className="p-3 rounded-md bg-secondary/30 text-sm text-foreground/70">
@@ -203,12 +203,12 @@ export default function CreateSession() {
 
                           <div>
                             <label className="block text-sm font-medium text-foreground mb-2">
-                              Correct Answer (optional, used for % correct)
+                              Reference Answer (optional)
                             </label>
                             <textarea
                               value={q.correctAnswer}
                               onChange={(e) => updateQuestion(idx, { correctAnswer: e.target.value })}
-                              placeholder="Optional: expected answer"
+                              placeholder=""
                               rows={2}
                               className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                             />

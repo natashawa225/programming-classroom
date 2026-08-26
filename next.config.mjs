@@ -5,6 +5,7 @@ const projectRoot = path.dirname(fileURLToPath(import.meta.url))
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  devIndicators: false,
   turbopack: {
     // Ensure Next resolves deps from this project directory (not a parent folder lockfile).
     root: projectRoot,

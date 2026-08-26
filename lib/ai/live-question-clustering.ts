@@ -2,12 +2,6 @@ import type { AttemptType } from '@/lib/types/database'
 import { openaiChatJson } from '@/lib/ai/openai-json'
 import type { UnionFindQuestionContext } from '@/lib/ai/union-find-question-config'
 
-export type UnderstandingBucket =
-  | 'needs_attention'
-  | 'mixed_reasoning'
-  | 'strong_alignment'
-  | 'unclear'
-
 export type LiveCluster = {
   cluster_id: string
   label: string
@@ -16,9 +10,6 @@ export type LiveCluster = {
   average_confidence: number
   representative_answers: string[]
   response_ids: string[]
-  conceptual_alignment?: number       // -1 (conflicting) → 0 (mixed) → 1 (aligned)
-  understanding_bucket?: UnderstandingBucket
-  teacher_note?: string | null
 }
 
 export type LiveQuestionClusterAnalysis = {
@@ -43,7 +34,6 @@ type InputResponse = {
 }
 
 type BareAnswerKind = 'affirm' | 'reject' | 'uncertain'
-type ReferenceDirection = 'affirm' | 'reject' | null
 type ProcessedInputResponse = InputResponse & {
   bare: boolean
   bare_answer_kind: BareAnswerKind | null
@@ -54,43 +44,10 @@ type ClusterIntegrityContext = {
   attemptType?: AttemptType
 }
 
-// --- Backward-compat: map v1 True/False labels to alignment scores ---
-export function inferAlignmentFromV1Label(label: string): number {
-  const lower = label.toLowerCase()
-  if (lower.startsWith('true')) return 0.7
-  if (lower.startsWith('false')) return -0.7
-  return 0.0
-}
-
-export function inferBucketFromAlignment(alignment: number): UnderstandingBucket {
-  if (alignment >= 0.6) return 'strong_alignment'
-  if (alignment >= 0.1) return 'mixed_reasoning'
-  if (alignment <= -0.3) return 'needs_attention'
-  return 'unclear'
-}
-
 function clampClusterCount(count: number) {
   if (count < 1) return 1
   if (count > 5) return 5
   return count
-}
-
-function clampAlignment(value: unknown): number {
-  const n = Number(value)
-  if (isNaN(n)) return 0
-  return Math.max(-1, Math.min(1, n))
-}
-
-function safeUnderstandingBucket(value: unknown): UnderstandingBucket {
-  const valid: UnderstandingBucket[] = [
-    'needs_attention',
-    'mixed_reasoning',
-    'strong_alignment',
-    'unclear',
-  ]
-  return valid.includes(value as UnderstandingBucket)
-    ? (value as UnderstandingBucket)
-    : 'unclear'
 }
 
 function safeLabel(text: string, index: number) {
@@ -100,7 +57,7 @@ function safeLabel(text: string, index: number) {
 
 function safeSummary(text: string) {
   const trimmed = String(text || '').trim()
-  return trimmed || 'Students in this cluster use a similar line of reasoning.'
+  return trimmed || 'Students in this cluster used a similar line of reasoning.'
 }
 
 function normalizeAnswer(answer: string) {
@@ -174,24 +131,6 @@ function classifyBareAnswer(answer: string): Pick<ProcessedInputResponse, 'bare'
   return { bare: false, bare_answer_kind: null }
 }
 
-function inferReferenceDirection(correctAnswer?: string | null): ReferenceDirection {
-  const normalized = normalizeBareText(correctAnswer || '')
-  if (!normalized) return null
-
-  const compact = normalized.replace(/\s+/g, '')
-  const affirmStart = /^(yes|true|correct|right)\b/.test(normalized) || /^(是|对|正确|對|正確)/.test(compact)
-  const rejectStart = /^(no|false|incorrect|wrong)\b/.test(normalized) || /^(不是|不对|不對|错误|錯誤|否)/.test(compact)
-  if (affirmStart && !rejectStart) return 'affirm'
-  if (rejectStart && !affirmStart) return 'reject'
-
-  const affirmStatement = /\b(the answer is|answer is|it is|it's)\s+(yes|true|correct|right)\b/.test(normalized)
-  const rejectStatement = /\b(the answer is|answer is|it is|it's)\s+(no|false|incorrect|wrong)\b/.test(normalized)
-  if (affirmStatement && !rejectStatement) return 'affirm'
-  if (rejectStatement && !affirmStatement) return 'reject'
-
-  return null
-}
-
 function summarizeAnswerStem(answer: string) {
   const normalized = normalizeAnswer(answer)
   if (!normalized) return 'Students expressed a similar idea with overlapping wording.'
@@ -205,12 +144,7 @@ function buildClusterFromResponses(
   label: string,
   summary: string,
   rows: InputResponse[],
-  index: number,
-  v2Fields?: {
-    conceptual_alignment?: number
-    understanding_bucket?: UnderstandingBucket
-    teacher_note?: string | null
-  }
+  index: number
 ): LiveCluster {
   const averageConfidence =
     rows.length > 0
@@ -225,17 +159,7 @@ function buildClusterFromResponses(
     average_confidence: averageConfidence,
     representative_answers: rows.slice(0, 3).map((row) => row.answer),
     response_ids: rows.map((row) => row.response_id),
-    ...(v2Fields ?? {}),
   }
-}
-
-function buildBareTeacherNote(rows: InputResponse[]) {
-  const high = rows.filter((row) => row.confidence >= 4).length
-  const medium = rows.filter((row) => row.confidence === 3).length
-  const low = rows.filter((row) => row.confidence <= 2).length
-  const studentLabel = rows.length === 1 ? 'student' : 'students'
-  const responseLabel = rows.length === 1 ? 'response' : 'responses'
-  return `${rows.length} ${studentLabel} gave answer-only ${responseLabel} with no reasoning. Confidence: ${high} high, ${medium} medium, ${low} low. Use this as a confidence/participation signal, not as evidence of reasoning.`
 }
 
 function normalizeFinalClusters(
@@ -263,13 +187,7 @@ function normalizeFinalClusters(
 
     if (rows.length === 0) continue
 
-    normalized.push(
-      buildClusterFromResponses(cluster.label, cluster.summary, rows, normalized.length, {
-        conceptual_alignment: cluster.conceptual_alignment,
-        understanding_bucket: cluster.understanding_bucket,
-        teacher_note: cluster.teacher_note,
-      })
-    )
+    normalized.push(buildClusterFromResponses(cluster.label, cluster.summary, rows, normalized.length))
   }
 
   const unassignedRows = responses.filter((response) => !assigned.has(response.response_id))
@@ -287,12 +205,7 @@ function normalizeFinalClusters(
           'Other response patterns',
           'Responses that were not assigned by the model were grouped locally to preserve exact response coverage.',
           unassignedRows,
-          normalized.length,
-          {
-            conceptual_alignment: 0,
-            understanding_bucket: 'unclear',
-            teacher_note: 'These responses were added locally because the model omitted their response_ids.',
-          }
+          normalized.length
         )
       )
     } else {
@@ -303,28 +216,14 @@ function normalizeFinalClusters(
       const mergedRows = [...target.response_ids, ...unassignedRows.map((row) => row.response_id)]
         .map((id) => responseMap.get(id)!)
         .filter(Boolean)
-      normalized[smallestIndex] = buildClusterFromResponses(
-        target.label,
-        target.summary,
-        mergedRows,
-        smallestIndex,
-        {
-          conceptual_alignment: target.conceptual_alignment,
-          understanding_bucket: target.understanding_bucket,
-          teacher_note: target.teacher_note,
-        }
-      )
+      normalized[smallestIndex] = buildClusterFromResponses(target.label, target.summary, mergedRows, smallestIndex)
     }
   }
 
   if (normalized.length <= 5) {
     return normalized.map((cluster, index) => {
       const rows = cluster.response_ids.map((id) => responseMap.get(id)!).filter(Boolean)
-      return buildClusterFromResponses(cluster.label, cluster.summary, rows, index, {
-        conceptual_alignment: cluster.conceptual_alignment,
-        understanding_bucket: cluster.understanding_bucket,
-        teacher_note: cluster.teacher_note,
-      })
+      return buildClusterFromResponses(cluster.label, cluster.summary, rows, index)
     })
   }
 
@@ -347,22 +246,13 @@ function normalizeFinalClusters(
       'Other response patterns',
       'Additional response groups were merged locally to keep the live view within five clusters.',
       overflowRows,
-      4,
-      {
-        conceptual_alignment: 0,
-        understanding_bucket: 'mixed_reasoning',
-        teacher_note: 'Overflow clusters were merged locally because the final cluster count exceeded five.',
-      }
+      4
     ),
   ]
 
   return merged.map((cluster, index) => {
     const rows = cluster.response_ids.map((id) => responseMap.get(id)!).filter(Boolean)
-    return buildClusterFromResponses(cluster.label, cluster.summary, rows, index, {
-      conceptual_alignment: cluster.conceptual_alignment,
-      understanding_bucket: cluster.understanding_bucket,
-      teacher_note: cluster.teacher_note,
-    })
+    return buildClusterFromResponses(cluster.label, cluster.summary, rows, index)
   })
 }
 
@@ -420,7 +310,6 @@ function validateClusterIntegrity(
 function finalizeClusterAnalysis(
   analysis: LiveQuestionClusterAnalysis,
   responses: ProcessedInputResponse[],
-  referenceDirection: ReferenceDirection,
   context: ClusterIntegrityContext = {}
 ): LiveQuestionClusterAnalysis {
   const normalizedClusters = normalizeFinalClusters(analysis.clusters, responses, context)
@@ -453,7 +342,7 @@ function finalizeClusterAnalysis(
   fallback.question_prompt = analysis.question_prompt
   fallback.attempt_type = analysis.attempt_type
   fallback.clusters = normalizeFinalClusters(
-    postProcessBareAnswerClusters(fallback.clusters, responses, referenceDirection),
+    postProcessBareAnswerClusters(fallback.clusters, responses),
     responses,
     context
   )
@@ -462,36 +351,23 @@ function finalizeClusterAnalysis(
   return fallback
 }
 
-function getBareClusterDescriptor(
-  rows: ProcessedInputResponse[],
-  referenceDirection: ReferenceDirection
-): { label: string; summary: string } {
-  const hasUncertain = rows.some((row) => row.bare_answer_kind === 'uncertain')
-  if (hasUncertain) {
+function getBareClusterDescriptor(kind: BareAnswerKind): { label: string; summary: string } {
+  if (kind === 'uncertain') {
     return {
       label: 'Uncertain answer only - no reasoning given',
-      summary: 'Students gave answer-only uncertainty responses without explaining their thinking.',
+      summary: 'Students gave an answer-only response expressing uncertainty (e.g. "not sure", "idk") without explaining their thinking.',
     }
   }
-
-  if (!referenceDirection) {
+  if (kind === 'affirm') {
     return {
-      label: 'Answer only - no reasoning given',
-      summary: 'Students gave a bare final answer without explaining their reasoning.',
+      label: 'Affirmative answer only - no reasoning given',
+      summary: 'Students gave a short affirmative answer (e.g. "yes"/"agree"/"true") without explaining their reasoning.',
     }
   }
-
-  const firstKind = rows[0]?.bare_answer_kind
-  const isCorrectBare = firstKind === referenceDirection
-  return isCorrectBare
-    ? {
-        label: 'Correct answer only - no reasoning given',
-        summary: 'Students gave the expected final answer without explaining their reasoning.',
-      }
-    : {
-        label: 'Wrong answer only - no reasoning given',
-        summary: 'Students gave a final answer that conflicts with the reference direction without explaining their reasoning.',
-      }
+  return {
+    label: 'Negative answer only - no reasoning given',
+    summary: 'Students gave a short negative answer (e.g. "no"/"disagree"/"false") without explaining their reasoning.',
+  }
 }
 
 export class LiveClusteringError extends Error {
@@ -529,19 +405,7 @@ function sanitizeModelClusters(
     ids.forEach((id: string) => assigned.add(id))
     const rows = ids.map((id: string) => responseMap.get(id)!).filter(Boolean)
 
-    const alignment = clampAlignment(cluster?.conceptual_alignment)
-
-    sanitized.push(
-      buildClusterFromResponses(cluster?.label, cluster?.summary, rows, index, {
-        conceptual_alignment: alignment,
-        understanding_bucket: cluster?.understanding_bucket
-          ? safeUnderstandingBucket(cluster.understanding_bucket)
-          : inferBucketFromAlignment(alignment),
-        teacher_note: cluster?.teacher_note
-          ? String(cluster.teacher_note).trim() || null
-          : null,
-      })
-    )
+    sanitized.push(buildClusterFromResponses(cluster?.label, cluster?.summary, rows, index))
   }
 
   const unassigned = responses.filter((response) => !assigned.has(response.response_id))
@@ -559,17 +423,7 @@ function sanitizeModelClusters(
     const mergedRows = [...target.response_ids, ...unassigned.map((row) => row.response_id)]
       .map((id: string) => responseMap.get(id)!)
       .filter(Boolean)
-    sanitized[targetIndex] = buildClusterFromResponses(
-      target.label,
-      target.summary,
-      mergedRows,
-      targetIndex,
-      {
-        conceptual_alignment: target.conceptual_alignment,
-        understanding_bucket: target.understanding_bucket,
-        teacher_note: target.teacher_note,
-      }
-    )
+    sanitized[targetIndex] = buildClusterFromResponses(target.label, target.summary, mergedRows, targetIndex)
   }
 
   if (sanitized.length <= 5) return sanitized
@@ -589,33 +443,19 @@ function sanitizeModelClusters(
       'Additional response patterns',
       'The model returned more than five clusters, so smaller overflow groups were merged to preserve every response.',
       overflowRows,
-      4,
-      {
-        conceptual_alignment: 0,
-        understanding_bucket: 'mixed_reasoning',
-        teacher_note: 'Overflow clusters were merged locally because the model returned more than five groups.',
-      }
+      4
     )
   )
   return kept
 }
 
-function appendBareTeacherNote(existingNote: string | null | undefined, rows: InputResponse[]) {
-  const note = buildBareTeacherNote(rows)
-  const trimmed = String(existingNote || '').trim()
-  return trimmed ? `${trimmed} ${note}` : note
-}
-
-function getBareClusterKey(response: ProcessedInputResponse, referenceDirection: ReferenceDirection) {
-  if (response.bare_answer_kind === 'uncertain') return 'uncertain'
-  if (!referenceDirection) return 'unknown'
-  return response.bare_answer_kind === referenceDirection ? 'correct' : 'wrong'
+function getBareClusterKey(response: ProcessedInputResponse): BareAnswerKind {
+  return response.bare_answer_kind || 'uncertain'
 }
 
 function postProcessBareAnswerClusters(
   clusters: LiveCluster[],
-  responses: ProcessedInputResponse[],
-  referenceDirection: ReferenceDirection
+  responses: ProcessedInputResponse[]
 ) {
   const responseMap = new Map(responses.map((response) => [response.response_id, response]))
   const processed: LiveCluster[] = []
@@ -628,32 +468,20 @@ function postProcessBareAnswerClusters(
     const explainedRows = rows.filter((row) => !row.bare)
 
     if (explainedRows.length > 0) {
-      processed.push(
-        buildClusterFromResponses(cluster.label, cluster.summary, explainedRows, processed.length, {
-          conceptual_alignment: cluster.conceptual_alignment,
-          understanding_bucket: cluster.understanding_bucket,
-          teacher_note: cluster.teacher_note,
-        })
-      )
+      processed.push(buildClusterFromResponses(cluster.label, cluster.summary, explainedRows, processed.length))
     }
 
-    const groupedBareRows = new Map<string, ProcessedInputResponse[]>()
+    const groupedBareRows = new Map<BareAnswerKind, ProcessedInputResponse[]>()
     for (const row of bareRows) {
-      const key = getBareClusterKey(row, referenceDirection)
+      const key = getBareClusterKey(row)
       groupedBareRows.set(key, [...(groupedBareRows.get(key) || []), row])
     }
 
-    for (const key of ['correct', 'wrong', 'uncertain', 'unknown']) {
+    for (const key of ['affirm', 'reject', 'uncertain'] as BareAnswerKind[]) {
       const groupRows = groupedBareRows.get(key)
       if (!groupRows || groupRows.length === 0) continue
-      const descriptor = getBareClusterDescriptor(groupRows, referenceDirection)
-      processed.push(
-        buildClusterFromResponses(descriptor.label, descriptor.summary, groupRows, processed.length, {
-          conceptual_alignment: 0,
-          understanding_bucket: 'unclear',
-          teacher_note: appendBareTeacherNote(null, groupRows),
-        })
-      )
+      const descriptor = getBareClusterDescriptor(key)
+      processed.push(buildClusterFromResponses(descriptor.label, descriptor.summary, groupRows, processed.length))
     }
   }
 
@@ -691,13 +519,7 @@ function validateExactResponseCoverage(clusters: LiveCluster[], responses: Proce
         .filter(Boolean)
       if (rows.length === 0) continue
       rows.forEach((row) => assigned.add(row.response_id))
-      repaired.push(
-        buildClusterFromResponses(cluster.label, cluster.summary, rows, repaired.length, {
-          conceptual_alignment: cluster.conceptual_alignment,
-          understanding_bucket: cluster.understanding_bucket,
-          teacher_note: cluster.teacher_note,
-        })
-      )
+      repaired.push(buildClusterFromResponses(cluster.label, cluster.summary, rows, repaired.length))
     }
 
     const repairedMissingRows = responses.filter((response) => !assigned.has(response.response_id))
@@ -707,12 +529,7 @@ function validateExactResponseCoverage(clusters: LiveCluster[], responses: Proce
           'Additional response patterns',
           'Responses that were omitted during local validation were merged into a final catch-all group.',
           repairedMissingRows,
-          repaired.length,
-          {
-            conceptual_alignment: 0,
-            understanding_bucket: 'unclear',
-            teacher_note: 'These responses were added locally to preserve exact response coverage.',
-          }
+          repaired.length
         )
       )
     }
@@ -780,11 +597,7 @@ function buildFallbackClusters(
       : isSingletonFallbackGroup
         ? 'AI clustering was unavailable, so singleton wording variants are grouped together rather than split into artificial clusters.'
       : summarizeAnswerStem(rows[0]?.answer || '')
-    return buildClusterFromResponses(label, summary, rows, index, {
-      conceptual_alignment: 0,
-      understanding_bucket: 'unclear',
-      teacher_note: null,
-    })
+    return buildClusterFromResponses(label, summary, rows, index)
   })
 
   return {
@@ -830,7 +643,6 @@ export async function clusterLiveQuestionResponses(input: {
     throw new LiveClusteringError('no_responses', 'No responses are available for this question attempt.')
   }
 
-  const referenceDirection = inferReferenceDirection(input.correctAnswer)
   const numberedResponses = cleanedResponses
     .map((response, index) => {
       return `${index + 1}. response_id=${response.response_id}\nconfidence=${response.confidence}\nbare=${response.bare}\nanswer=${response.answer}`
@@ -844,14 +656,17 @@ export async function clusterLiveQuestionResponses(input: {
       {
         role: 'system',
         content: [
-          'You cluster short student answers for one open-ended classroom question into 1 to 5 reasoning-pattern groups.',
+          'You cluster short student answers for one open-ended classroom question into 1 to 5 groups based on shared reasoning pattern or approach.',
           '',
-          'Your main job is grouping, not grading.',
-          'Cluster responses by the underlying idea or reasoning pattern students are using.',
+          'Your only job is grouping and describing what students said, not grading it.',
+          'Group responses by the underlying idea, approach, or reasoning pattern students are using — never by whether that idea is correct.',
           '',
-          'Important: this question has a single teacher-provided reference answer, but the question is open-ended and may have multiple valid correct answers.',
-          'Students typed free text. Do not treat the reference answer as the only acceptable answer.',
-          'Different valid answers that reflect sound reasoning should be merged into the same cluster or treated as equally aligned, not split apart or penalised.',
+          'Do not judge correctness, identify misconceptions, infer learning outcomes, or recommend teaching actions.',
+          'Do not label, score, or categorize any response or cluster as correct, incorrect, a misconception, or a level of understanding.',
+          'Do not use words like "correct", "incorrect", "wrong", "misconception", "error", "should", or "misunderstand" in a label or summary.',
+          '',
+          'Important: this question has a single teacher-provided reference answer, but the question is open-ended and may have multiple valid answers.',
+          'Students typed free text. Use the reference answer only as topic context to understand what the question is about — never to grade, rank, or flag any response.',
           '',
           'Prefer fewer, broader clusters. False splits are worse than broad clusters for this live teacher dashboard.',
           'When unsure whether two responses are meaningfully different, merge them.',
@@ -859,13 +674,11 @@ export async function clusterLiveQuestionResponses(input: {
           'Do not split by language, wording, confidence, answer length, writing quality, or minor detail differences.',
           'Do not create separate clusters just because one answer is more detailed or polished than another.',
           '',
-          'Only separate responses when they show a meaningfully different concept, misconception, or lack of interpretable reasoning.',
-          'A difference is meaningful only if it would change what the teacher should address next.',
+          'Only separate responses when they describe a meaningfully different idea or approach — a distinction a teacher would want to see as a different group of student thinking, not a difference in how good or complete the answer is.',
           '',
-          'After assigning response_ids to clusters, write a short neutral label and one-sentence summary for each cluster.',
-          'Then optionally add teacher_note only if there is a useful misconception, ambiguity, or teaching point to notice.',
+          'After assigning response_ids to clusters, write a short neutral label and one-sentence summary for each cluster that describes what students in that cluster said or did.',
           '',
-          'Return concise JSON only. Use classroom-safe language.',
+          'Return concise JSON only. Use classroom-safe, neutral language.',
         ].join('\n'),
       },
       {
@@ -874,11 +687,8 @@ export async function clusterLiveQuestionResponses(input: {
           `Question id: ${input.questionId}`,
           `Question position: ${input.questionPosition}`,
           `Question prompt:\n${input.questionPrompt}`,
-          `Reference answer (one valid example only — not the only correct answer): \n${input.correctAnswer || ''}`,
-          `Lesson concept:\n${input.lessonContext?.lesson_concept || ''}`,
-          `Target misconception:\n${input.lessonContext?.target_misconception || ''}`,
-          `Strong answer criteria:\n${JSON.stringify(input.lessonContext?.strong_answer_criteria ?? [])}`,
-          `Known misconception variants:\n${JSON.stringify(input.lessonContext?.misconception_variants ?? [])}`,
+          `Reference answer (topic context only — not an answer key, not for grading): \n${input.correctAnswer || ''}`,
+          `Lesson concept (topic context only):\n${input.lessonContext?.lesson_concept || ''}`,
           `Attempt type: ${input.attemptType}`,
           'Student responses:',
           numberedResponses,
@@ -887,11 +697,8 @@ export async function clusterLiveQuestionResponses(input: {
             clusters: [
               {
                 cluster_id: 'cluster_1',
-                label: 'neutral reasoning label',
-                summary: 'one-sentence neutral description of the shared reasoning pattern',
-                conceptual_alignment: 0.35,
-                understanding_bucket: 'mixed_reasoning',
-                teacher_note: 'optional — omit or null unless genuinely useful',
+                label: 'neutral description of the shared idea or approach',
+                summary: 'one-sentence neutral description of what students in this cluster said',
                 response_ids: ['...'],
               },
             ],
@@ -899,30 +706,18 @@ export async function clusterLiveQuestionResponses(input: {
           'Rules:',
           '- Every response_id must appear in exactly one cluster.',
           '- Use 1 to 5 clusters. Use 1 cluster when responses are conceptually homogeneous.',
-          '- If there are fewer than 4 responses, use 1–2 clusters unless there is a clearly different misconception.',
+          '- If there are fewer than 4 responses, use 1–2 clusters unless there is a clearly different idea or approach.',
           '- Prefer fewer broader clusters. Merge when in doubt.',
-          '- Separate clusters only when the difference would change what the teacher addresses next.',
-          '- Always merge responses that express the same underlying concept in different words or languages.',
-          '- Treat equivalent phrasings as one cluster: e.g. "postorder", "after all neighbors processed", "after descendants", "after recursive calls finish", "reverse topological order" all express the same DFS-finish-time idea.',
+          '- Separate clusters only when the difference is one a teacher would want to see as a distinct group of student thinking, not a difference in correctness or quality.',
+          '- Always merge responses that express the same underlying idea in different words or languages.',
+          '- Treat equivalent phrasings as one cluster: e.g. "postorder", "after all neighbors processed", "after descendants", "after recursive calls finish", "reverse topological order" may all express the same idea in different words — merge them if they describe the same thing.',
           '- Do not split by: language, wording, answer length, confidence, or writing quality.',
           '- Confidence is context for the teacher summary only. Do not use confidence as a reason to create separate clusters.',
-          '- label = short name of the reasoning pattern (neutral, no True/False/Correct/Incorrect prefix).',
-          '- summary = what students in the cluster are generally thinking (one sentence, neutral).',
-          '- teacher_note must be actionable and specific. Do not write generic notes such as "review this concept" or "clarify the topic".',
-          '- teacher_note should be null when there is no specific misconception, ambiguity, or teaching move worth surfacing.',
-          '- conceptual_alignment is a float from -1.0 to 1.0:',
-          '  - 1.0 = clearly aligned with the target concept',
-          '  - 0.5–0.8 = mostly aligned but missing nuance',
-          '  - 0.0–0.4 = partial, vague, or unsupported',
-          '  - below 0.0 = appears to reflect a misconception or conflicts with the target concept',
-          '- understanding_bucket must be exactly one of: needs_attention, mixed_reasoning, strong_alignment, unclear.',
-          '- Use strong_alignment only when the shared reasoning clearly matches the target concept and is specific enough to interpret.',
-          '- Use mixed_reasoning for partial, conditional, or incomplete reasoning.',
-          '- Use needs_attention for clear misconceptions.',
-          '- Responses marked bare=true contain no reasoning. Always place them in a separate cluster from explained responses. Set understanding_bucket to unclear. Do not split bare responses further by confidence.',
-          '- Use unclear for bare responses and for explained responses that are too vague to interpret.',
-          '- Treat the reference answer as guidance, not an absolute answer key.',
-          '- Do not penalize a response only because it differs from the reference answer; evaluate the reasoning.',
+          '- label = short neutral name of the idea or approach. No True/False/Correct/Incorrect/Misconception wording or prefix.',
+          '- summary = one neutral sentence describing what students in the cluster said or did. Never state or imply whether it is right, wrong, or a misconception.',
+          '- Do not judge correctness, identify misconceptions, infer learning outcomes, or recommend teaching actions anywhere in a label or summary.',
+          '- Responses marked bare=true contain no reasoning. Always place them in a separate cluster from explained responses. Do not split bare responses further by confidence.',
+          '- Treat the reference answer as topic context only, never as an answer key for grading responses.',
         ].join('\n\n'),
       },
     ],
@@ -937,9 +732,9 @@ export async function clusterLiveQuestionResponses(input: {
     const fallback = buildFallbackClusters(cleanedResponses, fallbackReason, result.rawText || null)
     fallback.question_prompt = input.questionPrompt
     fallback.attempt_type = input.attemptType
-    fallback.clusters = postProcessBareAnswerClusters(fallback.clusters, cleanedResponses, referenceDirection)
+    fallback.clusters = postProcessBareAnswerClusters(fallback.clusters, cleanedResponses)
     fallback.cluster_count = fallback.clusters.length
-    return finalizeClusterAnalysis(fallback, cleanedResponses, referenceDirection, {
+    return finalizeClusterAnalysis(fallback, cleanedResponses, {
       questionId: input.questionId,
       attemptType: input.attemptType,
     })
@@ -948,17 +743,16 @@ export async function clusterLiveQuestionResponses(input: {
   const rawClusters = Array.isArray(result.json?.clusters) ? result.json.clusters : []
   const clusters = postProcessBareAnswerClusters(
     sanitizeModelClusters(rawClusters, cleanedResponses),
-    cleanedResponses,
-    referenceDirection
+    cleanedResponses
   )
   if (clusters.length === 0) {
     const fallbackReason = 'OpenAI returned cluster JSON, but it could not be mapped to the submitted responses.'
     const fallback = buildFallbackClusters(cleanedResponses, fallbackReason, result.rawText || null)
     fallback.question_prompt = input.questionPrompt
     fallback.attempt_type = input.attemptType
-    fallback.clusters = postProcessBareAnswerClusters(fallback.clusters, cleanedResponses, referenceDirection)
+    fallback.clusters = postProcessBareAnswerClusters(fallback.clusters, cleanedResponses)
     fallback.cluster_count = fallback.clusters.length
-    return finalizeClusterAnalysis(fallback, cleanedResponses, referenceDirection, {
+    return finalizeClusterAnalysis(fallback, cleanedResponses, {
       questionId: input.questionId,
       attemptType: input.attemptType,
     })
@@ -974,7 +768,7 @@ export async function clusterLiveQuestionResponses(input: {
     fallback_reason: null,
     fallback_debug: null,
     clusters,
-  }, cleanedResponses, referenceDirection, {
+  }, cleanedResponses, {
     questionId: input.questionId,
     attemptType: input.attemptType,
   })

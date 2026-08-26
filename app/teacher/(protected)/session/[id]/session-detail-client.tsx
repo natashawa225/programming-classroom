@@ -15,15 +15,13 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
-import { getConfidenceLevel } from '@/lib/confidence'
 import { TeacherLogoutButton } from '@/components/teacher-logout-button'
 import {
   clamp,
-  getClusterDisplayLabel,
-  getBucketDisplayLabel,
-  getClusterBucketOpacity,
   getClusterBucketX,
+  getClusterPatternColor,
   resolveRenderedCluster,
+  resolveRenderedClusters,
   type UnderstandingBucket,
 } from '@/lib/live-cluster-rendering'
 import {
@@ -65,16 +63,7 @@ type LiveAnalysisPayload = {
     response_ids: string[]
     conceptual_alignment?: number
     understanding_bucket?: UnderstandingBucket
-    teacher_note?: string | null
   }>
-}
-
-type ConfidencePalette = {
-  fill: string
-  border: string
-  dot: string
-  badgeBg: string
-  badgeText: string
 }
 
 type AnalysisStatus = 'idle' | 'loading' | 'success' | 'failed'
@@ -86,13 +75,13 @@ type BubblePlacement = {
 
 const CHART_VIEWBOX_WIDTH = 1200
 const CHART_VIEWBOX_HEIGHT = 620
+const CHART_AXIS_LEFT = 84
+const CHART_AXIS_RIGHT = 1120
+const CHART_AXIS_BOTTOM = 544
 const CHART_LANE_TOP = 44
 const CHART_LANE_HEIGHT = 500
 const CHART_LANE_GAP = 28
 const CHART_LANE_WIDTH = 344
-const CHART_AXIS_LEFT = 84
-const CHART_AXIS_RIGHT = 1120
-const CHART_AXIS_BOTTOM = 544
 
 function mergeByKey<T>(items: T[], item: T, keyOf: (value: T) => string) {
   const key = keyOf(item)
@@ -145,39 +134,6 @@ function isQuestionOpen(session: Session) {
   return session.live_phase === 'question_initial_open' || session.live_phase === 'question_revision_open'
 }
 
-function getConfidencePalette(score: number): ConfidencePalette {
-  const intensity = Math.max(0.32, Math.min(0.9, 0.28 + ((score - 1) / 4) * 0.62))
-  const level = getConfidenceLevel(score)
-
-  if (level === 'high') {
-    return {
-      fill: `rgba(255, 228, 144, ${intensity})`,
-      border: 'rgba(255, 199, 84, 0.88)',
-      dot: '#F0B93B',
-      badgeBg: 'rgba(255, 246, 220, 1)',
-      badgeText: '#A97800',
-    }
-  }
-
-  if (level === 'mid') {
-    return {
-      fill: `rgba(216, 232, 243, ${intensity})`,
-      border: 'rgba(123, 175, 212, 0.92)',
-      dot: '#7BAFD4',
-      badgeBg: 'rgba(238, 244, 249, 1)',
-      badgeText: '#4E7FA2',
-    }
-  }
-
-  return {
-    fill: `rgba(231, 223, 255, ${intensity})`,
-    border: 'rgba(169, 119, 255, 0.82)',
-    dot: '#A977FF',
-    badgeBg: 'rgba(243, 236, 255, 1)',
-    badgeText: '#8A57FF',
-  }
-}
-
 function getClassSnapshot(analysis: LiveAnalysisPayload | null, currentResponses: Response[]) {
   const sourceCount = analysis?.total_responses ?? currentResponses.length
   const avgConfidence =
@@ -204,55 +160,50 @@ function getBubbleRadius(count: number, maxCount: number) {
   return clamp(60 + normalized * 72, 60, 132)
 }
 
-function stableHash(value: string) {
-  let hash = 2166136261
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index)
-    hash = Math.imul(hash, 16777619)
-  }
-  return hash >>> 0
-}
-
+/**
+ * The vertical axis (confidence) and bubble size (response count) are always
+ * purely descriptive — neither ever encodes correctness.
+ *
+ * The horizontal axis is conditional:
+ * - `neutralHorizontalOrder: true` — clusters are just spread left-to-right by
+ *   size (largest = Pattern 1), no meaning beyond "a different pattern than
+ *   its neighbor." This is the treatment condition's initial round, where we
+ *   deliberately avoid biasing early discussion with a correctness framing.
+ * - `neutralHorizontalOrder: false` — horizontal position reflects each
+ *   cluster's resolved understanding bucket (needs_attention/mixed_reasoning/
+ *   strong_alignment/unclear) via getClusterBucketX. This applies to baseline
+ *   sessions and the revision round of treatment sessions, where seeing a
+ *   correctness-oriented spread is the point. Clusters without real alignment
+ *   data from the clustering pipeline resolve to the 'unclear' center rather
+ *   than being placed on a side without evidence.
+ */
 function getClusterMapPlacements(
   clusters: LiveAnalysisPayload['clusters'],
-  version: LiveAnalysisPayload['version'],
   width: number,
   height: number,
-  options?: {
-    neutralHorizontalOrder?: boolean
-    seed?: string
-  }
+  options?: { neutralHorizontalOrder?: boolean }
 ) {
   if (!clusters.length || width <= 0 || height <= 0) return new Map<string, BubblePlacement>()
 
-  const sorted = clusters.slice().sort((a, b) => {
-    if (options?.neutralHorizontalOrder) {
-      const seed = options.seed || 'cluster-map'
-      const aHash = stableHash(`${seed}-${a.cluster_id}`)
-      const bHash = stableHash(`${seed}-${b.cluster_id}`)
-      if (aHash !== bHash) return aHash - bHash
-      return a.cluster_id.localeCompare(b.cluster_id)
-    }
-
-    return b.count - a.count
-  })
+  const neutralHorizontalOrder = options?.neutralHorizontalOrder ?? true
+  const sorted = clusters.slice().sort((a, b) => b.count - a.count)
   const maxCount = sorted.reduce((max, cluster) => Math.max(max, cluster.count), 0)
   const padding = 36
   const placements = new Map<string, BubblePlacement>()
 
   sorted.forEach((cluster, index) => {
     const radius = getBubbleRadius(cluster.count, maxCount)
-    const rendered = resolveRenderedCluster(cluster, version)
     const normalizedConfidence = clamp((cluster.average_confidence - 1) / 4, 0, 1)
     const baseY = CHART_AXIS_BOTTOM - normalizedConfidence * (CHART_AXIS_BOTTOM - 92)
-    const slotWidth = (CHART_AXIS_RIGHT - CHART_AXIS_LEFT) / (sorted.length + 1)
-    const neutralX = CHART_AXIS_LEFT + slotWidth * (index + 1)
-    const x = options?.neutralHorizontalOrder ? neutralX : getClusterBucketX(rendered) * width
-    const y = options?.neutralHorizontalOrder
-      ? baseY
-      : rendered.resolvedBucket === 'unclear'
-        ? baseY + 18
-        : baseY
+
+    let x: number
+    if (neutralHorizontalOrder) {
+      const slotWidth = (CHART_AXIS_RIGHT - CHART_AXIS_LEFT) / (sorted.length + 1)
+      x = CHART_AXIS_LEFT + slotWidth * (index + 1)
+    } else {
+      x = CHART_AXIS_LEFT + getClusterBucketX(cluster) * (CHART_AXIS_RIGHT - CHART_AXIS_LEFT)
+    }
+    const y = baseY
 
     placements.set(cluster.cluster_id, {
       radius,
@@ -262,39 +213,6 @@ function getClusterMapPlacements(
   })
 
   return placements
-}
-
-function wrapBubbleLabel(label: string, maxCharactersPerLine: number, maxLines = 3) {
-  const words = label.split(/\s+/).filter(Boolean)
-  const lines: string[] = []
-  let current = ''
-
-  for (const word of words) {
-    const candidate = current ? `${current} ${word}` : word
-    if (candidate.length <= maxCharactersPerLine || current.length === 0) {
-      current = candidate
-      continue
-    }
-
-    lines.push(current)
-    current = word
-
-    if (lines.length === maxLines - 1) break
-  }
-
-  const remainingWords = words.slice(lines.join(' ').split(/\s+/).filter(Boolean).length)
-  const remaining = [current, ...remainingWords].filter(Boolean).join(' ').trim()
-
-  if (remaining) {
-    lines.push(remaining)
-  }
-
-  return lines.slice(0, maxLines).map((line, index, array) => {
-    if (index === array.length - 1 && line.length > maxCharactersPerLine) {
-      return `${line.slice(0, maxCharactersPerLine - 1).trimEnd()}…`
-    }
-    return line
-  })
 }
 
 function getRepresentativeAnswers(cluster: LiveAnalysisPayload['clusters'][number] | null) {
@@ -466,7 +384,7 @@ export default function SessionDetailClient({
     activeAnalysis?.clusters[0] ||
     null
   const selectedRenderedCluster =
-    selectedCluster && activeAnalysis ? resolveRenderedCluster(selectedCluster, activeAnalysis.version) : null
+    selectedCluster && activeAnalysis ? resolveRenderedCluster(selectedCluster, activeAnalysis.clusters) : null
   const classSnapshot = getClassSnapshot(activeAnalysis, viewedResponses)
   const selectedRepresentativeAnswers = getRepresentativeAnswers(selectedCluster)
   const selectedClusterResponses = useMemo(() => {
@@ -797,32 +715,24 @@ export default function SessionDetailClient({
       ? 'Revision shown'
       : 'Responses shown'
   const visibleClusters = activeAnalysis?.clusters ?? []
+  // Neutral (non-evaluative) horizontal spread only for a treatment session's
+  // initial round. Baseline sessions and a treatment session's revision round
+  // use the alignment-bucket axis instead — see getClusterMapPlacements above.
   const useTreatmentInitialNeutralLayout = Boolean(
-    session.condition === 'treatment' &&
-    viewedAttemptType === 'initial'
+    session.condition === 'treatment' && viewedAttemptType === 'initial'
   )
   const renderedVisibleClusters = useMemo(
-    () =>
-      activeAnalysis
-        ? visibleClusters.map((cluster) => resolveRenderedCluster(cluster, activeAnalysis.version))
-        : [],
+    () => (activeAnalysis ? resolveRenderedClusters(visibleClusters) : []),
     [activeAnalysis, visibleClusters]
   )
   const bubblePlacements = useMemo(
     () =>
       activeAnalysis
-        ? getClusterMapPlacements(
-            visibleClusters,
-            activeAnalysis.version,
-            CHART_VIEWBOX_WIDTH,
-            CHART_VIEWBOX_HEIGHT,
-            {
-              neutralHorizontalOrder: useTreatmentInitialNeutralLayout,
-              seed: `${sessionId}-${viewedQuestion?.question_id || 'unknown'}-${viewedAttemptType}`,
-            }
-          )
+        ? getClusterMapPlacements(visibleClusters, CHART_VIEWBOX_WIDTH, CHART_VIEWBOX_HEIGHT, {
+            neutralHorizontalOrder: useTreatmentInitialNeutralLayout,
+          })
         : new Map<string, BubblePlacement>(),
-    [activeAnalysis, sessionId, useTreatmentInitialNeutralLayout, viewedAttemptType, viewedQuestion?.question_id, visibleClusters]
+    [activeAnalysis, visibleClusters, useTreatmentInitialNeutralLayout]
   )
   const closedAttemptType =
     session.live_phase === 'question_revision_closed'
@@ -971,13 +881,13 @@ export default function SessionDetailClient({
                   )
                 })}
               </div>
-              {!isViewingCurrentQuestion && (
+              {/* {!isViewingCurrentQuestion && (
                 <div className="mt-4">
                   <Badge className="rounded-full border border-[rgba(123,175,212,0.22)] bg-[rgba(238,244,249,0.88)] px-3 py-1 text-sm font-medium text-foreground shadow-none">
                     Viewing previous question
                   </Badge>
                 </div>
-              )}
+              )} */}
             </div>
 
             <div className="flex w-full flex-col gap-3 xl:w-[320px] xl:items-stretch">
@@ -1040,7 +950,7 @@ export default function SessionDetailClient({
                   </>
                 ) : (
                   <div className="rounded-2xl border border-[rgba(123,175,212,0.18)] bg-[rgba(238,244,249,0.7)] px-4 py-4 text-sm text-foreground/70">
-                    Switch back to the live question to run analysis or advance the session.
+                    {/* Switch back to the live question to run analysis or advance the session. */}
                   </div>
                 )}
 
@@ -1235,16 +1145,6 @@ export default function SessionDetailClient({
                       <text x="56" y="518" fill="rgba(33,29,42,0.48)" style={{ fontSize: 13, fontWeight: 500 }}>
                         Low
                       </text>
-                      {!useTreatmentInitialNeutralLayout && (
-                        <>
-                          <text x="176" y="590" textAnchor="middle" fill="rgba(33,29,42,0.68)" style={{ fontSize: 15, fontWeight: 600 }}>
-                            Low
-                          </text>
-                          <text x="1024" y="590" textAnchor="middle" fill="rgba(33,29,42,0.68)" style={{ fontSize: 15, fontWeight: 600 }}>
-                            High
-                          </text>
-                        </>
-                      )}
 
                       {renderedVisibleClusters
                         .slice()
@@ -1256,22 +1156,19 @@ export default function SessionDetailClient({
                         })
                         .map((cluster) => {
                           const placement = bubblePlacements.get(cluster.cluster_id)
-                          const palette = getConfidencePalette(cluster.average_confidence)
+                          const palette = getClusterPatternColor(cluster.average_confidence)
                           const selected = cluster.cluster_id === selectedRenderedCluster?.cluster_id
                           const hovered = cluster.cluster_id === hoveredClusterId
                           const radius = placement?.radius ?? 78
                           const compact = radius * 2 < 196
                           const tiny = radius * 2 < 150
                           const showSecondaryText = !tiny
-                          const labelLines = showSecondaryText
-                            ? wrapBubbleLabel(cluster.label, compact ? 14 : 18, compact ? 2 : 3)
-                            : []
                           const labelLineHeight = compact ? 13 : 15
                           const countLineHeight = tiny ? 16 : compact ? 18 : 20
                           const confidenceLineHeight = compact ? 12 : 14
-                          const gapAfterLabel = labelLines.length > 0 ? (compact ? 5 : 7) : 0
+                          const gapAfterLabel = showSecondaryText ? (compact ? 5 : 7) : 0
                           const gapAfterCount = showSecondaryText ? (compact ? 5 : 7) : 0
-                          const labelBlockHeight = labelLines.length > 0 ? labelLineHeight * labelLines.length : 0
+                          const labelBlockHeight = showSecondaryText ? labelLineHeight : 0
                           const totalTextHeight =
                             labelBlockHeight +
                             gapAfterLabel +
@@ -1281,7 +1178,9 @@ export default function SessionDetailClient({
                           const blockStartY = -totalTextHeight / 2
                           const countY = blockStartY + labelBlockHeight + gapAfterLabel + countLineHeight / 2
                           const confidenceY = countY + countLineHeight / 2 + gapAfterCount + confidenceLineHeight / 2
-                          const titleText = `${cluster.displayLabel} - ${formatResponsesLabel(cluster.count)} - avg confidence ${cluster.average_confidence.toFixed(1)}/5 - ${getBucketDisplayLabel(cluster.resolvedBucket)}`
+                          const percentageText =
+                            cluster.percentage !== null ? ` (${cluster.percentage}%)` : ''
+                          const titleText = `${cluster.patternLabel}: ${cluster.displayLabel} - ${formatResponsesLabel(cluster.count)}${percentageText} - avg confidence ${cluster.average_confidence.toFixed(1)}/5`
 
                           return (
                             <g
@@ -1316,12 +1215,11 @@ export default function SessionDetailClient({
                                 stroke={palette.border}
                                 strokeWidth={selected ? 6 : 3}
                                 filter="url(#bubble-shadow)"
-                                opacity={(hovered && !selected ? 0.96 : 1) * getClusterBucketOpacity(cluster.resolvedBucket)}
+                                opacity={hovered && !selected ? 0.96 : 1}
                               />
-                             
                               <text
                                 x="0"
-                                y={showSecondaryText ? -confidenceY / 2 : 0}
+                                y={showSecondaryText ? -confidenceY / 2 - 6: 0}
                                 textAnchor="middle"
                                 dominantBaseline="middle"
                                 fill="#211d2a"
@@ -1374,7 +1272,7 @@ export default function SessionDetailClient({
                     </p>
                   ) : (
                     renderedVisibleClusters.map((cluster) => {
-                      const palette = getConfidencePalette(cluster.average_confidence)
+                      const palette = getClusterPatternColor(cluster.average_confidence)
                       const selected = cluster.cluster_id === selectedRenderedCluster?.cluster_id
                       return (
                         <button
@@ -1389,19 +1287,20 @@ export default function SessionDetailClient({
                           <div className="flex min-w-0 items-center gap-2">
                             <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: palette.dot }} />
                             <div className="min-w-0">
+                              <p className="truncate text-[10px] uppercase tracking-[0.08em] text-foreground/42">
+                                {cluster.patternLabel}
+                              </p>
                               <p className="truncate text-sm font-medium text-foreground">
                                 {cluster.displayLabel}
                               </p>
                               <p className="truncate text-[11px] text-foreground/48">
                                 {formatResponsesLabel(cluster.count)}
+                                {cluster.percentage !== null ? ` · ${cluster.percentage}%` : ''}
                               </p>
                             </div>
                           </div>
-                          <span
-                            className="shrink-0 rounded-lg px-2 py-1 text-[11px] font-semibold"
-                            style={{ backgroundColor: palette.badgeBg, color: palette.badgeText }}
-                          >
-                            {cluster.average_confidence.toFixed(1)}
+                          <span className="shrink-0 rounded-lg bg-[rgba(238,244,249,0.9)] px-2 py-1 text-[11px] font-semibold text-foreground/62">
+                            cf. {cluster.average_confidence.toFixed(1)}
                           </span>
                         </button>
                       )
@@ -1415,8 +1314,8 @@ export default function SessionDetailClient({
                   <div
                     className="mt-4 rounded-2xl border px-3 py-3"
                     style={{
-                      backgroundColor: getConfidencePalette(selectedRenderedCluster.average_confidence).badgeBg,
-                      borderColor: getConfidencePalette(selectedRenderedCluster.average_confidence).border,
+                      backgroundColor: getClusterPatternColor(selectedRenderedCluster.average_confidence).fill,
+                      borderColor: getClusterPatternColor(selectedRenderedCluster.average_confidence).border,
                     }}
                   >
                     <div className="flex items-start justify-between gap-3">
@@ -1424,29 +1323,34 @@ export default function SessionDetailClient({
                         <span
                           className="mt-1 h-3 w-3 shrink-0 rounded-full"
                           style={{
-                            backgroundColor: getConfidencePalette(selectedRenderedCluster.average_confidence).dot,
+                            backgroundColor: getClusterPatternColor(selectedRenderedCluster.average_confidence).dot,
                           }}
                         />
                         <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <h3 className="text-xl font-semibold leading-tight text-foreground">
-                              {selectedRenderedCluster.summary}
-                            </h3>
-                          </div>
-                          
+                          <p className="text-[11px] uppercase tracking-[0.1em] text-foreground/48">
+                            {selectedRenderedCluster.patternLabel}
+                          </p>
+                          <h3 className="mt-0.5 text-xl font-semibold leading-tight text-foreground">
+                            {selectedRenderedCluster.summary}
+                          </h3>
+                          <p className="mt-1 text-xs text-foreground/55">
+                            {formatResponsesLabel(selectedRenderedCluster.count)}
+                            {selectedRenderedCluster.percentage !== null
+                              ? ` · ${selectedRenderedCluster.percentage}% of responses`
+                              : ''}
+                          </p>
                         </div>
                       </div>
                       <Badge
                         className="rounded-full border-0 px-3 py-1 text-sm font-semibold shadow-none"
                         style={{
                           backgroundColor: 'rgba(255,255,255,0.78)',
-                          color: getConfidencePalette(selectedRenderedCluster.average_confidence).badgeText,
+                          color: 'rgba(33,29,42,0.62)',
                         }}
                       >
-                        {selectedRenderedCluster.average_confidence.toFixed(1)}/5
+                        cf. {selectedRenderedCluster.average_confidence.toFixed(1)}/5
                       </Badge>
                     </div>
-                    
                   </div>
                   <button
                     type="button"
