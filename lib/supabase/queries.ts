@@ -13,6 +13,7 @@ import type {
   Session,
   SessionLivePhase,
   SessionQuestion,
+  QuestionReferenceAnswer,
   SessionSummaryRecord,
   SessionParticipant,
   SessionStatus,
@@ -157,9 +158,11 @@ export async function createSession(
     question?: string
     answerOptions?: string[] | string
     correctAnswer?: string
+    referenceAnswers?: string[]
     questions?: Array<{
       prompt: string
       correctAnswer?: string
+      referenceAnswers?: string[]
       timerSeconds?: number
     }>
     transferQuestion?: string
@@ -177,18 +180,29 @@ export async function createSession(
           {
             prompt: data.question || '',
             correctAnswer: data.correctAnswer || '',
+            referenceAnswers: data.referenceAnswers || (data.correctAnswer ? [data.correctAnswer] : []),
           },
         ]
 
   const normalizedQuestions = questionsInput
-    .map((q) => ({
-      prompt: String(q.prompt || '').trim(),
-      correctAnswer: q.correctAnswer ? String(q.correctAnswer).trim() : '',
-      timerSeconds:
-        q.timerSeconds === undefined || q.timerSeconds === null || q.timerSeconds === ('' as any)
-          ? null
-          : Math.max(0, Math.floor(Number(q.timerSeconds))),
-    }))
+    .map((q) => {
+      const refAnswers = Array.isArray((q as any).referenceAnswers)
+        ? (q as any).referenceAnswers.map((r: any) => String(r || '').trim()).filter(Boolean)
+        : []
+      const singleRef = q.correctAnswer ? String(q.correctAnswer).trim() : ''
+      if (refAnswers.length === 0 && singleRef) {
+        refAnswers.push(singleRef)
+      }
+      return {
+        prompt: String(q.prompt || '').trim(),
+        correctAnswer: refAnswers[0] || singleRef,
+        referenceAnswers: refAnswers,
+        timerSeconds:
+          q.timerSeconds === undefined || q.timerSeconds === null || q.timerSeconds === ('' as any)
+            ? null
+            : Math.max(0, Math.floor(Number(q.timerSeconds))),
+      }
+    })
     .filter((q) => q.prompt.length > 0)
 
   if (normalizedQuestions.length < 1) {
@@ -233,8 +247,37 @@ export async function createSession(
         timer_seconds: q.timerSeconds,
       }))
 
-      const { error: questionsError } = await supabase.from('session_questions').insert(questionRows)
+      const { data: insertedQuestions, error: questionsError } = await supabase
+        .from('session_questions')
+        .insert(questionRows)
+        .select('question_id, position')
+
       if (questionsError) throw questionsError
+
+      if (insertedQuestions && insertedQuestions.length > 0) {
+        const refRows: Array<{ question_id: string; answer_text: string; position: number }> = []
+        insertedQuestions.forEach((insertedQ) => {
+          const normQ = normalizedQuestions[insertedQ.position - 1]
+          if (normQ && normQ.referenceAnswers.length > 0) {
+            normQ.referenceAnswers.forEach((ansText, refIdx) => {
+              refRows.push({
+                question_id: insertedQ.question_id,
+                answer_text: ansText,
+                position: refIdx + 1,
+              })
+            })
+          }
+        })
+
+        if (refRows.length > 0) {
+          const { error: refInsertErr } = await supabase
+            .from('question_reference_answers')
+            .insert(refRows)
+          if (refInsertErr) {
+            console.warn('Failed to insert question_reference_answers:', refInsertErr)
+          }
+        }
+      }
 
       return session as Session
     }
@@ -307,16 +350,55 @@ export async function getSession(sessionId: string) {
   throw new Error('Session not found')
 }
 
-export async function getSessionQuestions(sessionId: string) {
+export async function getSessionQuestions(sessionId: string): Promise<SessionQuestion[]> {
   const supabase = await createClient()
-  const { data, error } = await supabase
+  const { data: questions, error } = await supabase
     .from('session_questions')
     .select('question_id, session_id, position, prompt, correct_answer, timer_seconds, created_at')
     .eq('session_id', sessionId)
     .order('position', { ascending: true })
 
   if (error) throw error
-  return (data || []) as SessionQuestion[]
+  if (!questions || questions.length === 0) return []
+
+  const questionIds = questions.map((q) => q.question_id)
+  const { data: refData, error: refError } = await supabase
+    .from('question_reference_answers')
+    .select('reference_id, question_id, answer_text, position, created_at')
+    .in('question_id', questionIds)
+    .order('position', { ascending: true })
+
+  if (refError) {
+    console.warn('Failed to fetch question reference answers:', refError)
+  }
+
+  const refsByQuestion = new Map<string, QuestionReferenceAnswer[]>()
+  if (refData) {
+    for (const ref of refData) {
+      const list = refsByQuestion.get(ref.question_id) || []
+      list.push(ref as QuestionReferenceAnswer)
+      refsByQuestion.set(ref.question_id, list)
+    }
+  }
+
+  return questions.map((q) => {
+    let refs = refsByQuestion.get(q.question_id) || []
+    if (refs.length === 0 && q.correct_answer?.trim()) {
+      refs = [
+        {
+          reference_id: `legacy-${q.question_id}`,
+          question_id: q.question_id,
+          answer_text: q.correct_answer,
+          position: 1,
+          created_at: q.created_at,
+        },
+      ]
+    }
+    return {
+      ...q,
+      reference_answers: refs,
+    } as SessionQuestion
+  })
 }
 
 export async function getStudentRespondSessionState(sessionId: string) {
@@ -872,6 +954,122 @@ async function joinSessionForParticipant(session: Session, participant: Particip
     session,
     participation: participation as SessionParticipant,
     participant: participant as Participant,
+  }
+}
+
+export async function joinSessionWithNickname(data: {
+  sessionCode: string
+  nickname: string
+}) {
+  const sessionCode = normalizeSessionCode(data.sessionCode || '')
+  if (!sessionCode) {
+    throw new Error('Please enter a session code.')
+  }
+  const session = await getSessionByCode(sessionCode)
+  if (session.status === 'closed' || session.live_phase === 'session_completed') {
+    throw new Error('This session is closed.')
+  }
+
+  const nickname = String(data.nickname || '').trim()
+  if (!nickname) {
+    throw new Error('Please enter a nickname to join.')
+  }
+
+  const adminSupabase = createAdminClient()
+  const cookieStore = await cookies()
+  const cookieName = sessionParticipantCookieName(session.id)
+  const existingToken = cookieStore.get(cookieName)?.value
+
+  // 1) Reuse existing join token cookie for THIS session if present and valid
+  if (existingToken) {
+    const { data: existingByToken, error: tokenError } = await adminSupabase
+      .from('session_participants')
+      .select('session_participant_id, session_id, participant_id, student_name, student_id, anonymized_label, joined_at')
+      .eq('session_id', session.id)
+      .eq('join_token_hash', hashJoinToken(existingToken))
+      .maybeSingle()
+
+    if (tokenError) throw tokenError
+    if (existingByToken) {
+      if (existingByToken.student_name !== nickname) {
+        await adminSupabase
+          .from('session_participants')
+          .update({ student_name: nickname })
+          .eq('session_participant_id', existingByToken.session_participant_id)
+        existingByToken.student_name = nickname
+      }
+
+      cookieStore.set(cookieName, existingToken, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/',
+        maxAge: 60 * 60 * 24 * 7,
+      })
+
+      return { session, participation: existingByToken as SessionParticipant }
+    }
+  }
+
+  // 2) Allocate a fresh join token
+  const joinToken = createJoinToken()
+  const joinTokenHash = hashJoinToken(joinToken)
+
+  // 3) Atomic insertion loop with retry on UNIQUE(session_id, anonymized_label) collision (code 23505)
+  let participation: any = null
+  const maxAttempts = 15
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const { count, error: countError } = await adminSupabase
+      .from('session_participants')
+      .select('*', { count: 'exact', head: true })
+      .eq('session_id', session.id)
+
+    if (countError) throw countError
+
+    const candidateIndex = (count ?? 0) + 1 + attempt
+    const anonymizedLabel = formatAnonymizedLabel(candidateIndex)
+
+    const { data: inserted, error: insertError } = await adminSupabase
+      .from('session_participants')
+      .insert({
+        session_id: session.id,
+        participant_id: null,
+        student_name: nickname,
+        anonymized_label: anonymizedLabel,
+        join_token_hash: joinTokenHash,
+      })
+      .select('session_participant_id, session_id, participant_id, student_name, student_id, anonymized_label, joined_at')
+      .single()
+
+    if (!insertError) {
+      participation = inserted
+      break
+    }
+
+    if (insertError.code === '23505') {
+      // Label collision under concurrent joins: retry with next candidate index
+      continue
+    }
+
+    throw insertError
+  }
+
+  if (!participation) {
+    throw new Error('Unable to join session right now. Please try again.')
+  }
+
+  cookieStore.set(cookieName, joinToken, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+    maxAge: 60 * 60 * 24 * 7,
+  })
+
+  return {
+    session,
+    participation: participation as SessionParticipant,
   }
 }
 
@@ -1554,7 +1752,8 @@ export async function getSessionResponses(sessionId: string) {
       created_at,
       session_participants:session_participant_id (
         session_participant_id,
-        anonymized_label
+        anonymized_label,
+        student_name
       ),
       session_questions:question_id (
         question_id,

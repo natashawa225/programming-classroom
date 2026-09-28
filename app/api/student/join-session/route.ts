@@ -1,15 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { joinSessionWithLoggedInParticipant } from '@/lib/supabase/queries'
+import {
+  joinSessionWithNickname,
+  joinSessionWithLoggedInParticipant,
+} from '@/lib/supabase/queries'
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json().catch(() => ({}))
     const sessionCode = String(body?.sessionCode || '')
+    const nickname = String(body?.nickname || '')
 
-    const result = await joinSessionWithLoggedInParticipant({ sessionCode })
+    const result = nickname.trim()
+      ? await joinSessionWithNickname({ sessionCode, nickname })
+      : await joinSessionWithLoggedInParticipant({ sessionCode })
 
     console.info(
-      `[student-join-session] success session_id=${result.session.id} session_code=${result.session.session_code} participant_id=${result.participant.participant_id}`
+      `[student-join-session] success session_id=${result.session.id} session_code=${result.session.session_code} label=${result.participation.anonymized_label}`
     )
 
     return NextResponse.json({

@@ -590,6 +590,54 @@ export async function generateSessionSummary(options: {
 
   try {
     const qualitative = await generateOpenAISummary(questionSummaries, fallback)
+
+    // Save session memory bridge for longitudinal tracking across sessions
+    const allPatternsToPersist: Array<{
+      questionId: string
+      patternLabel: string
+      patternDescription: string
+      prevalencePercentage: number
+      responseCount: number
+      averageConfidence: number | null
+      representativeResponseIds: string[]
+      evidenceQuotes: Array<{ response_id: string; exact_quote: string }>
+    }> = []
+
+    for (const qSummary of questionSummaries) {
+      const targetAttempt = qSummary.revision || qSummary.initial
+      for (const pattern of targetAttempt.patterns) {
+        allPatternsToPersist.push({
+          questionId: qSummary.questionId,
+          patternLabel: pattern.label,
+          patternDescription: pattern.summary || 'Students expressed a similar line of reasoning.',
+          prevalencePercentage: pattern.percentage || 0,
+          responseCount: pattern.count,
+          averageConfidence: pattern.averageConfidence,
+          representativeResponseIds: pattern.responseIds.slice(0, 3),
+          evidenceQuotes: pattern.responses.slice(0, 3).map((r) => ({
+            response_id: r.responseId,
+            exact_quote: r.answer.slice(0, 150),
+          })),
+        })
+      }
+    }
+
+    // Dynamic import to prevent circular dependency
+    const { saveSessionMemoryBridge } = await import('@/lib/services/pattern-memory-service')
+    await saveSessionMemoryBridge({
+      sessionId,
+      summaryNarrative: qualitative.sessionTakeaway,
+      watchlistItems: [
+        {
+          item_id: `watch-${sessionId}-1`,
+          pattern_label: qualitative.recurringPatterns[0] || 'Primary reasoning pattern',
+          observation_target: 'Monitor whether this reasoning pattern persists in future sessions.',
+          status: 'pending',
+        },
+      ],
+      patterns: allPatternsToPersist,
+    })
+
     return {
       metrics,
       questionSummaries,

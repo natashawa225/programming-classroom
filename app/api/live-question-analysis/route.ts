@@ -259,6 +259,19 @@ export async function POST(request: NextRequest) {
       })),
     })
 
+    // Computational Autonomy: Evaluate bounded agent observation triggers immediately upon analysis completion
+    try {
+      const { evaluateBoundedAgentObservations } = await import('@/lib/services/bounded-agency-service')
+      await evaluateBoundedAgentObservations({
+        sessionId,
+        questionId: question.question_id,
+        questionPrompt: question.prompt,
+        analysis,
+      })
+    } catch (agentErr) {
+      console.error('[live-analysis] bounded agent evaluation warning', agentErr)
+    }
+
     let saved = null
     let persistenceWarning: string | null = null
     try {

@@ -57,6 +57,15 @@ export interface SessionQuestion {
   correct_answer: string | null
   timer_seconds: number | null
   created_at: string
+  reference_answers?: QuestionReferenceAnswer[]
+}
+
+export interface QuestionReferenceAnswer {
+  reference_id: string
+  question_id: string
+  answer_text: string
+  position: number
+  created_at: string
 }
 
 export interface SessionParticipant {
@@ -84,7 +93,7 @@ export interface Response {
   time_taken_seconds: number | null
   original_response_id: string | null
   created_at: string
-  session_participants?: Pick<SessionParticipant, 'session_participant_id' | 'anonymized_label'> | null
+  session_participants?: Pick<SessionParticipant, 'session_participant_id' | 'anonymized_label' | 'student_name'> | null
   session_questions?: Pick<SessionQuestion, 'question_id' | 'position'> | null
 }
 
@@ -174,3 +183,63 @@ export interface TeacherAction {
   action_data: Record<string, unknown>
   created_at: string
 }
+
+export interface SessionMemory {
+  memory_id: string
+  course_id: string
+  session_id: string
+  summary_narrative: string
+  watchlist_items: Array<{
+    item_id: string
+    pattern_label: string
+    observation_target: string
+    status: 'pending' | 'accepted' | 'dismissed'
+  }>
+  created_at: string
+  updated_at: string
+}
+
+export interface PatternHistory {
+  pattern_id: string
+  memory_id: string | null
+  session_id: string
+  question_id: string
+  pattern_key: string
+  pattern_label: string
+  pattern_description: string
+  prevalence_percentage: number
+  response_count: number
+  average_confidence: number | null
+  representative_response_ids: string[]
+  evidence_quotes: Array<{ response_id: string; exact_quote: string }>
+  longitudinal_status: 'observed' | 'reappeared' | 'changed_prevalence' | 'not_observed'
+  first_observed_session_id: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface LecturerAnnotation {
+  annotation_id: string
+  session_id: string
+  question_id: string
+  cluster_id: string
+  action_type: 'inspected' | 'selected_for_discussion' | 'pinned' | 'dismissed' | 'renamed' | 'annotated' | 'monitored'
+  lecturer_interpretation: string | null
+  lecturer_decision: string | null
+  custom_label: string | null
+  created_at: string
+}
+
+export interface AgentAction {
+  action_id: string
+  session_id: string
+  question_id: string | null
+  agent_role: string
+  trigger_type: string
+  observation_data: Record<string, unknown>
+  decision_rule_executed: string
+  action_taken: string
+  human_checkpoint_status: 'pending' | 'accepted' | 'dismissed' | 'overridden'
+  created_at: string
+}
+

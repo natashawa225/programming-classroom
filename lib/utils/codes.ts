@@ -24,7 +24,7 @@ export function generateSessionCode(
 
 export function formatAnonymizedLabel(index1Based: number): string {
   const safe = Number.isFinite(index1Based) && index1Based > 0 ? Math.floor(index1Based) : 1
-  const width = safe < 100 ? 2 : safe < 1000 ? 3 : String(safe).length
-  return `P${String(safe).padStart(width, '0')}`
+  const width = safe < 1000 ? 3 : String(safe).length
+  return `X${String(safe).padStart(width, '0')}`
 }
 

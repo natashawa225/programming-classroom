@@ -1,6 +1,7 @@
 import type { AttemptType } from '@/lib/types/database'
 import { openaiChatJson } from '@/lib/ai/openai-json'
 import type { UnionFindQuestionContext } from '@/lib/ai/union-find-question-config'
+import { validateClusterSet, validateNonEvaluativeCluster } from '@/lib/ai/cluster-guardrail'
 
 export type LiveCluster = {
   cluster_id: string
@@ -10,6 +11,8 @@ export type LiveCluster = {
   average_confidence: number
   representative_answers: string[]
   response_ids: string[]
+  evidence_spans?: Array<{ response_id: string; exact_quote: string }>
+  was_sanitized?: boolean
 }
 
 export type LiveQuestionClusterAnalysis = {
@@ -151,14 +154,27 @@ function buildClusterFromResponses(
       ? Number((rows.reduce((sum, row) => sum + row.confidence, 0) / rows.length).toFixed(2))
       : 0
 
-  return {
-    cluster_id: `cluster_${index + 1}`,
+  const validated = validateNonEvaluativeCluster({
     label: safeLabel(label, index),
     summary: safeSummary(summary),
+  })
+
+  const representative = rows.slice(0, 3)
+  const evidenceSpans = representative.map((row) => ({
+    response_id: row.response_id,
+    exact_quote: row.answer.slice(0, 150),
+  }))
+
+  return {
+    cluster_id: `cluster_${index + 1}`,
+    label: validated.label,
+    summary: validated.summary,
     count: rows.length,
     average_confidence: averageConfidence,
-    representative_answers: rows.slice(0, 3).map((row) => row.answer),
+    representative_answers: representative.map((row) => row.answer),
     response_ids: rows.map((row) => row.response_id),
+    evidence_spans: evidenceSpans,
+    was_sanitized: validated.wasSanitized,
   }
 }
 
@@ -740,7 +756,64 @@ export async function clusterLiveQuestionResponses(input: {
     })
   }
 
-  const rawClusters = Array.isArray(result.json?.clusters) ? result.json.clusters : []
+  let rawClusters = Array.isArray(result.json?.clusters) ? result.json.clusters : []
+  const initialGuardrailCheck = validateClusterSet(rawClusters)
+
+  // GUARDRAIL RE-PROMPT RETRY LOOP
+  if (!initialGuardrailCheck.ok) {
+    const prohibitedMatches = Array.from(
+      new Set(initialGuardrailCheck.violations.flatMap((v: { prohibitedMatches: string[] }) => v.prohibitedMatches))
+    )
+    console.warn('[live-clustering] guardrail validation failed; initiating LLM re-prompt', {
+      prohibitedMatches,
+      questionId: input.questionId,
+    })
+
+    const retryResult = await openaiChatJson({
+      maxTokens: 1600,
+      timeoutMs: 100000,
+      messages: [
+        {
+          role: 'system',
+          content: `You cluster short student answers for one open-ended classroom question into 1 to 5 groups based on shared reasoning pattern or approach.\n\nCRITICAL FIX REQUIRED: Your previous response was REJECTED because it contained prohibited evaluative words: [${prohibitedMatches.join(', ')}]. You must describe WHAT students said without judging correctness, calling anything wrong or a misconception, or diagnosing misunderstandings. Use purely neutral, descriptive classroom language.`,
+        },
+        {
+          role: 'user',
+          content: [
+            `Question id: ${input.questionId}`,
+            `Question prompt:\n${input.questionPrompt}`,
+            'Student responses:',
+            numberedResponses,
+            'Return valid JSON only matching the schema.',
+          ].join('\n\n'),
+        },
+      ],
+    })
+
+    if (retryResult.ok && Array.isArray(retryResult.json?.clusters)) {
+      const retryGuardrailCheck = validateClusterSet(retryResult.json.clusters)
+      if (retryGuardrailCheck.ok) {
+        console.info('[live-clustering] guardrail re-prompt succeeded neutrally')
+        rawClusters = retryResult.json.clusters
+      } else {
+        console.error('[live-clustering] guardrail re-prompt failed second validation; falling back to deterministic neutral clusters')
+        const fallback = buildFallbackClusters(
+          cleanedResponses,
+          'Guardrail validation failed after re-prompting; deterministic neutral fallback used.',
+          retryResult.rawText || null
+        )
+        fallback.question_prompt = input.questionPrompt
+        fallback.attempt_type = input.attemptType
+        fallback.clusters = postProcessBareAnswerClusters(fallback.clusters, cleanedResponses)
+        fallback.cluster_count = fallback.clusters.length
+        return finalizeClusterAnalysis(fallback, cleanedResponses, {
+          questionId: input.questionId,
+          attemptType: input.attemptType,
+        })
+      }
+    }
+  }
+
   const clusters = postProcessBareAnswerClusters(
     sanitizeModelClusters(rawClusters, cleanedResponses),
     cleanedResponses

@@ -9,35 +9,35 @@ import { Input } from '@/components/ui/input'
 
 export default function StudentJoin() {
   const router = useRouter()
-  const [participantId, setParticipantId] = useState('')
-  const [password, setPassword] = useState('')
+  const [sessionCode, setSessionCode] = useState('')
+  const [nickname, setNickname] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const handleLogin = async (e: React.FormEvent) => {
+  const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
     setError(null)
 
     try {
-      const response = await fetch('/api/student/login', {
+      const response = await fetch('/api/student/join', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          participantId,
-          password,
+          sessionCode: sessionCode.trim().toUpperCase(),
+          nickname: nickname.trim(),
         }),
       })
       const payload = await response.json().catch(() => null)
       if (!response.ok) {
-        throw new Error(payload?.error || 'Failed to log in.')
+        throw new Error(payload?.error || 'Failed to join session.')
       }
 
-      router.push('/student/sessions')
+      router.push(`/student/respond/${payload.session.id}`)
     } catch (err) {
-      console.error('Error logging in:', err)
+      console.error('Error joining session:', err)
       setError(err instanceof Error ? err.message : 'An error occurred. Please try again.')
     } finally {
       setLoading(false)
@@ -48,45 +48,45 @@ export default function StudentJoin() {
     <main className="min-h-screen bg-background flex items-center justify-center">
       <div className="w-full max-w-md px-4">
         {/* Header */}
-        <div className="mb-12 text-center">
-          <h1 className="text-4xl font-bold text-foreground mb-4">
-            Student Login
+        <div className="mb-10 text-center">
+          <h1 className="text-4xl font-bold text-foreground mb-3">
+            Join Session
           </h1>
           <p className="text-lg text-foreground/70">
-            Enter your participant ID and password to continue
+            Enter your session code and nickname to get started
           </p>
         </div>
 
         {/* Form Card */}
         <Card className="p-8">
-          <form onSubmit={handleLogin} className="space-y-6">
+          <form onSubmit={handleJoin} className="space-y-6">
             <div>
-              <label htmlFor="participantId" className="block text-sm font-medium text-foreground mb-3">
-                Participant ID
+              <label htmlFor="sessionCode" className="block text-sm font-medium text-foreground mb-3">
+                Session Code
               </label>
               <Input
-                id="participantId"
+                id="sessionCode"
                 type="text"
-                value={participantId}
-                onChange={(e) => setParticipantId(e.target.value.toLowerCase().replace(/\s+/g, ''))}
-                placeholder="e.g., p001"
-                className="w-full text-center text-lg tracking-widest"
+                value={sessionCode}
+                onChange={(e) => setSessionCode(e.target.value.toUpperCase().replace(/\s+/g, ''))}
+                placeholder="e.g., ABC123"
+                className="w-full text-center text-xl tracking-widest uppercase font-semibold h-12"
                 disabled={loading}
                 required
               />
             </div>
 
             <div>
-              <label htmlFor="password" className="block text-sm font-medium text-foreground mb-3">
-                Password
+              <label htmlFor="nickname" className="block text-sm font-medium text-foreground mb-3">
+                Nickname
               </label>
               <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Your unique password"
-                className="w-full"
+                id="nickname"
+                type="text"
+                value={nickname}
+                onChange={(e) => setNickname(e.target.value)}
+                placeholder="e.g., Alice"
+                className="w-full h-12 text-lg"
                 disabled={loading}
                 required
               />
@@ -100,24 +100,24 @@ export default function StudentJoin() {
 
             <Button
               type="submit"
-              className="w-full"
-              disabled={loading || !participantId.trim() || !password}
+              className="w-full h-12 text-base font-semibold"
+              disabled={loading || !sessionCode.trim() || !nickname.trim()}
               size="lg"
             >
-              {loading ? 'Logging in...' : 'Log In'}
+              {loading ? 'Joining Session...' : 'Join Session'}
             </Button>
           </form>
 
-          <div className="mt-8 pt-8 border-t border-border/40">
+          <div className="mt-8 pt-6 border-t border-border/40">
             <p className="text-sm text-foreground/60 text-center">
-              You will enter the session code on your dashboard.
+              Enter session code.
             </p>
           </div>
         </Card>
 
         {/* Back Link */}
         <div className="mt-8 text-center">
-          <Link href="/role-select" className="text-foreground/60 hover:text-foreground transition-colors">
+          <Link href="/" className="text-foreground/60 hover:text-foreground transition-colors">
             ← Back to Role Selection
           </Link>
         </div>

@@ -24,6 +24,9 @@ import {
   resolveRenderedClusters,
   type UnderstandingBucket,
 } from '@/lib/live-cluster-rendering'
+import { ClusterEvidenceDrawer } from '@/components/cluster-evidence-drawer'
+import { AgentSurfacingBanner } from '@/components/agent-surfacing-banner'
+import type { BoundedAgentObservation } from '@/lib/services/bounded-agency-service'
 import {
   LayoutDashboard,
   Loader2,
@@ -61,6 +64,7 @@ type LiveAnalysisPayload = {
     average_confidence: number
     representative_answers: string[]
     response_ids: string[]
+    evidence_spans?: Array<{ response_id: string; exact_quote: string }>
     conceptual_alignment?: number
     understanding_bucket?: UnderstandingBucket
   }>
@@ -215,6 +219,14 @@ function getClusterMapPlacements(
   return placements
 }
 
+function formatParticipantDisplay(sp?: { anonymized_label?: string; student_name?: string | null } | null) {
+  if (!sp) return 'Participant'
+  const label = sp.anonymized_label || ''
+  const name = sp.student_name ? sp.student_name.trim() : ''
+  if (label && name) return `${label}  ${name}`
+  return label || name || 'Participant'
+}
+
 function getRepresentativeAnswers(cluster: LiveAnalysisPayload['clusters'][number] | null) {
   return (cluster?.representative_answers ?? []).filter((answer) => answer.trim().length > 0).slice(0, 3)
 }
@@ -273,6 +285,8 @@ export default function SessionDetailClient({
   const [actionLoading, setActionLoading] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [analysisStatusByKey, setAnalysisStatusByKey] = useState<Record<string, AnalysisStatus>>({})
+  const [inspectingClusterId, setInspectingClusterId] = useState<string | null>(null)
+  const [boundedObservations, setBoundedObservations] = useState<BoundedAgentObservation[]>([])
 
   const questions = useMemo(() => initialQuestions.slice().sort((a, b) => a.position - b.position), [initialQuestions])
   const realtimeTables = useMemo(
@@ -850,6 +864,11 @@ export default function SessionDetailClient({
           </div>
         )}
 
+        <AgentSurfacingBanner
+          observations={boundedObservations}
+          onInspectCluster={(clusterId) => setInspectingClusterId(clusterId)}
+        />
+
         <section className="mb-4 rounded-3xl bg-white px-6 py-5 shadow-[0_12px_30px_rgba(28,26,36,0.05)]">
           <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
             <div className="min-w-0">
@@ -1367,7 +1386,7 @@ export default function SessionDetailClient({
                           <div key={response.response_id} className="rounded-xl bg-[rgba(238,244,249,0.92)] px-3 py-2.5">
                             <div className="flex items-center justify-between gap-3">
                               <p className="text-sm font-medium text-foreground">
-                                {response.session_participants?.anonymized_label || 'Participant'}
+                                {formatParticipantDisplay(response.session_participants)}
                               </p>
                               <p className="text-sm text-foreground/55">{response.confidence}/5</p>
                             </div>
@@ -1427,7 +1446,7 @@ export default function SessionDetailClient({
                       <div key={response.response_id} className="rounded-xl bg-[rgba(238,244,249,0.92)] px-3 py-2.5">
                         <div className="flex items-center justify-between gap-3">
                           <p className="text-sm font-medium text-foreground">
-                            {response.session_participants?.anonymized_label || 'Participant'}
+                            {formatParticipantDisplay(response.session_participants)}
                           </p>
                           <p className="text-sm text-foreground/55">{response.confidence}/5</p>
                         </div>
@@ -1442,6 +1461,23 @@ export default function SessionDetailClient({
         </div>
 
       </div>
+
+      {inspectingClusterId && viewedQuestion && (
+        <ClusterEvidenceDrawer
+          isOpen={Boolean(inspectingClusterId)}
+          onClose={() => setInspectingClusterId(null)}
+          sessionId={sessionId}
+          questionId={viewedQuestion.question_id}
+          clusterId={inspectingClusterId}
+          label={visibleClusters.find((c) => c.cluster_id === inspectingClusterId)?.label || 'Reasoning Pattern'}
+          summary={visibleClusters.find((c) => c.cluster_id === inspectingClusterId)?.summary || null}
+          count={visibleClusters.find((c) => c.cluster_id === inspectingClusterId)?.count || 0}
+          averageConfidence={visibleClusters.find((c) => c.cluster_id === inspectingClusterId)?.average_confidence || null}
+          representativeAnswers={visibleClusters.find((c) => c.cluster_id === inspectingClusterId)?.representative_answers || []}
+          evidenceQuotes={visibleClusters.find((c) => c.cluster_id === inspectingClusterId)?.evidence_spans || []}
+          responseIds={visibleClusters.find((c) => c.cluster_id === inspectingClusterId)?.response_ids || []}
+        />
+      )}
     </main>
   )
 }
