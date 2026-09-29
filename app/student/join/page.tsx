@@ -53,7 +53,7 @@ export default function StudentJoin() {
             Join Session
           </h1>
           <p className="text-lg text-foreground/70">
-            Enter your session code and nickname to get started
+            Enter your session code to get started
           </p>
         </div>
 
@@ -78,7 +78,7 @@ export default function StudentJoin() {
 
             <div>
               <label htmlFor="nickname" className="block text-sm font-medium text-foreground mb-3">
-                Nickname
+                Nickname <span className="text-xs font-normal text-foreground/50">(First-time joiners)</span>
               </label>
               <Input
                 id="nickname"
@@ -88,7 +88,6 @@ export default function StudentJoin() {
                 placeholder="e.g., Alice"
                 className="w-full h-12 text-lg"
                 disabled={loading}
-                required
               />
             </div>
 
@@ -101,7 +100,7 @@ export default function StudentJoin() {
             <Button
               type="submit"
               className="w-full h-12 text-base font-semibold"
-              disabled={loading || !sessionCode.trim() || !nickname.trim()}
+              disabled={loading || !sessionCode.trim()}
               size="lg"
             >
               {loading ? 'Joining Session...' : 'Join Session'}

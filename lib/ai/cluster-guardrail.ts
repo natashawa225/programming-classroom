@@ -41,9 +41,12 @@ export function validateNonEvaluativeText(text: string): GuardrailValidationResu
     return { ok: true, prohibitedMatches: [], sanitizedText: '' }
   }
 
+  // Strip technical domain phrases (e.g. off-by-one error, compiler error) before checking evaluative terms
+  const cleanedForCheck = text.replace(/\b(off-by-one|compiler|compilation|runtime|syntax|type|logic|segmentation)\s+error(s)?\b/gi, '')
+
   const matches: string[] = []
   for (const pattern of PROHIBITED_EVALUATIVE_TERMS) {
-    const found = text.match(pattern)
+    const found = cleanedForCheck.match(pattern)
     if (found) {
       matches.push(...found)
     }
@@ -51,7 +54,14 @@ export function validateNonEvaluativeText(text: string): GuardrailValidationResu
 
   let sanitized = text
   for (const pattern of PROHIBITED_EVALUATIVE_TERMS) {
-    sanitized = sanitized.replace(pattern, 'reasoning aspect')
+    // Only sanitize evaluative terms when not part of technical domain phrases
+    sanitized = sanitized.replace(pattern, (match, p1, offset, string) => {
+      const preceding = string.slice(Math.max(0, offset - 20), offset).toLowerCase()
+      if (/(off-by-one|compiler|compilation|runtime|syntax|type|logic|segmentation)\s*$/i.test(preceding)) {
+        return match
+      }
+      return 'reasoning aspect'
+    })
   }
   sanitized = sanitized.replace(/\s+/g, ' ').trim()
 
@@ -70,21 +80,53 @@ export function sanitizeNonEvaluativeText(text: string): { sanitized: string; fl
   }
 }
 
-export function validateNonEvaluativeCluster(cluster: {
-  label: string
-  summary: string
-}): { label: string; summary: string; wasSanitized: boolean } {
+export function validateNonEvaluativeCluster<
+  T extends {
+    label: string
+    summary: string
+    reference_alignment?: {
+      explanation?: string
+      alignment_level?: 'strong' | 'partial' | 'limited' | string
+      aligned_reference_ids?: string[]
+    }
+  }
+>(cluster: T): T & { wasSanitized: boolean } {
   const labelValidation = validateNonEvaluativeText(cluster.label)
   const summaryValidation = validateNonEvaluativeText(cluster.summary)
+  let refExplanationSanitized = cluster.reference_alignment?.explanation
+  let refSanitized = false
+
+  if (cluster.reference_alignment?.explanation) {
+    const refVal = validateNonEvaluativeText(cluster.reference_alignment.explanation)
+    if (!refVal.ok) {
+      refExplanationSanitized = refVal.sanitizedText || 'Aligns with reference reasoning aspects.'
+      refSanitized = true
+    }
+  }
+
+  const wasSanitized = !labelValidation.ok || !summaryValidation.ok || refSanitized
 
   return {
+    ...cluster,
     label: labelValidation.ok ? cluster.label : labelValidation.sanitizedText || 'Observed reasoning pattern',
     summary: summaryValidation.ok ? cluster.summary : summaryValidation.sanitizedText || 'Students expressed a similar line of reasoning.',
-    wasSanitized: !labelValidation.ok || !summaryValidation.ok,
+    reference_alignment: cluster.reference_alignment
+      ? {
+          ...cluster.reference_alignment,
+          explanation: refExplanationSanitized || '',
+        }
+      : undefined,
+    wasSanitized,
   }
 }
 
-export function validateClusterSet(clusters: Array<{ label: string; summary: string }>): {
+export function validateClusterSet(
+  clusters: Array<{
+    label: string
+    summary: string
+    reference_alignment?: { explanation?: string }
+  }>
+): {
   ok: boolean
   violations: Array<{ clusterIndex: number; prohibitedMatches: string[] }>
 } {
@@ -93,10 +135,17 @@ export function validateClusterSet(clusters: Array<{ label: string; summary: str
   clusters.forEach((cluster, idx) => {
     const labelValidation = validateNonEvaluativeText(cluster.label)
     const summaryValidation = validateNonEvaluativeText(cluster.summary)
+    const refValidation = cluster.reference_alignment?.explanation
+      ? validateNonEvaluativeText(cluster.reference_alignment.explanation)
+      : { ok: true, prohibitedMatches: [] }
 
-    if (!labelValidation.ok || !summaryValidation.ok) {
+    if (!labelValidation.ok || !summaryValidation.ok || !refValidation.ok) {
       const combined = Array.from(
-        new Set([...labelValidation.prohibitedMatches, ...summaryValidation.prohibitedMatches])
+        new Set([
+          ...labelValidation.prohibitedMatches,
+          ...summaryValidation.prohibitedMatches,
+          ...refValidation.prohibitedMatches,
+        ])
       )
       violations.push({ clusterIndex: idx, prohibitedMatches: combined })
     }

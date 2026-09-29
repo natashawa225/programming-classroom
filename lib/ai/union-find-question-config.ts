@@ -23,11 +23,9 @@ export function getUnionFindQuestionContext(options: {
   prompt: string
 }): UnionFindQuestionContext | null {
   const p = normalizePrompt(options.prompt)
-  const pos = options.position
 
   // Q1: connected components + transitivity
   if (
-    pos === 1 ||
     p.includes('connected component') ||
     p.includes('transitiv') ||
     p.includes('connectivity')
@@ -52,7 +50,6 @@ export function getUnionFindQuestionContext(options: {
 
   // Q2: QuickFind id[] meaning
   if (
-    pos === 2 ||
     p.includes('quickfind') ||
     p.includes('id[]') ||
     p.includes('id array')
@@ -77,11 +74,8 @@ export function getUnionFindQuestionContext(options: {
 
   // Q4: Weighted QuickUnion + logarithmic performance
   if (
-    pos === 4 ||
-    p.includes('weighted') ||
-    p.includes('log') ||
-    p.includes('performance') ||
-    p.includes('size')
+    p.includes('weighted quickunion') ||
+    p.includes('weighted quick union')
   ) {
     return {
       lesson_concept:
@@ -103,12 +97,10 @@ export function getUnionFindQuestionContext(options: {
 
   // Q3: QuickUnion roots + linking choice
   if (
-    pos === 3 ||
     p.includes('parent array') ||
     p.includes('parent[') ||
     p.includes('union(5,2)') ||
-    p.includes('set parent[5] = 2') ||
-    p.includes('find the root')
+    p.includes('set parent[5] = 2')
   ) {
     return {
       lesson_concept:

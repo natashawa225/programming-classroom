@@ -259,7 +259,7 @@ export async function createSession(
         insertedQuestions.forEach((insertedQ) => {
           const normQ = normalizedQuestions[insertedQ.position - 1]
           if (normQ && normQ.referenceAnswers.length > 0) {
-            normQ.referenceAnswers.forEach((ansText, refIdx) => {
+            normQ.referenceAnswers.forEach((ansText: string, refIdx: number) => {
               refRows.push({
                 question_id: insertedQ.question_id,
                 answer_text: ansText,
@@ -959,7 +959,7 @@ async function joinSessionForParticipant(session: Session, participant: Particip
 
 export async function joinSessionWithNickname(data: {
   sessionCode: string
-  nickname: string
+  nickname?: string
 }) {
   const sessionCode = normalizeSessionCode(data.sessionCode || '')
   if (!sessionCode) {
@@ -971,16 +971,13 @@ export async function joinSessionWithNickname(data: {
   }
 
   const nickname = String(data.nickname || '').trim()
-  if (!nickname) {
-    throw new Error('Please enter a nickname to join.')
-  }
 
   const adminSupabase = createAdminClient()
   const cookieStore = await cookies()
   const cookieName = sessionParticipantCookieName(session.id)
   const existingToken = cookieStore.get(cookieName)?.value
 
-  // 1) Reuse existing join token cookie for THIS session if present and valid
+  // 1) Reuse existing join token cookie for THIS session if present and valid (restore participant with existing nickname)
   if (existingToken) {
     const { data: existingByToken, error: tokenError } = await adminSupabase
       .from('session_participants')
@@ -991,14 +988,6 @@ export async function joinSessionWithNickname(data: {
 
     if (tokenError) throw tokenError
     if (existingByToken) {
-      if (existingByToken.student_name !== nickname) {
-        await adminSupabase
-          .from('session_participants')
-          .update({ student_name: nickname })
-          .eq('session_participant_id', existingByToken.session_participant_id)
-        existingByToken.student_name = nickname
-      }
-
       cookieStore.set(cookieName, existingToken, {
         httpOnly: true,
         sameSite: 'lax',
@@ -1009,6 +998,11 @@ export async function joinSessionWithNickname(data: {
 
       return { session, participation: existingByToken as SessionParticipant }
     }
+  }
+
+  // 2) If no valid stored participant for this session, nickname is required for first-time join
+  if (!nickname) {
+    throw new Error('Please enter a nickname to join.')
   }
 
   // 2) Allocate a fresh join token

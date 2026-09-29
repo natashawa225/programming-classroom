@@ -65,6 +65,11 @@ type LiveAnalysisPayload = {
     representative_answers: string[]
     response_ids: string[]
     evidence_spans?: Array<{ response_id: string; exact_quote: string }>
+    reference_alignment?: {
+      alignment_level?: string
+      explanation?: string
+      aligned_reference_ids?: string[]
+    }
     conceptual_alignment?: number
     understanding_bucket?: UnderstandingBucket
   }>
@@ -193,9 +198,8 @@ function getClusterMapPlacements(
   const sorted = clusters.slice().sort((a, b) => b.count - a.count)
   const maxCount = sorted.reduce((max, cluster) => Math.max(max, cluster.count), 0)
   const padding = 36
-  const placements = new Map<string, BubblePlacement>()
 
-  sorted.forEach((cluster, index) => {
+  const nodes = sorted.map((cluster, index) => {
     const radius = getBubbleRadius(cluster.count, maxCount)
     const normalizedConfidence = clamp((cluster.average_confidence - 1) / 4, 0, 1)
     const baseY = CHART_AXIS_BOTTOM - normalizedConfidence * (CHART_AXIS_BOTTOM - 92)
@@ -209,12 +213,69 @@ function getClusterMapPlacements(
     }
     const y = baseY
 
-    placements.set(cluster.cluster_id, {
+    return {
+      cluster_id: cluster.cluster_id,
       radius,
       x: clamp(x, padding + radius, width - padding - radius),
       y: clamp(y, padding + radius, height - padding - radius),
-    })
+    }
   })
+
+  // Deterministic minimum-separation constraint / collision resolution
+  const iterations = 100
+  const gap = 16
+  for (let iter = 0; iter < iterations; iter += 1) {
+    for (let i = 0; i < nodes.length; i += 1) {
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const a = nodes[i]
+        const b = nodes[j]
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let dist = Math.sqrt(dx * dx + dy * dy)
+        const minDist = a.radius + b.radius + gap
+
+        if (dist < minDist) {
+          if (dist < 1e-4) {
+            const angle = (i * 1.5 + j * 0.7) % (Math.PI * 2)
+            dx = Math.cos(angle)
+            dy = Math.sin(angle)
+            dist = 1
+          }
+          const overlap = minDist - dist
+          let nx = dx / dist
+          let ny = dy / dist
+
+          if (Math.abs(ny) < 0.2) {
+            ny = i % 2 === 0 ? 0.4 : -0.4
+            const len = Math.sqrt(nx * nx + ny * ny)
+            nx /= len
+            ny /= len
+          }
+
+          const moveX = nx * (overlap / 2)
+          const moveY = ny * (overlap / 2)
+
+          a.x -= moveX
+          a.y -= moveY
+          b.x += moveX
+          b.y += moveY
+        }
+      }
+    }
+    for (const node of nodes) {
+      node.x = clamp(node.x, padding + node.radius, width - padding - node.radius)
+      node.y = clamp(node.y, padding + node.radius, height - padding - node.radius)
+    }
+  }
+
+  const placements = new Map<string, BubblePlacement>()
+  for (const node of nodes) {
+    placements.set(node.cluster_id, {
+      radius: node.radius,
+      x: node.x,
+      y: node.y,
+    })
+  }
 
   return placements
 }
@@ -310,6 +371,7 @@ export default function SessionDetailClient({
   )
   const isLastQuestion = Boolean(currentQuestion && currentQuestion.position === questions.length)
   const attemptType = getCurrentAttemptType(session)
+
 
   const currentResponses = useMemo(() => {
     if (!currentQuestion) return []
@@ -1232,9 +1294,8 @@ export default function SessionDetailClient({
                                 r={radius}
                                 fill={palette.fill}
                                 stroke={palette.border}
-                                strokeWidth={selected ? 6 : 3}
+                                strokeWidth={selected ? 6 : hovered ? 4 : 3}
                                 filter="url(#bubble-shadow)"
-                                opacity={hovered && !selected ? 0.96 : 1}
                               />
                               <text
                                 x="0"
@@ -1278,54 +1339,94 @@ export default function SessionDetailClient({
                 </Badge>
               </div>
 
-              <div className="mt-3">
-                <p className="text-[11px] uppercase tracking-[0.16em] text-foreground/42">Cluster</p>
-                <div className="mt-2 grid max-h-[150px] gap-1.5 overflow-y-auto pr-1">
-                  {!hasVisibleAnalysis ? (
-                    <p className="rounded-xl bg-[rgba(248,251,255,0.82)] px-3 py-3 text-sm leading-5 text-foreground/58">
+              <div className="mt-4">
+                <div className="mb-2.5 flex items-center justify-between">
+                  <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-foreground/42">
+                    Clusters
+                  </p>
+
+                  <span className="text-[11px] tabular-nums text-foreground/40">
+                    {visibleClusters.length}
+                  </span>
+                </div>
+
+                {!hasVisibleAnalysis ? (
+                  <div className="rounded-xl border border-dashed border-[rgba(123,175,212,0.22)] bg-[rgba(248,251,255,0.72)] px-3 py-4">
+                    <p className="text-sm leading-5 text-foreground/58">
                       {isViewedAnalysisLoading
                         ? 'Reasoning groups are being generated.'
                         : isViewedAnalysisFailed
                           ? 'Reasoning groups could not be generated yet.'
                           : 'Reasoning groups will appear here after analysis.'}
                     </p>
-                  ) : (
-                    renderedVisibleClusters.map((cluster) => {
+                  </div>
+                ) : (
+                  <div className="grid max-h-[220px] grid-cols-2 gap-2 overflow-y-auto pr-1">
+                    {renderedVisibleClusters.map((cluster, index) => {
                       const palette = getClusterPatternColor(cluster.average_confidence)
-                      const selected = cluster.cluster_id === selectedRenderedCluster?.cluster_id
+                      const hovered = cluster.cluster_id===selectedRenderedCluster?.cluster_id
+                      const selected =
+                        cluster.cluster_id === selectedRenderedCluster?.cluster_id
+
                       return (
                         <button
                           key={cluster.cluster_id}
                           type="button"
                           onClick={() => setActiveSelectedClusterId(cluster.cluster_id)}
+                          onMouseEnter={() => setHoveredClusterId(cluster.cluster_id)}
+                          onMouseLeave={() => setHoveredClusterId(null)}
                           className={[
-                            'flex w-full items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left transition',
-                            selected ? 'bg-[rgba(238,244,249,0.92)]' : 'hover:bg-[rgba(248,251,255,0.9)]',
+                            'group relative min-w-0 rounded-xl border p-2.5 text-left transition-all',
+                            selected
+                              ? 'border-foreground/15 bg-[rgba(238,244,249,0.95)] shadow-sm'
+                              : 'border-transparent bg-[rgba(248,251,255,0.72)] hover:border-[rgba(123,175,212,0.18)] hover:bg-white',
                           ].join(' ')}
                         >
-                          <div className="flex min-w-0 items-center gap-2">
-                            <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: palette.dot }} />
-                            <div className="min-w-0">
-                              <p className="truncate text-[10px] uppercase tracking-[0.08em] text-foreground/42">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span
+                                className="size-2.5 shrink-0 rounded-full ring-2 ring-white"
+                                style={{ backgroundColor: palette.dot }}
+                              />
+
+                              <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-foreground/40">
                                 {cluster.patternLabel}
-                              </p>
-                              <p className="truncate text-sm font-medium text-foreground">
-                                {cluster.displayLabel}
-                              </p>
-                              <p className="truncate text-[11px] text-foreground/48">
-                                {formatResponsesLabel(cluster.count)}
-                                {cluster.percentage !== null ? ` · ${cluster.percentage}%` : ''}
-                              </p>
+                              </span>
                             </div>
+
+                            {selected && (
+                              <span className="size-1.5 shrink-0 rounded-full bg-foreground/60" />
+                            )}
                           </div>
-                          <span className="shrink-0 rounded-lg bg-[rgba(238,244,249,0.9)] px-2 py-1 text-[11px] font-semibold text-foreground/62">
-                            cf. {cluster.average_confidence.toFixed(1)}
-                          </span>
+
+                          <p className="mt-2 truncate text-sm font-medium text-foreground">
+                            {cluster.displayLabel}
+                          </p>
+
+                          <div className="mt-1.5 flex items-center justify-between gap-2">
+                            <span className="text-[11px] tabular-nums text-foreground/48">
+                              {cluster.count} responses
+                            </span>
+
+                            <span className="text-[11px] font-semibold tabular-nums text-foreground/58">
+                              {cluster.average_confidence.toFixed(1)}
+                            </span>
+                          </div>
+
+                          <div className="mt-2 h-1 overflow-hidden rounded-full bg-foreground/[0.06]">
+                            <div
+                              className="h-full rounded-full"
+                              style={{
+                                width: `${(cluster.count / Math.max(...visibleClusters.map(c => c.count))) * 100}%`,
+                                backgroundColor: palette.dot,
+                              }}
+                            />
+                          </div>
                         </button>
                       )
-                    })
-                  )}
-                </div>
+                    })}
+                  </div>
+                )}
               </div>
 
               {selectedRenderedCluster ? (
@@ -1476,6 +1577,7 @@ export default function SessionDetailClient({
           representativeAnswers={visibleClusters.find((c) => c.cluster_id === inspectingClusterId)?.representative_answers || []}
           evidenceQuotes={visibleClusters.find((c) => c.cluster_id === inspectingClusterId)?.evidence_spans || []}
           responseIds={visibleClusters.find((c) => c.cluster_id === inspectingClusterId)?.response_ids || []}
+          referenceAlignment={(visibleClusters.find((c) => c.cluster_id === inspectingClusterId) as any)?.reference_alignment}
         />
       )}
     </main>

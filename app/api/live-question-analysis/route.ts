@@ -52,6 +52,7 @@ function buildLiveQuestionPromptPayload(input: {
   questionPosition: number
   questionPrompt: string
   correctAnswer: string | null
+  referenceAnswers?: Array<{ reference_id: string; answer_text: string }> | null
   lessonContext: ReturnType<typeof getUnionFindQuestionContext>
   attemptType: AttemptType
   responses: Array<{ response_id: string; answer: string; confidence: number }>
@@ -65,6 +66,7 @@ function buildLiveQuestionPromptPayload(input: {
       question_position: input.questionPosition,
       question_prompt: input.questionPrompt,
       correct_answer: input.correctAnswer,
+      reference_answers: input.referenceAnswers ?? [],
       lesson_concept: input.lessonContext?.lesson_concept ?? null,
       target_misconception: input.lessonContext?.target_misconception ?? null,
       strong_answer_criteria: input.lessonContext?.strong_answer_criteria ?? [],
@@ -98,6 +100,7 @@ export async function POST(request: NextRequest) {
 
     const body = await request.json()
     const sessionId = String(body?.sessionId || '')
+
     if (!sessionId) {
       return NextResponse.json({ error: 'Missing sessionId' }, { status: 400 })
     }
@@ -215,11 +218,16 @@ export async function POST(request: NextRequest) {
       position: question.position,
       prompt: question.prompt,
     })
+    const refAnswersForClustering = question.reference_answers?.map((r) => ({
+      reference_id: r.reference_id,
+      answer_text: r.answer_text,
+    }))
     const promptPayload = buildLiveQuestionPromptPayload({
       questionId: question.question_id,
       questionPosition: question.position,
       questionPrompt: question.prompt,
       correctAnswer: question.correct_answer ?? null,
+      referenceAnswers: refAnswersForClustering,
       lessonContext,
       attemptType,
       responses: responses.map((response) => ({
@@ -229,7 +237,7 @@ export async function POST(request: NextRequest) {
       })),
     })
     console.info(
-      `[live-analysis] reuse=regenerate session_id=${sessionId} question_id=${question.question_id} position=${question.position} prompt_included=true correct_answer_included=${Boolean(question.correct_answer && question.correct_answer.trim())} lesson_context_included=${Boolean(lessonContext)} response_count=${responses.length} round_number=${roundNumber} attempt_type=${attemptType}`
+      `[live-analysis] reuse=regenerate session_id=${sessionId} question_id=${question.question_id} position=${question.position} prompt_included=true correct_answer_included=${Boolean(question.correct_answer && question.correct_answer.trim())} reference_answer_count=${refAnswersForClustering?.length || 0} lesson_context_included=${Boolean(lessonContext)} response_count=${responses.length} round_number=${roundNumber} attempt_type=${attemptType}`
     )
     const modelName = process.env.OPENAI_MODEL || 'gpt-4.1-mini'
     const run = await createAnalysisRun({
@@ -250,6 +258,7 @@ export async function POST(request: NextRequest) {
       questionPosition: question.position,
       questionPrompt: question.prompt,
       correctAnswer: question.correct_answer ?? null,
+      referenceAnswers: refAnswersForClustering,
       lessonContext,
       attemptType,
       responses: responses.map((response) => ({

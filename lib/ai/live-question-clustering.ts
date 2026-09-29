@@ -3,6 +3,12 @@ import { openaiChatJson } from '@/lib/ai/openai-json'
 import type { UnionFindQuestionContext } from '@/lib/ai/union-find-question-config'
 import { validateClusterSet, validateNonEvaluativeCluster } from '@/lib/ai/cluster-guardrail'
 
+export type ReferenceAlignment = {
+  aligned_reference_ids?: string[]
+  alignment_level?: 'strong' | 'partial' | 'limited'
+  explanation?: string
+}
+
 export type LiveCluster = {
   cluster_id: string
   label: string
@@ -12,6 +18,7 @@ export type LiveCluster = {
   representative_answers: string[]
   response_ids: string[]
   evidence_spans?: Array<{ response_id: string; exact_quote: string }>
+  reference_alignment?: ReferenceAlignment
   was_sanitized?: boolean
 }
 
@@ -143,20 +150,40 @@ function summarizeAnswerStem(answer: string) {
     : 'Students expressed a similar idea with overlapping wording.'
 }
 
+function normalizeReferenceAlignment(raw: any): ReferenceAlignment | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const level = String(raw.alignment_level || raw.level || '').toLowerCase()
+  const validLevel: 'strong' | 'partial' | 'limited' =
+    level === 'strong' || level === 'partial' || level === 'limited' ? level : 'partial'
+  const explanation = typeof raw.explanation === 'string' ? raw.explanation : ''
+  const alignedIds = Array.isArray(raw.aligned_reference_ids)
+    ? raw.aligned_reference_ids.map((id: unknown) => String(id || '')).filter(Boolean)
+    : []
+  return {
+    alignment_level: validLevel,
+    explanation,
+    aligned_reference_ids: alignedIds,
+  }
+}
+
 function buildClusterFromResponses(
   label: string,
   summary: string,
   rows: InputResponse[],
-  index: number
+  index: number,
+  rawReferenceAlignment?: any
 ): LiveCluster {
   const averageConfidence =
     rows.length > 0
       ? Number((rows.reduce((sum, row) => sum + row.confidence, 0) / rows.length).toFixed(2))
       : 0
 
+  const refAlignment = normalizeReferenceAlignment(rawReferenceAlignment)
+
   const validated = validateNonEvaluativeCluster({
     label: safeLabel(label, index),
     summary: safeSummary(summary),
+    reference_alignment: refAlignment,
   })
 
   const representative = rows.slice(0, 3)
@@ -174,6 +201,7 @@ function buildClusterFromResponses(
     representative_answers: representative.map((row) => row.answer),
     response_ids: rows.map((row) => row.response_id),
     evidence_spans: evidenceSpans,
+    reference_alignment: validated.reference_alignment as ReferenceAlignment | undefined,
     was_sanitized: validated.wasSanitized,
   }
 }
@@ -203,7 +231,7 @@ function normalizeFinalClusters(
 
     if (rows.length === 0) continue
 
-    normalized.push(buildClusterFromResponses(cluster.label, cluster.summary, rows, normalized.length))
+    normalized.push(buildClusterFromResponses(cluster.label, cluster.summary, rows, normalized.length, cluster.reference_alignment))
   }
 
   const unassignedRows = responses.filter((response) => !assigned.has(response.response_id))
@@ -400,51 +428,94 @@ function sanitizeModelClusters(
   rawClusters: any[],
   responses: InputResponse[]
 ): LiveCluster[] {
-  const responseMap = new Map(responses.map((response) => [response.response_id, response]))
+  const responseMapByUuid = new Map(responses.map((response) => [response.response_id.toLowerCase(), response]))
+  const responseMapByIndex = new Map(responses.map((response, idx) => [idx + 1, response]))
+
+  const resolveResponse = (rawVal: unknown): InputResponse | null => {
+    const valStr = String(rawVal || '').trim()
+    if (!valStr) return null
+
+    // 1. Direct match by UUID
+    const directMatch = responseMapByUuid.get(valStr.toLowerCase())
+    if (directMatch) return directMatch
+
+    // 2. Index / Item number resolution (e.g., "1", "2", "response_1", "response 1", "#1")
+    const digitsMatch = valStr.match(/\b\d+\b/)
+    if (digitsMatch) {
+      const idxNum = parseInt(digitsMatch[0], 10)
+      const indexMatch = responseMapByIndex.get(idxNum)
+      if (indexMatch) return indexMatch
+    }
+
+    return null
+  }
+
   const assigned = new Set<string>()
   const sanitized: LiveCluster[] = []
 
   for (const [index, cluster] of rawClusters.entries()) {
     const localSeen = new Set<string>()
-    const ids = Array.isArray(cluster?.response_ids)
-      ? cluster.response_ids
-          .map((value: unknown) => String(value || '').trim())
-          .filter((value: string) => {
-            if (!value || localSeen.has(value) || assigned.has(value) || !responseMap.has(value)) return false
-            localSeen.add(value)
-            return true
-          })
-      : []
+    const ids: string[] = []
+
+    if (Array.isArray(cluster?.response_ids)) {
+      for (const value of cluster.response_ids) {
+        const resolved = resolveResponse(value)
+        if (!resolved) continue
+        if (localSeen.has(resolved.response_id) || assigned.has(resolved.response_id)) continue
+        localSeen.add(resolved.response_id)
+        ids.push(resolved.response_id)
+      }
+    }
 
     if (ids.length === 0) continue
 
     ids.forEach((id: string) => assigned.add(id))
-    const rows = ids.map((id: string) => responseMap.get(id)!).filter(Boolean)
+    const rows = ids.map((id: string) => responseMapByUuid.get(id.toLowerCase())!).filter(Boolean)
 
-    sanitized.push(buildClusterFromResponses(cluster?.label, cluster?.summary, rows, index))
+    sanitized.push(buildClusterFromResponses(cluster?.label, cluster?.summary, rows, index, cluster?.reference_alignment))
   }
 
   const unassigned = responses.filter((response) => !assigned.has(response.response_id))
   if (unassigned.length > 0) {
-    if (sanitized.length === 0) return []
-    console.warn('[live-clustering] model omitted response_ids; merging unassigned responses into an existing cluster', {
+    if (sanitized.length === 0) {
+      return [
+        buildClusterFromResponses(
+          'Unresolved responses',
+          'Student responses that could not be mapped into a reasoning pattern cluster during validation.',
+          unassigned,
+          0
+        ),
+      ]
+    }
+
+    console.warn('[live-clustering] model omitted response_ids; placing unassigned responses in an inspectable Unresolved group', {
       omitted_response_ids: unassigned.map((response) => response.response_id),
       omitted_count: unassigned.length,
-      cluster_count_before_merge: sanitized.length,
+      cluster_count_before_unassigned: sanitized.length,
     })
-    const targetIndex = sanitized.reduce((bestIndex, cluster, index, array) => {
-      return cluster.count < array[bestIndex].count ? index : bestIndex
-    }, 0)
-    const target = sanitized[targetIndex]
-    const mergedRows = [...target.response_ids, ...unassigned.map((row) => row.response_id)]
-      .map((id: string) => responseMap.get(id)!)
-      .filter(Boolean)
-    sanitized[targetIndex] = buildClusterFromResponses(target.label, target.summary, mergedRows, targetIndex)
+
+    if (sanitized.length < 5) {
+      sanitized.push(
+        buildClusterFromResponses(
+          'Unresolved responses',
+          'Student responses that were not categorized into an observed reasoning pattern cluster during validation.',
+          unassigned,
+          sanitized.length
+        )
+      )
+    } else {
+      const targetIndex = sanitized.length - 1
+      const target = sanitized[targetIndex]
+      const mergedRows = [...target.response_ids, ...unassigned.map((row) => row.response_id)]
+        .map((id: string) => responseMapByUuid.get(id.toLowerCase())!)
+        .filter(Boolean)
+      sanitized[targetIndex] = buildClusterFromResponses(target.label, target.summary, mergedRows, targetIndex, target.reference_alignment)
+    }
   }
 
   if (sanitized.length <= 5) return sanitized
 
-  console.warn('[live-clustering] model returned more than 5 clusters; merging overflow clusters', {
+  console.warn('[live-clustering] model returned more than 5 clusters; preserving overflow in Unresolved responses group', {
     cluster_count_before_merge: sanitized.length,
     overflow_count: sanitized.length - 4,
   })
@@ -452,12 +523,12 @@ function sanitizeModelClusters(
   const overflowRows = sanitized
     .slice(4)
     .flatMap((cluster) => cluster.response_ids)
-    .map((id: string) => responseMap.get(id)!)
+    .map((id: string) => responseMapByUuid.get(id.toLowerCase())!)
     .filter(Boolean)
   kept.push(
     buildClusterFromResponses(
-      'Additional response patterns',
-      'The model returned more than five clusters, so smaller overflow groups were merged to preserve every response.',
+      'Unresolved responses',
+      'Responses from overflow groups beyond the maximum 5-cluster limit are retained here for inspection.',
       overflowRows,
       4
     )
@@ -484,7 +555,7 @@ function postProcessBareAnswerClusters(
     const explainedRows = rows.filter((row) => !row.bare)
 
     if (explainedRows.length > 0) {
-      processed.push(buildClusterFromResponses(cluster.label, cluster.summary, explainedRows, processed.length))
+      processed.push(buildClusterFromResponses(cluster.label, cluster.summary, explainedRows, processed.length, cluster.reference_alignment))
     }
 
     const groupedBareRows = new Map<BareAnswerKind, ProcessedInputResponse[]>()
@@ -535,15 +606,15 @@ function validateExactResponseCoverage(clusters: LiveCluster[], responses: Proce
         .filter(Boolean)
       if (rows.length === 0) continue
       rows.forEach((row) => assigned.add(row.response_id))
-      repaired.push(buildClusterFromResponses(cluster.label, cluster.summary, rows, repaired.length))
+      repaired.push(buildClusterFromResponses(cluster.label, cluster.summary, rows, repaired.length, cluster.reference_alignment))
     }
 
     const repairedMissingRows = responses.filter((response) => !assigned.has(response.response_id))
     if (repairedMissingRows.length > 0) {
       repaired.push(
         buildClusterFromResponses(
-          'Additional response patterns',
-          'Responses that were omitted during local validation were merged into a final catch-all group.',
+          'Unresolved responses',
+          'Student responses that were omitted during validation mapping are retained here for inspection.',
           repairedMissingRows,
           repaired.length
         )
@@ -604,14 +675,14 @@ function buildFallbackClusters(
       return grouped.get(normalizeAnswer(row.answer) || row.response_id)?.length === 1
     })
     const label = isMergedOverflowGroup
-      ? 'Mixed response patterns'
+      ? 'Unresolved responses'
       : isSingletonFallbackGroup
-        ? 'Unclustered singleton responses'
-      : `Similar response pattern ${index + 1}`
+        ? 'Unresolved responses'
+      : `Reasoning pattern ${index + 1}`
     const summary = isMergedOverflowGroup
-      ? 'Students gave varied answers that could not be separated further without AI clustering.'
+      ? 'Student responses that were omitted during fallback analysis are retained here for inspection.'
       : isSingletonFallbackGroup
-        ? 'AI clustering was unavailable, so singleton wording variants are grouped together rather than split into artificial clusters.'
+        ? 'AI clustering was unavailable; student responses are preserved for inspection without automated pattern categorization.'
       : summarizeAnswerStem(rows[0]?.answer || '')
     return buildClusterFromResponses(label, summary, rows, index)
   })
@@ -637,6 +708,7 @@ export async function clusterLiveQuestionResponses(input: {
   questionPosition: number
   questionPrompt: string
   correctAnswer?: string | null
+  referenceAnswers?: Array<{ reference_id: string; answer_text: string }> | null
   lessonContext?: UnionFindQuestionContext | null
   attemptType: AttemptType
   responses: InputResponse[]
@@ -661,9 +733,23 @@ export async function clusterLiveQuestionResponses(input: {
 
   const numberedResponses = cleanedResponses
     .map((response, index) => {
-      return `${index + 1}. response_id=${response.response_id}\nconfidence=${response.confidence}\nbare=${response.bare}\nanswer=${response.answer}`
+      return `${index + 1}. [response_id=${response.response_id}] confidence=${response.confidence} bare=${response.bare}\nanswer=${response.answer}`
     })
     .join('\n\n')
+
+  const refAnswerFormatted =
+    input.referenceAnswers && input.referenceAnswers.length > 0
+      ? [
+          'Reference answers / valid reasoning examples (topic context only — not an answer key, not for grading):',
+          input.referenceAnswers.map((ref, idx) => `${idx + 1}. [reference_id=${ref.reference_id}] ${ref.answer_text}`).join('\n'),
+        ].join('\n')
+      : input.correctAnswer
+        ? `Reference answer (topic context only — not an answer key, not for grading): \n${input.correctAnswer}`
+        : ''
+
+  const lessonContextSection = input.lessonContext?.lesson_concept
+    ? `Lesson concept (topic context only):\n${input.lessonContext.lesson_concept}`
+    : ''
 
   const result = await openaiChatJson({
     maxTokens: 1600,
@@ -672,7 +758,7 @@ export async function clusterLiveQuestionResponses(input: {
       {
         role: 'system',
         content: [
-          'You cluster short student answers for one open-ended classroom question into 1 to 5 groups based on shared reasoning pattern or approach.',
+          'You cluster short student answers for one open-ended classroom question into 1 to 5 groups based on shared conceptual reasoning pattern or approach.',
           '',
           'Your only job is grouping and describing what students said, not grading it.',
           'Group responses by the underlying idea, approach, or reasoning pattern students are using — never by whether that idea is correct.',
@@ -681,16 +767,13 @@ export async function clusterLiveQuestionResponses(input: {
           'Do not label, score, or categorize any response or cluster as correct, incorrect, a misconception, or a level of understanding.',
           'Do not use words like "correct", "incorrect", "wrong", "misconception", "error", "should", or "misunderstand" in a label or summary.',
           '',
-          'Important: this question has a single teacher-provided reference answer, but the question is open-ended and may have multiple valid answers.',
-          'Students typed free text. Use the reference answer only as topic context to understand what the question is about — never to grade, rank, or flag any response.',
-          '',
-          'Prefer fewer, broader clusters. False splits are worse than broad clusters for this live teacher dashboard.',
-          'When unsure whether two responses are meaningfully different, merge them.',
-          '',
-          'Do not split by language, wording, confidence, answer length, writing quality, or minor detail differences.',
-          'Do not create separate clusters just because one answer is more detailed or polished than another.',
-          '',
-          'Only separate responses when they describe a meaningfully different idea or approach — a distinction a teacher would want to see as a different group of student thinking, not a difference in how good or complete the answer is.',
+          'Important Instructions:',
+          '- Separate responses into distinct clusters when students describe conceptually different reasoning patterns (e.g. off-by-one loop condition vs variable scope vs integer overflow vs logic structure).',
+          '- Merge responses into the same cluster ONLY when they describe the same underlying reasoning pattern or idea in different words or languages.',
+          '- Do NOT merge conceptually distinct reasoning patterns into a single cluster merely because they address the same question or because they do not match a reference answer.',
+          '- Reference answers are provided for topic context only — never use reference answers as a requirement that all responses match it or belong to one catch-all cluster.',
+          '- Include the exact response_id string for every response assigned to a cluster.',
+          'For each cluster, include a reference_alignment object with aligned_reference_ids, alignment_level ("strong", "partial", or "limited"), and a short neutral explanation of conceptual overlap.',
           '',
           'After assigning response_ids to clusters, write a short neutral label and one-sentence summary for each cluster that describes what students in that cluster said or did.',
           '',
@@ -703,8 +786,8 @@ export async function clusterLiveQuestionResponses(input: {
           `Question id: ${input.questionId}`,
           `Question position: ${input.questionPosition}`,
           `Question prompt:\n${input.questionPrompt}`,
-          `Reference answer (topic context only — not an answer key, not for grading): \n${input.correctAnswer || ''}`,
-          `Lesson concept (topic context only):\n${input.lessonContext?.lesson_concept || ''}`,
+          refAnswerFormatted,
+          lessonContextSection,
           `Attempt type: ${input.attemptType}`,
           'Student responses:',
           numberedResponses,
@@ -715,37 +798,34 @@ export async function clusterLiveQuestionResponses(input: {
                 cluster_id: 'cluster_1',
                 label: 'neutral description of the shared idea or approach',
                 summary: 'one-sentence neutral description of what students in this cluster said',
+                reference_alignment: {
+                  aligned_reference_ids: ['reference_id_1'],
+                  alignment_level: 'strong',
+                  explanation: 'one neutral sentence describing conceptual overlap with reference reasoning examples',
+                },
                 response_ids: ['...'],
               },
             ],
           }, null, 2),
           'Rules:',
           '- Every response_id must appear in exactly one cluster.',
-          '- Use 1 to 5 clusters. Use 1 cluster when responses are conceptually homogeneous.',
-          '- If there are fewer than 4 responses, use 1–2 clusters unless there is a clearly different idea or approach.',
-          '- Prefer fewer broader clusters. Merge when in doubt.',
-          '- Separate clusters only when the difference is one a teacher would want to see as a distinct group of student thinking, not a difference in correctness or quality.',
-          '- Always merge responses that express the same underlying idea in different words or languages.',
-          '- Treat equivalent phrasings as one cluster: e.g. "postorder", "after all neighbors processed", "after descendants", "after recursive calls finish", "reverse topological order" may all express the same idea in different words — merge them if they describe the same thing.',
-          '- Do not split by: language, wording, answer length, confidence, or writing quality.',
-          '- Confidence is context for the teacher summary only. Do not use confidence as a reason to create separate clusters.',
+          '- Separate responses into distinct clusters when students describe conceptually different reasoning patterns.',
+          '- Always include the exact response_ids in each cluster matching the response_id field of each input response.',
           '- label = short neutral name of the idea or approach. No True/False/Correct/Incorrect/Misconception wording or prefix.',
           '- summary = one neutral sentence describing what students in the cluster said or did. Never state or imply whether it is right, wrong, or a misconception.',
-          '- Do not judge correctness, identify misconceptions, infer learning outcomes, or recommend teaching actions anywhere in a label or summary.',
+          '- reference_alignment.alignment_level must be "strong", "partial", or "limited". Never use evaluative terms like "correct", "wrong", or "misconception".',
+          '- Do not judge correctness, identify misconceptions, infer learning outcomes, or recommend teaching actions anywhere in a label, summary, or alignment explanation.',
           '- Responses marked bare=true contain no reasoning. Always place them in a separate cluster from explained responses. Do not split bare responses further by confidence.',
-          '- Treat the reference answer as topic context only, never as an answer key for grading responses.',
-        ].join('\n\n'),
+          '- Treat the reference answers as topic context only, never as an answer key for grading responses.',
+        ].filter(Boolean).join('\n\n'),
       },
     ],
   })
 
   if (!result.ok) {
-    const fallbackReason =
-      typeof result.error === 'string' && result.error.trim()
-        ? result.error
-        : 'OpenAI clustering request failed.'
-    console.error('[live-clustering] openai failure:', fallbackReason)
-    const fallback = buildFallbackClusters(cleanedResponses, fallbackReason, result.rawText || null)
+    const fallbackReason = 'MODEL_PARSE_FAILURE'
+    console.error('[live-clustering] openai failure:', result.error)
+    const fallback = buildFallbackClusters(cleanedResponses, 'MODEL_PARSE_FAILURE', result.rawText || null)
     fallback.question_prompt = input.questionPrompt
     fallback.attempt_type = input.attemptType
     fallback.clusters = postProcessBareAnswerClusters(fallback.clusters, cleanedResponses)
@@ -757,6 +837,19 @@ export async function clusterLiveQuestionResponses(input: {
   }
 
   let rawClusters = Array.isArray(result.json?.clusters) ? result.json.clusters : []
+  if (rawClusters.length === 0) {
+    console.warn('[live-clustering] openai returned empty clusters array')
+    const fallback = buildFallbackClusters(cleanedResponses, 'EMPTY_MODEL_CLUSTERS', result.rawText || null)
+    fallback.question_prompt = input.questionPrompt
+    fallback.attempt_type = input.attemptType
+    fallback.clusters = postProcessBareAnswerClusters(fallback.clusters, cleanedResponses)
+    fallback.cluster_count = fallback.clusters.length
+    return finalizeClusterAnalysis(fallback, cleanedResponses, {
+      questionId: input.questionId,
+      attemptType: input.attemptType,
+    })
+  }
+
   const initialGuardrailCheck = validateClusterSet(rawClusters)
 
   // GUARDRAIL RE-PROMPT RETRY LOOP
@@ -782,15 +875,35 @@ export async function clusterLiveQuestionResponses(input: {
           content: [
             `Question id: ${input.questionId}`,
             `Question prompt:\n${input.questionPrompt}`,
+            refAnswerFormatted,
             'Student responses:',
             numberedResponses,
-            'Return valid JSON only matching the schema.',
+            'Return JSON matching this shape:',
+            JSON.stringify({
+              clusters: [
+                {
+                  cluster_id: 'cluster_1',
+                  label: 'neutral description of the shared idea or approach',
+                  summary: 'one-sentence neutral description of what students in this cluster said',
+                  reference_alignment: {
+                    aligned_reference_ids: ['reference_id_1'],
+                    alignment_level: 'strong',
+                    explanation: 'one neutral sentence describing conceptual overlap with reference reasoning examples',
+                  },
+                  response_ids: ['...'],
+                },
+              ],
+            }, null, 2),
+            'Rules:',
+            '- Every response_id must appear in exactly one cluster.',
+            '- Separate responses into distinct clusters when students describe conceptually different reasoning patterns.',
+            '- Always include the exact response_ids in each cluster matching the response_id field of each input response.',
           ].join('\n\n'),
         },
       ],
     })
 
-    if (retryResult.ok && Array.isArray(retryResult.json?.clusters)) {
+    if (retryResult.ok && Array.isArray(retryResult.json?.clusters) && retryResult.json.clusters.length > 0) {
       const retryGuardrailCheck = validateClusterSet(retryResult.json.clusters)
       if (retryGuardrailCheck.ok) {
         console.info('[live-clustering] guardrail re-prompt succeeded neutrally')
@@ -799,7 +912,7 @@ export async function clusterLiveQuestionResponses(input: {
         console.error('[live-clustering] guardrail re-prompt failed second validation; falling back to deterministic neutral clusters')
         const fallback = buildFallbackClusters(
           cleanedResponses,
-          'Guardrail validation failed after re-prompting; deterministic neutral fallback used.',
+          'GUARDRAIL_REJECTION',
           retryResult.rawText || null
         )
         fallback.question_prompt = input.questionPrompt
@@ -819,7 +932,7 @@ export async function clusterLiveQuestionResponses(input: {
     cleanedResponses
   )
   if (clusters.length === 0) {
-    const fallbackReason = 'OpenAI returned cluster JSON, but it could not be mapped to the submitted responses.'
+    const fallbackReason = 'INVALID_RESPONSE_IDS'
     const fallback = buildFallbackClusters(cleanedResponses, fallbackReason, result.rawText || null)
     fallback.question_prompt = input.questionPrompt
     fallback.attempt_type = input.attemptType

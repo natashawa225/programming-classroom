@@ -111,7 +111,12 @@ function hashString(value: string) {
   for (let index = 0; index < value.length; index += 1) {
     hash = (hash * 31 + value.charCodeAt(index)) >>> 0
   }
-  return hash
+  hash ^= hash >>> 16
+  hash = Math.imul(hash, 0x85ebca6b) >>> 0
+  hash ^= hash >>> 13
+  hash = Math.imul(hash, 0xc2b2ae35) >>> 0
+  hash ^= hash >>> 16
+  return hash >>> 0
 }
 
 function deterministicUnit(value: string) {

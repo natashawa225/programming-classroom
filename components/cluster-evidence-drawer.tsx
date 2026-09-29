@@ -26,6 +26,11 @@ type Props = {
   representativeAnswers: string[]
   evidenceQuotes?: EvidenceQuote[]
   responseIds: string[]
+  referenceAlignment?: {
+    alignment_level?: string
+    explanation?: string
+    aligned_reference_ids?: string[]
+  }
 }
 
 export function ClusterEvidenceDrawer({
@@ -41,6 +46,7 @@ export function ClusterEvidenceDrawer({
   representativeAnswers,
   evidenceQuotes = [],
   responseIds,
+  referenceAlignment,
 }: Props) {
   const [interpretation, setInterpretation] = useState('')
   const [decision, setDecision] = useState('')
@@ -115,6 +121,23 @@ export function ClusterEvidenceDrawer({
         <div className="rounded-lg bg-muted/60 p-4 border text-sm text-foreground space-y-1">
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">AI Observable Pattern Description</p>
           <p className="mt-1 leading-relaxed">{summary}</p>
+        </div>
+      )}
+
+      {/* Reference Answer Alignment */}
+      {referenceAlignment && (
+        <div className="rounded-lg bg-secondary/30 p-4 border text-sm text-foreground space-y-1">
+          <div className="flex items-center justify-between mb-1">
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Reference Answer Alignment</p>
+            {referenceAlignment.alignment_level && (
+              <Badge variant="outline" className="capitalize text-xs">
+                {referenceAlignment.alignment_level} Alignment
+              </Badge>
+            )}
+          </div>
+          {referenceAlignment.explanation && (
+            <p className="text-xs text-foreground/80 leading-relaxed">{referenceAlignment.explanation}</p>
+          )}
         </div>
       )}
 

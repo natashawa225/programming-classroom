@@ -19,8 +19,8 @@ export default function CreateSession() {
     title: '',
     condition: 'baseline' as 'baseline' | 'treatment',
     questions: [
-      { prompt: '', correctAnswer: '', timerSeconds: '' },
-    ] as Array<{ prompt: string; correctAnswer: string; timerSeconds: string }>,
+      { prompt: '', referenceAnswers: [''], timerSeconds: '' },
+    ] as Array<{ prompt: string; referenceAnswers: string[]; timerSeconds: string }>,
   })
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
@@ -31,7 +31,7 @@ export default function CreateSession() {
     }))
   }
 
-  const updateQuestion = (index: number, patch: Partial<{ prompt: string; correctAnswer: string; timerSeconds: string }>) => {
+  const updateQuestion = (index: number, patch: Partial<{ prompt: string; timerSeconds: string }>) => {
     setFormData(prev => {
       const next = prev.questions.slice()
       next[index] = { ...next[index], ...patch }
@@ -39,10 +39,43 @@ export default function CreateSession() {
     })
   }
 
+  const updateReferenceAnswer = (questionIndex: number, refIndex: number, text: string) => {
+    setFormData(prev => {
+      const nextQuestions = prev.questions.slice()
+      const targetQ = { ...nextQuestions[questionIndex] }
+      const nextRefs = targetQ.referenceAnswers.slice()
+      nextRefs[refIndex] = text
+      targetQ.referenceAnswers = nextRefs
+      nextQuestions[questionIndex] = targetQ
+      return { ...prev, questions: nextQuestions }
+    })
+  }
+
+  const addReferenceAnswer = (questionIndex: number) => {
+    setFormData(prev => {
+      const nextQuestions = prev.questions.slice()
+      const targetQ = { ...nextQuestions[questionIndex] }
+      targetQ.referenceAnswers = [...targetQ.referenceAnswers, '']
+      nextQuestions[questionIndex] = targetQ
+      return { ...prev, questions: nextQuestions }
+    })
+  }
+
+  const removeReferenceAnswer = (questionIndex: number, refIndex: number) => {
+    setFormData(prev => {
+      const nextQuestions = prev.questions.slice()
+      const targetQ = { ...nextQuestions[questionIndex] }
+      if (targetQ.referenceAnswers.length <= 1) return prev
+      targetQ.referenceAnswers = targetQ.referenceAnswers.filter((_, i) => i !== refIndex)
+      nextQuestions[questionIndex] = targetQ
+      return { ...prev, questions: nextQuestions }
+    })
+  }
+
   const addQuestion = () => {
     setFormData(prev => {
       if (prev.questions.length >= MAX_SESSION_QUESTIONS) return prev
-      return { ...prev, questions: [...prev.questions, { prompt: '', correctAnswer: '', timerSeconds: '' }] }
+      return { ...prev, questions: [...prev.questions, { prompt: '', referenceAnswers: [''], timerSeconds: '' }] }
     })
   }
 
@@ -65,11 +98,14 @@ export default function CreateSession() {
 
     try {
       const normalized = formData.questions
-        .map(q => ({
-          prompt: q.prompt.trim(),
-          correctAnswer: q.correctAnswer.trim(),
-          timerSeconds: q.timerSeconds.trim() ? Number(q.timerSeconds) : null,
-        }))
+        .map(q => {
+          const refs = q.referenceAnswers.map(r => r.trim()).filter(Boolean)
+          return {
+            prompt: q.prompt.trim(),
+            referenceAnswers: refs,
+            timerSeconds: q.timerSeconds.trim() ? Number(q.timerSeconds) : null,
+          }
+        })
         .filter(q => q.prompt.length > 0)
 
       if (normalized.length < 1) {
@@ -77,6 +113,9 @@ export default function CreateSession() {
       }
       if (normalized.length > MAX_SESSION_QUESTIONS) {
         throw new Error(`Please enter no more than ${MAX_SESSION_QUESTIONS} questions.`)
+      }
+      if (normalized.some(q => q.referenceAnswers.length < 1)) {
+        throw new Error('Each question must have at least 1 reference answer / reasoning example.')
       }
 
       // Create the session
@@ -91,7 +130,8 @@ export default function CreateSession() {
           answerOptions: [],
           questions: normalized.map((q) => ({
             prompt: q.prompt,
-            correctAnswer: q.correctAnswer || undefined,
+            correctAnswer: q.referenceAnswers[0] || '',
+            referenceAnswers: q.referenceAnswers,
             timerSeconds: q.timerSeconds === null ? undefined : q.timerSeconds,
           })),
         }),
@@ -186,7 +226,7 @@ export default function CreateSession() {
                           </Button>
                         </div>
 
-                        <div className="space-y-3">
+                        <div className="space-y-4">
                           <div>
                             <label className="block text-sm font-medium text-foreground mb-2">
                             Question
@@ -194,7 +234,7 @@ export default function CreateSession() {
                             <textarea
                               value={q.prompt}
                               onChange={(e) => updateQuestion(idx, { prompt: e.target.value })}
-                              placeholder="Enter the question"
+                              placeholder="Enter the question prompt"
                               rows={3}
                               required={idx === 0}
                               className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
@@ -202,16 +242,47 @@ export default function CreateSession() {
                           </div>
 
                           <div>
-                            <label className="block text-sm font-medium text-foreground mb-2">
-                              Reference Answer (optional)
-                            </label>
-                            <textarea
-                              value={q.correctAnswer}
-                              onChange={(e) => updateQuestion(idx, { correctAnswer: e.target.value })}
-                              placeholder=""
-                              rows={2}
-                              className="w-full px-3 py-2 rounded-md border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                            />
+                            <div className="flex items-center justify-between mb-2">
+                              <label className="block text-sm font-medium text-foreground">
+                                Reference Answers / Valid Reasoning Examples (minimum 1 required)
+                              </label>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => addReferenceAnswer(idx)}
+                              >
+                                + Add reference answer
+                              </Button>
+                            </div>
+                            <p className="text-xs text-muted-foreground mb-2">
+                              Provide valid answer formulations or reasoning paths to serve as topic context for AI pattern clustering.
+                            </p>
+                            <div className="space-y-2">
+                              {q.referenceAnswers.map((refText, refIdx) => (
+                                <div key={refIdx} className="flex items-start gap-2">
+                                  <textarea
+                                    value={refText}
+                                    onChange={(e) => updateReferenceAnswer(idx, refIdx, e.target.value)}
+                                    placeholder={`Reference reasoning example ${refIdx + 1}`}
+                                    rows={2}
+                                    required={refIdx === 0 && idx === 0}
+                                    className="flex-1 px-3 py-2 rounded-md border border-input bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring text-sm"
+                                  />
+                                  {q.referenceAnswers.length > 1 && (
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => removeReferenceAnswer(idx, refIdx)}
+                                      className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                                    >
+                                      Delete
+                                    </Button>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
                           </div>
 
                           <div>
