@@ -469,8 +469,43 @@ export default function SessionDetailClient({
     return viewedResponses.filter((response) => selectedResponseIds.has(response.response_id))
   }, [selectedCluster, viewedResponses])
 
+  const isFetchingAgentObsRef = useRef(false)
+  const isRefreshingLiveDataRef = useRef(false)
+
+  const fetchAgentObservations = useCallback(
+    async (targetQuestionId?: string | null) => {
+      const qId = targetQuestionId || viewedQuestion?.question_id || currentQuestion?.question_id
+      if (!sessionId || !qId || isFetchingAgentObsRef.current) return
+
+      try {
+        isFetchingAgentObsRef.current = true
+        const response = await fetch('/api/teacher/agent-surfacing', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify({ sessionId, questionId: qId }),
+        })
+        if (!response.ok) return
+        const data = await response.json()
+        const obsList = (data.observations || []) as BoundedAgentObservation[]
+        if (process.env.NODE_ENV !== 'production') {
+          // eslint-disable-next-line no-console
+          console.log(`[AgentSurfacing] fetched ${obsList.length} observations`)
+        }
+        setBoundedObservations(obsList)
+      } catch (err) {
+        console.error('[AgentSurfacing] error fetching observations', err)
+      } finally {
+        isFetchingAgentObsRef.current = false
+      }
+    },
+    [sessionId, viewedQuestion?.question_id, currentQuestion?.question_id]
+  )
+
   const refreshLiveData = useCallback(async () => {
+    if (isRefreshingLiveDataRef.current) return
     try {
+      isRefreshingLiveDataRef.current = true
       const response = await fetch('/api/teacher/session-state', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -494,6 +529,8 @@ export default function SessionDetailClient({
       )
     } catch (err) {
       console.error('Error refreshing live session data:', err)
+    } finally {
+      isRefreshingLiveDataRef.current = false
     }
   }, [sessionId])
 
@@ -553,6 +590,10 @@ export default function SessionDetailClient({
   useEffect(() => {
     void refreshLiveData()
   }, [refreshLiveData])
+
+  useEffect(() => {
+    void fetchAgentObservations()
+  }, [fetchAgentObservations, liveQuestionAnalyses])
 
   useEffect(() => {
     if (!canCompareRevision && compareMode === 'revision') {
@@ -697,6 +738,7 @@ export default function SessionDetailClient({
       setLiveQuestionAnalyses((prev) =>
         mergeByKey(prev, savedOrEphemeralAnalysis, (row) => `${row.question_id}:${row.attempt_type}`)
       )
+      void fetchAgentObservations(currentQuestion?.question_id)
     }
     if (payload?.persistenceWarning) {
       setError(payload.persistenceWarning)
@@ -755,6 +797,7 @@ export default function SessionDetailClient({
       setLiveQuestionAnalyses((prev) =>
         mergeByKey(prev, savedOrEphemeralAnalysis, (row) => `${row.question_id}:${row.attempt_type}`)
       )
+      void fetchAgentObservations(question.question_id)
     }
 
     setAnalysisStatusByKey((prev) => ({
@@ -791,11 +834,10 @@ export default function SessionDetailClient({
       ? 'Revision shown'
       : 'Responses shown'
   const visibleClusters = activeAnalysis?.clusters ?? []
-  // Neutral (non-evaluative) horizontal spread only for a treatment session's
-  // initial round. Baseline sessions and a treatment session's revision round
-  // use the alignment-bucket axis instead — see getClusterMapPlacements above.
-  const useTreatmentInitialNeutralLayout = Boolean(
-    session.condition === 'treatment' && viewedAttemptType === 'initial'
+  const isRevisionActive = session.live_phase === 'question_revision_open'
+  const useNeutralLayout = Boolean(
+    (session.condition === 'treatment' && viewedAttemptType === 'initial') ||
+    (viewedAttemptType === 'revision' && isRevisionActive)
   )
   const renderedVisibleClusters = useMemo(
     () => (activeAnalysis ? resolveRenderedClusters(visibleClusters) : []),
@@ -805,10 +847,10 @@ export default function SessionDetailClient({
     () =>
       activeAnalysis
         ? getClusterMapPlacements(visibleClusters, CHART_VIEWBOX_WIDTH, CHART_VIEWBOX_HEIGHT, {
-            neutralHorizontalOrder: useTreatmentInitialNeutralLayout,
+            neutralHorizontalOrder: useNeutralLayout,
           })
         : new Map<string, BubblePlacement>(),
-    [activeAnalysis, visibleClusters, useTreatmentInitialNeutralLayout]
+    [activeAnalysis, visibleClusters, useNeutralLayout]
   )
   const closedAttemptType =
     session.live_phase === 'question_revision_closed'
@@ -1199,7 +1241,7 @@ export default function SessionDetailClient({
                           <feDropShadow dx="0" dy="10" stdDeviation="12" floodColor="rgba(28,26,36,0.16)" />
                         </filter>
                       </defs>
-                      {!useTreatmentInitialNeutralLayout && (
+                      {!useNeutralLayout && (
                         <>
                           <rect x="72" y={CHART_LANE_TOP} width={CHART_LANE_WIDTH} height={CHART_LANE_HEIGHT} rx="34" fill="rgba(255,240,236,0.62)" />
                           <rect x={72 + CHART_LANE_WIDTH + CHART_LANE_GAP} y={CHART_LANE_TOP} width={CHART_LANE_WIDTH} height={CHART_LANE_HEIGHT} rx="34" fill="rgba(242,246,252,0.78)" />
@@ -1208,7 +1250,7 @@ export default function SessionDetailClient({
                       )}
                       <line x1={CHART_AXIS_LEFT} y1={CHART_AXIS_BOTTOM} x2={CHART_AXIS_RIGHT} y2={CHART_AXIS_BOTTOM} stroke="rgba(33,29,42,0.16)" strokeWidth="2" />
                       <line x1={CHART_AXIS_LEFT} y1={CHART_AXIS_BOTTOM - 6} x2={CHART_AXIS_LEFT} y2="92" stroke="rgba(33,29,42,0.16)" strokeWidth="2" />
-                      {!useTreatmentInitialNeutralLayout && (
+                      {!useNeutralLayout && (
                         <line x1="600" y1="92" x2="600" y2={CHART_AXIS_BOTTOM + 4} stroke="rgba(33,29,42,0.12)" strokeDasharray="8 10" strokeWidth="2" />
                       )}
                       <line x1="128" y1="164" x2="1100" y2="164" stroke="rgba(33,29,42,0.08)" strokeDasharray="6 10" strokeWidth="2" />

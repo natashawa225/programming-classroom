@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import {
   CheckCircle2,
@@ -17,20 +17,24 @@ import {
   ChevronUp,
   LayoutDashboard,
   ArrowLeft,
-  Play
+  Play,
+  Pin,
+  Terminal,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
-import type { ResponsePattern, SessionQuestionSummary, SessionSummaryPayload } from '@/lib/session-summary'
+import type {
+  ResponsePattern,
+  SessionQuestionSummary,
+  SessionSummaryPayload,
+  SynthesizedAgentObservation,
+  SynthesizedTeacherDecision,
+} from '@/lib/session-summary'
+import type { LecturerAnnotation } from '@/lib/types/database'
 import { getClusterPatternColor } from '@/lib/live-cluster-rendering'
 import { CONFIDENCE_BINS } from '@/lib/confidence'
 
-/**
- * Thin, muted custom scrollbar for internally-scrolling containers (question
- * list, evidence drawers) — keeps overflow contained without the browser's
- * default chunky scrollbar breaking the card's visual boundary.
- */
 const THIN_SCROLLBAR =
   '[scrollbar-width:thin] [scrollbar-color:#cbd5e1_transparent] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-300'
 
@@ -49,12 +53,6 @@ function formatDelta(value: number | null) {
 
 function formatStudentCount(count: number) {
   return `${count} ${count === 1 ? 'student' : 'students'}`
-}
-
-function truncatePrompt(prompt: string, maxLength = 120) {
-  const trimmed = prompt.trim()
-  if (trimmed.length <= maxLength) return trimmed
-  return `${trimmed.slice(0, maxLength - 3).trimEnd()}...`
 }
 
 function buildPatternCard(pattern: string, index: number) {
@@ -132,28 +130,6 @@ function OutcomeCard({
   )
 }
 
-function InsightRow({
-  label,
-  value,
-  highlight = false
-}: {
-  label: string
-  value: string
-  highlight?: boolean
-}) {
-  return (
-    <div className={`rounded-xl border px-4 py-3 ${highlight ? 'border-indigo-100 bg-indigo-50/30' : 'border-slate-100 bg-slate-50/50'}`}>
-      <p className="text-xs font-medium text-slate-400 uppercase tracking-wider">{label}</p>
-      <p className="mt-1 text-sm font-semibold text-slate-800">{value}</p>
-    </div>
-  )
-}
-
-/**
- * Compact pill for a single stat (entries, confidence, change) — used in the
- * question detail pane instead of large boxed rows, so the header stays short
- * and the pattern grid below is what draws the eye.
- */
 function StatChip({
   label,
   value,
@@ -178,6 +154,31 @@ function StatChip({
   )
 }
 
+function ReferenceAlignmentBadge({ alignment }: { alignment?: ResponsePattern['referenceAlignment'] }) {
+  if (!alignment || !alignment.alignmentLevel) return null
+
+  const level = alignment.alignmentLevel
+  const config = {
+    strong: { label: 'Strong Reference Alignment', tone: 'bg-sky-50 text-sky-700 border-sky-200' },
+    partial: { label: 'Partial Reference Alignment', tone: 'bg-indigo-50 text-indigo-700 border-indigo-200' },
+    unclear: { label: 'Unclear Alignment', tone: 'bg-slate-100 text-slate-700 border-slate-200' },
+    limited: { label: 'Limited Reference Alignment', tone: 'bg-amber-50 text-amber-800 border-amber-200' },
+  }[level] || { label: 'Reference Alignment', tone: 'bg-slate-100 text-slate-700 border-slate-200' }
+
+  return (
+    <div className="mt-2 flex flex-col gap-0.5">
+      <span className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-semibold ${config.tone}`}>
+        <span>🎯 {config.label}</span>
+      </span>
+      {alignment.explanation && (
+        <span className="text-[10px] text-slate-500 italic pl-1">
+          {alignment.explanation} (Relative to reference answer; does not imply incorrectness)
+        </span>
+      )}
+    </div>
+  )
+}
+
 function getQuestionConfidenceDelta(question: SessionQuestionSummary) {
   if (!question.revision || question.initial.averageConfidence === null || question.revision.averageConfidence === null) {
     return null
@@ -193,13 +194,6 @@ function FallbackNotice() {
   )
 }
 
-/**
- * Compact color-chip legend for what a pattern's bubble/accent color means —
- * standard UI badge row instead of a paragraph. Ranges come straight from
- * lib/confidence.ts (the same source getClusterPatternColor uses), so this
- * can never drift out of sync with the actual color logic. Deliberately
- * avoids implying color = correctness.
- */
 function ConfidenceLegend() {
   return (
     <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-slate-100 bg-slate-50 px-3 py-1.5 text-xs text-slate-600">
@@ -222,18 +216,6 @@ function ConfidenceLegend() {
   )
 }
 
-/**
- * One neutral response pattern rendered as a grid card with a collapsible
- * evidence drawer — summary metrics (count/share/confidence) stay visible up
- * front, every response in the pattern only appears once expanded (scrollable,
- * never truncated). Ranked by prevalence only — the rank number is a size
- * fact, never a correctness grade. The left accent + dot reflect the
- * pattern's own mean student confidence (low/middle/high), reusing the same
- * non-evaluative palette as the live cluster view; it carries no
- * correct/incorrect meaning. `spanFull` lets the grid give a lone trailing
- * card (odd pattern count) the full row instead of leaving an empty cell
- * beside it.
- */
 function PatternGridCard({
   pattern,
   isExpanded,
@@ -246,8 +228,6 @@ function PatternGridCard({
   spanFull?: boolean
 }) {
   const palette = getClusterPatternColor(pattern.averageConfidence)
-  // Defensive: a stored summary_json blob is untyped at runtime, so a stale
-  // cached row from before this field existed could still reach the client.
   const responses = pattern.responses ?? []
   const hasEvidence = responses.length > 0
 
@@ -272,6 +252,8 @@ function PatternGridCard({
           </div>
           <p className="mt-0.5 text-sm font-semibold leading-snug text-slate-800">{pattern.label}</p>
           {pattern.summary && <p className="mt-1 text-xs leading-relaxed text-slate-500">{pattern.summary}</p>}
+
+          <ReferenceAlignmentBadge alignment={pattern.referenceAlignment} />
 
           <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
             <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
@@ -347,23 +329,333 @@ function ResponsePatternGrid({ patterns }: { patterns: ResponsePattern[] }) {
   )
 }
 
-/** Detail pane for the currently selected question in the master/detail Questions Breakdown. */
+/**
+ * Synthesized AI Observations Section ("What AI Brought to Your Attention")
+ * Grouped, human-readable observations (NOT raw 49-event log dumps!)
+ */
+function SynthesizedObservationsSection({ observations }: { observations: SynthesizedAgentObservation[] }) {
+  const [expandedQuoteId, setExpandedQuoteId] = useState<string | null>(null)
+
+  if (!observations || observations.length === 0) {
+    return (
+      <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+          <div>
+            <h3 className="text-lg font-bold text-slate-900">What AI Brought to Your Attention</h3>
+            <p className="text-xs text-slate-400 mt-0.5">Surfaced observations grounded in student reasoning evidence and active teacher monitoring goals</p>
+          </div>
+          <div className="rounded-xl bg-indigo-50 p-2 text-indigo-600">
+            <Sparkles className="size-5" />
+          </div>
+        </div>
+        <p className="mt-4 text-xs text-slate-400 italic">No autonomous observations crossed teacher monitoring thresholds in this session.</p>
+      </section>
+    )
+  }
+
+  return (
+    <section className="rounded-2xl border border-indigo-200 bg-gradient-to-br from-indigo-50/50 via-white to-sky-50/40 p-6 shadow-sm space-y-5">
+      <div className="flex items-center justify-between border-b border-indigo-100 pb-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <h3 className="text-lg font-bold text-slate-900">What AI Brought to Your Attention</h3>
+            <Badge className="bg-indigo-600 text-white font-medium">{observations.length} Synthesized Finding{observations.length === 1 ? '' : 's'}</Badge>
+          </div>
+          <p className="text-xs text-slate-500 mt-0.5">
+          MeshQuiz noticed these patterns in student responses during the lesson.
+          </p>
+        </div>
+        <div className="rounded-xl bg-indigo-100 p-2.5 text-indigo-700">
+          <Sparkles className="size-5" />
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        {observations.map((obs) => {
+          const isQuotesExpanded = expandedQuoteId === obs.id
+          return (
+            <div key={obs.id} className="rounded-2xl border border-indigo-100 bg-white p-5 shadow-sm space-y-4">
+              {/* Finding Title & Status */}
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-indigo-700 block">AI Observation</span>
+                  <h4 className="mt-1 text-base font-bold text-slate-900 leading-snug">{obs.title}</h4>
+                  <p className="mt-1 text-xs leading-relaxed text-slate-600">{obs.findingDescription}</p>
+                </div>
+                <Badge
+                  variant="outline"
+                  className={`capitalize font-semibold text-xs px-2.5 py-1 ${
+                    obs.humanCheckpointStatus === 'accepted' || obs.lecturerAction === 'pinned'
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : obs.humanCheckpointStatus === 'dismissed'
+                      ? 'bg-slate-100 text-slate-600 border-slate-200'
+                      : 'bg-amber-50 text-amber-800 border-amber-200'
+                  }`}
+                >
+                  {obs.lecturerAction ? `Lecturer: ${obs.lecturerAction}` : `Status: ${obs.humanCheckpointStatus}`}
+                </Badge>
+              </div>
+
+              {/* Evidence & Why Surfaced Grid */}
+              <div className="grid gap-3 sm:grid-cols-2 bg-slate-50/80 p-4 rounded-xl border border-slate-100">
+                {/* Evidence Column */}
+                <div className="space-y-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Evidence</span>
+                  <p className="text-sm font-bold text-slate-800">
+                    {obs.prevalencePercentage}% of responses ({obs.responseCount} student{obs.responseCount === 1 ? '' : 's'})
+                  </p>
+
+                  {obs.sampleQuotes.length > 0 && (
+                    <div className="mt-2">
+                      <button
+                        type="button"
+                        onClick={() => setExpandedQuoteId(isQuotesExpanded ? null : obs.id)}
+                        className="text-xs font-semibold text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
+                      >
+                        {isQuotesExpanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+                        {isQuotesExpanded ? 'Hide representative quotes' : `View ${obs.sampleQuotes.length} sample quotes`}
+                      </button>
+
+                      {isQuotesExpanded && (
+                        <div className="mt-2 space-y-1.5 border-t border-slate-200/60 pt-2">
+                          {obs.sampleQuotes.map((sq) => (
+                            <blockquote key={sq.responseId} className="text-xs text-slate-700 italic bg-white p-2 rounded border border-slate-100 flex items-center justify-between gap-2">
+                              <span>"{sq.quote}"</span>
+                              {typeof sq.confidence === 'number' && (
+                                <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600 not-italic">
+                                  Conf: {sq.confidence}/5
+                                </span>
+                              )}
+                            </blockquote>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* Why Surfaced Column */}
+                <div className="space-y-1 border-t sm:border-t-0 sm:border-l sm:pl-4 border-slate-200/60 pt-2 sm:pt-0">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Why MeshQuiz Surfaced This</span>
+                  {obs.monitoringGoalTitle && (
+                    <p className="text-xs font-semibold text-slate-800">
+                      Monitored dimension: <span className="text-indigo-700 font-bold">{obs.monitoringGoalTitle}</span>
+                    </p>
+                  )}
+                  <p className="text-xs text-slate-600 leading-relaxed">{obs.triggerReason}</p>
+                  {/* <p className="text-[10px] text-slate-400 pt-1">
+                    Evaluated {obs.evaluationCount} time{obs.evaluationCount === 1 ? '' : 's'} during live response stream updates
+                  </p> */}
+                </div>
+              </div>
+
+              {/* Lecturer Response & Notes if recorded */}
+              {obs.lecturerInterpretation && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 flex items-start gap-2.5">
+                  <Pin className="size-4 text-amber-700 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-amber-800 block">Lecturer Note</span>
+                    <p className="text-xs text-slate-800 font-medium whitespace-pre-wrap">{obs.lecturerInterpretation}</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
+}
+
+function CarriesForwardSection({ items }: { items: SessionSummaryPayload['carriesForward'] }) {
+  if (!items || items.length === 0) return null
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm space-y-4">
+      <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+        <div>
+          <h3 className="text-lg font-bold text-slate-900">Carries Forward to Future Sessions</h3>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Persistent memory, active monitoring goals, and lecturer-selected discussion topics carried forward
+          </p>
+        </div>
+        <div className="rounded-xl bg-amber-50 p-2 text-amber-600">
+          <Target className="size-5" />
+        </div>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        {items.map((item) => (
+          <div key={item.id} className="rounded-xl border border-slate-100 bg-slate-50/70 p-4 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                {item.type.replace(/_/g, ' ')}
+              </span>
+              <span className="rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                {item.status}
+              </span>
+            </div>
+            <h4 className="text-sm font-bold text-slate-900">{item.title}</h4>
+            <p className="text-xs text-slate-600 leading-relaxed">{item.description}</p>
+            <div className="pt-2 border-t border-slate-200/60 text-[11px] text-indigo-700 font-medium flex items-center gap-1.5">
+              <span>🔄</span>
+              <span>{item.nextSessionRole}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function QualitativeRevisionSection({
+  analysis,
+  note,
+}: {
+  analysis?: SessionSummaryPayload['qualitativeRevisionAnalysis']
+  note?: string | null
+}) {
+  const [showDetailedPatternList, setShowDetailedPatternList] = useState(false)
+
+  if (!analysis && !note) return null
+
+  return (
+    <section className="rounded-2xl border border-emerald-100 bg-emerald-50/30 p-6 shadow-sm space-y-4">
+      <div className="flex items-center justify-between border-b border-emerald-200/60 pb-4">
+        <div>
+          <h3 className="text-lg font-bold text-emerald-950">What Changed After Revision</h3>
+          <p className="text-xs text-emerald-700 mt-0.5">Qualitative synthesis of conceptual refinement, new reasoning directions, and persistent student interpretations.</p>
+        </div>
+        <div className="rounded-xl bg-emerald-100 p-2 text-emerald-700">
+          <TrendingUp className="size-5" />
+        </div>
+      </div>
+
+      <p className="text-xs font-medium text-emerald-900 leading-relaxed bg-white/80 p-4 rounded-xl border border-emerald-100 shadow-sm">
+        {note || analysis?.summaryNote}
+      </p>
+
+      {analysis && (
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowDetailedPatternList((prev) => !prev)}
+            className="text-xs font-bold text-emerald-700 hover:text-emerald-900 flex items-center gap-1.5 py-1"
+          >
+            {showDetailedPatternList ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
+            {showDetailedPatternList ? 'Hide detailed pattern changes' : 'View detailed reasoning-pattern changes'}
+          </button>
+
+          {showDetailedPatternList && (
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 block">Persistent Interpretations</span>
+                <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                  {analysis.persistedPatterns.length > 0 ? (
+                    analysis.persistedPatterns.map((p, i) => <li key={i}>• {p}</li>)
+                  ) : (
+                    <li className="text-slate-400 italic">None</li>
+                  )}
+                </ul>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-sky-700 block">Refined Reasoning</span>
+                <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                  {analysis.changedPatterns.length > 0 ? (
+                    analysis.changedPatterns.map((p, i) => <li key={i}>• {p}</li>)
+                  ) : (
+                    <li className="text-slate-400 italic">None</li>
+                  )}
+                </ul>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-sm">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-violet-700 block">New Conceptual Directions</span>
+                <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                  {analysis.emergedPatterns.length > 0 ? (
+                    analysis.emergedPatterns.map((p, i) => <li key={i}>• {p}</li>)
+                  ) : (
+                    <li className="text-slate-400 italic">None</li>
+                  )}
+                </ul>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function LongitudinalContextSection({ items }: { items: SessionSummaryPayload['longitudinalContext'] }) {
+  if (!items || items.length === 0) return null
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm space-y-4">
+      <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+        <div>
+          <h3 className="text-lg font-bold text-slate-900">Longitudinal Pattern Context</h3>
+          <p className="text-xs text-slate-400 mt-0.5">Reasoning patterns matched against historical sessions</p>
+        </div>
+        <div className="rounded-xl bg-sky-50 p-2 text-sky-600">
+          <RefreshCcw className="size-5" />
+        </div>
+      </div>
+
+      <div className="space-y-3">
+        {items.map((item, idx) => (
+          <div key={idx} className="rounded-xl border border-slate-100 bg-slate-50/70 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="text-sm font-bold text-slate-900">{item.patternLabel}</h4>
+              <span className="rounded-full bg-sky-100 px-2.5 py-0.5 text-[10px] font-semibold text-sky-800">
+                Prior Prevalence: {item.priorPrevalence}% → Current: {item.currentPrevalence}%
+              </span>
+            </div>
+            <p className="mt-1.5 text-xs text-slate-600 leading-relaxed">{item.descriptiveNote}</p>
+            {item.priorLecturerAction && (
+              <p className="mt-2 text-[11px] text-indigo-700 font-medium">
+                Prior Lecturer Action: <span className="capitalize">{item.priorLecturerAction.replace(/_/g, ' ')}</span>
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 function QuestionDetailPane({
   question,
   isBaseline,
+  synthesizedObs,
+  annotations,
 }: {
   question: SessionQuestionSummary
   isBaseline: boolean
+  synthesizedObs?: SynthesizedAgentObservation[]
+  annotations?: LecturerAnnotation[]
 }) {
   const confidenceDelta = getQuestionConfidenceDelta(question)
 
+  const questionObs = useMemo(() => {
+    return (synthesizedObs || []).filter((a) => a.questionId === question.questionId)
+  }, [synthesizedObs, question.questionId])
+
+  const questionNotes = useMemo(() => {
+    return (annotations || []).filter(
+      (a) => a.question_id === question.questionId && a.lecturer_interpretation !== null
+    )
+  }, [annotations, question.questionId])
+
   return (
     <div className="space-y-5">
+      {/* 1. QUESTION CONTEXT */}
       <div>
         <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
           Question {question.position}
         </p>
-        <p className="mt-1.5 whitespace-pre-wrap text-sm leading-relaxed text-slate-800">
+        <p className="mt-1.5 whitespace-pre-wrap text-sm leading-relaxed text-slate-800 font-medium">
           {question.prompt}
         </p>
       </div>
@@ -382,6 +674,7 @@ function QuestionDetailPane({
 
       {question.initial.source === 'fallback' && <FallbackNotice />}
 
+      {/* 2. WHAT STUDENTS SAID (Initial Response Patterns) */}
       <div>
         <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">
           Response Patterns{!isBaseline && question.revision ? ' (Initial)' : ''}
@@ -392,6 +685,7 @@ function QuestionDetailPane({
         </div>
       </div>
 
+      {/* 3. WHAT CHANGED AFTER REVISION */}
       {!isBaseline && question.revision && (
         <div className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50/60 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -412,6 +706,38 @@ function QuestionDetailPane({
           </div>
         </div>
       )}
+
+      {/* 4. WHAT AI BROUGHT TO ATTENTION */}
+      {questionObs.length > 0 && (
+        <div className="rounded-xl border border-indigo-100 bg-indigo-50/40 p-4 space-y-2">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-800">✦ AI Observation for Question {question.position}</p>
+          {questionObs.map((obs) => (
+            <div key={obs.id} className="text-xs text-slate-700 space-y-0.5">
+              <p className="font-bold text-indigo-950">{obs.title}</p>
+              <p className="text-xs text-slate-600 leading-relaxed">{obs.findingDescription}</p>
+              {obs.monitoringGoalTitle && (
+                <p className="text-[11px] text-indigo-700 font-medium">Monitored dimension: {obs.monitoringGoalTitle}</p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 5. WHAT YOU DECIDED (Teacher Notes for Question) */}
+      {questionNotes.length > 0 && (
+        <div className="rounded-xl border border-amber-200/80 bg-amber-50/70 p-4 space-y-1.5">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-amber-800">📝 What You Decided for Question {question.position}</p>
+          {questionNotes.map((ann) => (
+            <div key={ann.annotation_id} className="text-xs text-slate-700">
+              {ann.lecturer_interpretation && (
+                <p className="text-xs font-medium text-slate-800 leading-relaxed whitespace-pre-wrap">
+                  "{ann.lecturer_interpretation}"
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -429,23 +755,34 @@ export default function SummaryClient({
   const [isRegenerating, setIsRegenerating] = useState(false)
   const [isGeneratingStudentSummaries, setIsGeneratingStudentSummaries] = useState(false)
   const [statusMessage, setStatusMessage] = useState<string | null>(null)
-  const [studentSummaryResult, setStudentSummaryResult] = useState<{
-    analysis_status: 'ok' | 'partial' | 'fallback'
-    warnings: string[]
-    errors: string[]
-    fallback_cards_created: number
-  } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selectedQuestionId, setSelectedQuestionId] = useState<string | null>(null)
+  const [annotations, setAnnotations] = useState<LecturerAnnotation[]>([])
+
+  useEffect(() => {
+    async function fetchAnnotations() {
+      try {
+        const res = await fetch(`/api/teacher/annotation?sessionId=${sessionId}`)
+        if (res.ok) {
+          const data = await res.json()
+          setAnnotations((data.annotations || []) as LecturerAnnotation[])
+        }
+      } catch (err) {
+        console.error('Failed to fetch session annotations', err)
+      }
+    }
+    void fetchAnnotations()
+  }, [sessionId])
+
+  const teacherDecisions = useMemo(() => {
+    return summary.synthesizedTeacherDecisions ?? []
+  }, [summary.synthesizedTeacherDecisions])
 
   const isBaseline = sessionCondition === 'baseline'
   const patternCards = useMemo(
     () => summary.recurringPatterns.map((pattern, index) => buildPatternCard(pattern, index)),
     [summary.recurringPatterns]
   )
-  const totalPatternsIdentified = useMemo(() => {
-    return summary.questionSummaries.reduce((sum, question) => sum + question.initial.patterns.length, 0)
-  }, [summary.questionSummaries])
 
   const selectedQuestion =
     summary.questionSummaries.find((question) => question.questionId === selectedQuestionId) ??
@@ -453,15 +790,14 @@ export default function SummaryClient({
     null
 
   const heroSubtitle = isBaseline
-    ? 'Review the response patterns students gave on their first pass, grouped by what they said, with confidence shown as a separate descriptive statistic.'
-    : 'Review how student responses were distributed across patterns in the initial and revision rounds, alongside confidence movement between rounds.'
+    ? 'Review response patterns grounded in student submissions, reference answer alignment, and confidence distribution.'
+    : 'Synthesized review of student reasoning distributions, revision movements, reference alignments, and autonomous agent findings.'
 
   const handleRegenerate = async () => {
     try {
       setIsRegenerating(true)
       setError(null)
       setStatusMessage(null)
-      setStudentSummaryResult(null)
 
       const response = await fetch('/api/session-summary?force=true', {
         method: 'POST',
@@ -473,7 +809,7 @@ export default function SummaryClient({
       if (!response.ok) throw new Error(payload?.error || 'Failed to regenerate summary.')
 
       setSummary(payload as SessionSummaryPayload)
-      setStatusMessage('Summary updated successfully.')
+      setStatusMessage('Summary updated successfully using synthesized lesson review pipeline.')
     } catch (regenError) {
       console.error(regenError)
       setError(regenError instanceof Error ? regenError.message : 'Failed to regenerate summary.')
@@ -487,7 +823,6 @@ export default function SummaryClient({
       setIsGeneratingStudentSummaries(true)
       setError(null)
       setStatusMessage(null)
-      setStudentSummaryResult(null)
 
       const response = await fetch(`/api/teacher/sessions/${sessionId}/generate-student-summaries`, {
         method: 'POST',
@@ -495,15 +830,7 @@ export default function SummaryClient({
       const payload = await response.json().catch(() => null)
       if (!response.ok) throw new Error(payload?.error || 'Failed to generate student summaries.')
 
-      const warnings = Array.isArray(payload?.warnings) ? payload.warnings : []
-      const errors = Array.isArray(payload?.errors) ? payload.errors : []
-      setStudentSummaryResult({
-        analysis_status: payload?.analysis_status || 'ok',
-        warnings,
-        errors,
-        fallback_cards_created: Number(payload?.fallback_cards_created || 0),
-      })
-      setStatusMessage('Student summaries generated successfully.')
+      setStatusMessage('Student individual summaries generated successfully.')
     } catch (summaryError) {
       console.error(summaryError)
       setError('Could not generate student summaries.')
@@ -512,27 +839,21 @@ export default function SummaryClient({
     }
   }
 
-  // Split into three standalone cards so treatment and baseline can each
-  // arrange them differently without duplicating markup. Baseline keeps them
-  // bundled as `sidebarCards` (same 3-across grid as before); treatment places
-  // Observed Trends beside Shift Analysis and renders the other two full width
-  // below, so the right-hand rail no longer ends up dramatically taller than
-  // Shift Analysis.
   const observedTrendsCard = (
-    <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+    <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm space-y-4">
       <div className="flex items-center justify-between border-b border-slate-100 pb-4">
         <div>
-          <h3 className="text-lg font-bold text-slate-900">Observed Trends</h3>
-          <p className="text-xs text-slate-400 mt-0.5">Recurring response patterns across the session</p>
+          <h3 className="text-lg font-bold text-slate-900">What Students Expressed</h3>
+          <p className="text-xs text-slate-400 mt-0.5">Synthesized response patterns grounded in student submissions</p>
         </div>
         <div className="rounded-xl bg-amber-50 p-2 text-amber-600">
           <Sparkles className="size-5" />
         </div>
       </div>
 
-      <div className="mt-4 space-y-3">
+      <div className="space-y-3">
         {patternCards.map((pattern) => (
-          <article key={`${pattern.eyebrow}-${pattern.title}`} className="rounded-xl border border-slate-100 bg-slate-50/40 p-4 hover:border-slate-200 transition-colors">
+          <article key={`${pattern.eyebrow}-${pattern.title}`} className="rounded-xl border border-slate-100 bg-slate-50/50 p-4 hover:border-slate-200 transition-colors">
             <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">{pattern.eyebrow}</span>
             <h4 className="mt-1 text-sm font-bold text-slate-900">{pattern.title}</h4>
             <p className="mt-1.5 text-xs leading-relaxed text-slate-600">{pattern.detail}</p>
@@ -563,7 +884,7 @@ export default function SummaryClient({
           <Lightbulb className="size-5" />
         </div>
         <div className="min-w-0 flex-1">
-          <h4 className="text-sm font-bold text-slate-900">Next Curated Recommendation</h4>
+          <h4 className="text-sm font-bold text-slate-900">Possible Next-Session Consideration</h4>
           <p className="mt-2 text-sm leading-relaxed text-slate-600">{summary.nextTeachingRecommendation}</p>
           {summary.source === 'fallback' && (
             <p className="mt-3 text-xs text-slate-400 italic border-t border-slate-50 pt-2">
@@ -575,8 +896,6 @@ export default function SummaryClient({
     </section>
   )
 
-  // Baseline-only bundle — identical DOM/order to the previous single-array
-  // sidebarCards, so the baseline branch below is visually/structurally unchanged.
   const sidebarCards = (
     <>
       {observedTrendsCard}
@@ -637,10 +956,10 @@ export default function SummaryClient({
               <ClipboardList className="size-6" />
             </div>
             <div>
-              <h2 className="text-lg font-bold text-slate-900">Session Evaluation</h2>
+              <h2 className="text-lg font-bold text-slate-900">Session Evaluation & Lesson Review</h2>
               <div className="mt-1.5 flex flex-wrap items-center gap-2">
                 <Badge variant="secondary" className="bg-slate-100 text-slate-700 hover:bg-slate-100 font-medium">
-                  Teacher Summary
+                  Lesson Review
                 </Badge>
                 <Badge className={`font-medium ${isBaseline ? 'bg-amber-50 text-amber-700 border-amber-200' : 'bg-blue-50 text-blue-700 border-blue-200'} shadow-none`}>
                   {isBaseline ? 'Baseline Pass' : 'With Revision'}
@@ -657,7 +976,7 @@ export default function SummaryClient({
               className="rounded-xl border-slate-200 bg-white shadow-sm gap-2"
             >
               <RefreshCcw className={`size-4 text-slate-500 ${isRegenerating ? 'animate-spin' : ''}`} />
-              {isRegenerating ? 'Updating Insights...' : 'Regenerate Analysis'}
+              {isRegenerating ? 'Updating Review...' : 'Regenerate Analysis'}
             </Button>
 
             <Button
@@ -676,7 +995,7 @@ export default function SummaryClient({
           </div>
         </header>
 
-        {/* HERO HERO SECTION & CORE METRICS */}
+        {/* HERO SECTION & CORE METRICS */}
         <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm md:p-8">
           <div className="grid gap-8 lg:grid-cols-[1fr_400px]">
             <div className="flex flex-col justify-center">
@@ -702,29 +1021,7 @@ export default function SummaryClient({
           </div>
         </section>
 
-        {/* OUTCOME TILES — descriptive counts only, no correctness judgment */}
-        <section className="grid gap-4 sm:grid-cols-2 md:grid-cols-3">
-          {/* <OutcomeCard
-            label="Initial Submissions"
-            value={String(summary.metrics.initialResponses)}
-            tone="blue"
-            icon={ClipboardList}
-          /> */}
-          {/* <OutcomeCard
-            label="Starting Confidence"
-            value={formatConfidence(summary.metrics.initialAverageConfidence)}
-            tone="blue"
-            icon={TrendingUp}
-          /> */}
-          {/* <OutcomeCard
-            label="Response Patterns Identified"
-            value={String(totalPatternsIdentified)}
-            tone="blue"
-            icon={Sparkles}
-          /> */}
-        </section>
-
-        {/* CONFIDENCE SHIFT TILES — movement in self-reported confidence only, never a correctness claim */}
+        {/* CONFIDENCE SHIFT TILES */}
         {!isBaseline && (
           <section className="grid gap-4 sm:grid-cols-2 md:grid-cols-3">
             <OutcomeCard
@@ -748,13 +1045,7 @@ export default function SummaryClient({
           </section>
         )}
 
-        {/* SHIFT ANALYSIS + OBSERVED TRENDS — treatment sessions pair these two
-            side by side (both naturally similar heights) instead of stacking
-            all three sidebar cards next to Shift Analysis, which is what left
-            a huge empty gap under the shorter Shift Analysis card. Session
-            Takeaway and Next Recommendation move to their own full-width
-            cards below. Baseline (no Shift Analysis) is unchanged: sidebarCards
-            still renders as a 3-across row. */}
+        {/* SHIFT ANALYSIS + OBSERVED TRENDS */}
         {!isBaseline ? (
           <>
             <div className="grid items-start gap-6 lg:grid-cols-2">
@@ -772,21 +1063,20 @@ export default function SummaryClient({
                   <MetricTile label="First Round Entries" value={String(summary.metrics.initialResponses)} icon={ClipboardList} />
                   <MetricTile label="Revision Entries" value={String(summary.metrics.revisionResponses)} icon={CheckCircle2} />
                   <MetricTile label="Confidence Growth" value={formatDelta(summary.metrics.avgConfidenceChange)} icon={TrendingUp} />
-                  {/* <MetricTile label="Retention Rate" value={formatPercent(summary.metrics.revisionParticipationRate)} icon={Target} /> */}
                 </div>
               </section>
 
               {observedTrendsCard}
             </div>
 
-            {/* {sessionTakeawayCard}
-            {nextRecommendationCard} */}
+            {sessionTakeawayCard}
+            {nextRecommendationCard}
           </>
         ) : (
           <div className="grid gap-6 sm:grid-cols-3">{sidebarCards}</div>
         )}
 
-        {/* QUESTIONS BREAKDOWN — full width so the pattern grid has real room to breathe */}
+        {/* SECTION 6: QUESTIONS BREAKDOWN */}
         <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
           <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50/70 px-5 py-4">
             <div>
@@ -827,18 +1117,8 @@ export default function SummaryClient({
                           {question.position}
                         </span>
                         <span className="min-w-0 truncate text-sm font-medium text-slate-800">
-                          {truncatePrompt(question.prompt, 60)}
+                          Question {question.position}
                         </span>
-                      </div>
-                      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 pl-8 text-[11px] text-slate-400">
-                        {/* <span>{question.initial.responseCount} entries</span>
-                        <span>·</span>
-                        <span>{formatConfidence(question.initial.averageConfidence)}</span> */}
-                        {/* {question.initial.patterns.length > 0 && (
-                          <span className="rounded-full bg-slate-200/70 px-1.5 py-0.5 font-medium text-slate-500">
-                            {question.initial.patterns.length}p
-                          </span>
-                        )} */}
                       </div>
                     </button>
                   )
@@ -847,15 +1127,138 @@ export default function SummaryClient({
 
               {/* DETAIL PANE */}
               <div className={`min-w-0 p-5 md:max-h-[640px] md:overflow-y-auto md:p-6 ${THIN_SCROLLBAR}`}>
-                {selectedQuestion && <QuestionDetailPane question={selectedQuestion} isBaseline={isBaseline} />}
+                {selectedQuestion && (
+                  <QuestionDetailPane
+                    question={selectedQuestion}
+                    isBaseline={isBaseline}
+                    synthesizedObs={summary.synthesizedObservations}
+                    annotations={annotations}
+                  />
+                )}
               </div>
             </div>
-            
           )}
-          
         </section>
-        {sessionTakeawayCard}
-        {nextRecommendationCard}
+
+        {/* SECTION 1: WHAT AI BROUGHT TO YOUR ATTENTION (Synthesized AI Findings) */}
+        <SynthesizedObservationsSection observations={summary.synthesizedObservations} />
+
+        {/* SECTION 2: WHAT CHANGED AFTER REVISION */}
+        {!isBaseline && (
+          <QualitativeRevisionSection
+            analysis={summary.qualitativeRevisionAnalysis}
+            note={summary.qualitativeRevisionNote}
+          />
+        )}
+
+        {/* SECTION 3: CARRIES FORWARD (Persistent Memory) */}
+        <CarriesForwardSection items={summary.carriesForward} />
+
+        {/* SECTION 4: LONGITUDINAL PATTERN CONTEXT */}
+        <LongitudinalContextSection items={summary.longitudinalContext} />
+
+        {/* SECTION 5: WHAT YOU DECIDED (Lecturer Judgments & Notes) */}
+        {teacherDecisions.length > 0 && (
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">What You Decided</h3>
+                <p className="text-xs text-slate-400 mt-0.5">Patterns you chose to review, discuss, or carry forward.</p>
+              </div>
+              <div className="rounded-xl bg-blue-50 p-2 text-blue-600">
+                <Pin className="size-5" />
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              {teacherDecisions.map((dec) => (
+                <div key={dec.id} className="rounded-xl border border-slate-100 bg-slate-50/70 p-4 space-y-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <h4 className="text-sm font-bold text-slate-900">
+                      {dec.patternLabel}
+                    </h4>
+                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                      {dec.actionTypes.includes('selected_for_discussion') && (
+                        <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-[10px] font-semibold text-indigo-800">
+                          Discussion
+                        </span>
+                      )}
+                      {dec.actionTypes.includes('pinned') && (
+                        <span className="rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-semibold text-blue-800">
+                          Pinned
+                        </span>
+                      )}
+                      {dec.actionTypes.includes('monitored') && (
+                        <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-semibold text-violet-800">
+                          Monitored
+                        </span>
+                      )}
+                      {dec.actionTypes.includes('inspected') && dec.actionTypes.length === 1 && (
+                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-700">
+                          Reviewed
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    {dec.synthesizedActionText}
+                  </p>
+
+                  {dec.lecturerInterpretation && (
+                    <div className="rounded-lg border border-amber-200/80 bg-amber-50/70 p-2.5 mt-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-amber-800 block">
+                        📝 Teacher Note
+                      </span>
+                      <p className="mt-1 text-xs text-slate-700 leading-relaxed whitespace-pre-wrap">
+                        {dec.lecturerInterpretation}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* SECTION 7: TECHNICAL ACTIVITY LOG (Collapsed Audit Trail) */}
+        <details className="rounded-2xl border border-slate-200 bg-slate-50 p-6 shadow-sm group">
+          <summary className="cursor-pointer font-bold text-slate-700 flex items-center justify-between text-sm select-none">
+            <span className="flex items-center gap-2">
+              <Terminal className="size-4 text-slate-500" />
+              Technical Activity Log ({summary.agentActivity.length} Event Log Records)
+            </span>
+            <span className="text-xs text-indigo-600 font-medium group-open:hidden">Expand Audit Trail</span>
+            <span className="text-xs text-slate-400 font-medium hidden group-open:inline">Collapse Audit Trail</span>
+          </summary>
+          <p className="mt-2 text-xs text-slate-500 border-b border-slate-200 pb-3">
+            Full raw database event log of agent evaluation triggers, streaming threshold decisions, and action records for research auditability and system debugging.
+          </p>
+          <div className="mt-4 space-y-2 max-h-96 overflow-y-auto pr-1 text-xs">
+            {summary.agentActivity.length === 0 ? (
+              <p className="text-slate-400 italic">No technical log records found.</p>
+            ) : (
+              summary.agentActivity.map((act) => (
+                <div key={act.actionId} className="rounded-lg border border-slate-200 bg-white p-3 space-y-1">
+                  <div className="flex items-center justify-between gap-2 text-[10px] text-slate-400 font-mono">
+                    <span>ID: {act.actionId.slice(0, 8)}...</span>
+                    <span>{new Date(act.createdAt).toLocaleString()}</span>
+                  </div>
+                  <p className="font-mono text-slate-800 font-semibold">{act.decisionRuleExecuted}</p>
+                  <p className="text-slate-600">{act.actionTaken}</p>
+                  <div className="flex gap-2 text-[10px] text-slate-500 font-mono pt-1">
+                    <span>Role: {act.agentRole}</span>
+                    <span>·</span>
+                    <span>Trigger: {act.triggerType}</span>
+                    <span>·</span>
+                    <span>Checkpoint: {act.humanCheckpointStatus}</span>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </details>
+
       </div>
     </main>
   )

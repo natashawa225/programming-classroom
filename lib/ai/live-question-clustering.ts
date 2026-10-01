@@ -5,7 +5,7 @@ import { validateClusterSet, validateNonEvaluativeCluster } from '@/lib/ai/clust
 
 export type ReferenceAlignment = {
   aligned_reference_ids?: string[]
-  alignment_level?: 'strong' | 'partial' | 'limited'
+  alignment_level?: 'strong' | 'partial' | 'limited' | 'unclear'
   explanation?: string
 }
 
@@ -153,9 +153,9 @@ function summarizeAnswerStem(answer: string) {
 function normalizeReferenceAlignment(raw: any): ReferenceAlignment | undefined {
   if (!raw || typeof raw !== 'object') return undefined
   const level = String(raw.alignment_level || raw.level || '').toLowerCase()
-  const validLevel: 'strong' | 'partial' | 'limited' =
-    level === 'strong' || level === 'partial' || level === 'limited' ? level : 'partial'
-  const explanation = typeof raw.explanation === 'string' ? raw.explanation : ''
+  const validLevel: 'strong' | 'partial' | 'limited' | 'unclear' =
+    level === 'strong' || level === 'partial' || level === 'limited' || level === 'unclear' ? (level as any) : 'partial'
+  const explanation = typeof raw.explanation === 'string' ? raw.explanation : (typeof raw.reason === 'string' ? raw.reason : '')
   const alignedIds = Array.isArray(raw.aligned_reference_ids)
     ? raw.aligned_reference_ids.map((id: unknown) => String(id || '')).filter(Boolean)
     : []
@@ -260,14 +260,14 @@ function normalizeFinalClusters(
       const mergedRows = [...target.response_ids, ...unassignedRows.map((row) => row.response_id)]
         .map((id) => responseMap.get(id)!)
         .filter(Boolean)
-      normalized[smallestIndex] = buildClusterFromResponses(target.label, target.summary, mergedRows, smallestIndex)
+      normalized[smallestIndex] = buildClusterFromResponses(target.label, target.summary, mergedRows, smallestIndex, target.reference_alignment)
     }
   }
 
   if (normalized.length <= 5) {
     return normalized.map((cluster, index) => {
       const rows = cluster.response_ids.map((id) => responseMap.get(id)!).filter(Boolean)
-      return buildClusterFromResponses(cluster.label, cluster.summary, rows, index)
+      return buildClusterFromResponses(cluster.label, cluster.summary, rows, index, cluster.reference_alignment)
     })
   }
 
@@ -296,7 +296,7 @@ function normalizeFinalClusters(
 
   return merged.map((cluster, index) => {
     const rows = cluster.response_ids.map((id) => responseMap.get(id)!).filter(Boolean)
-    return buildClusterFromResponses(cluster.label, cluster.summary, rows, index)
+    return buildClusterFromResponses(cluster.label, cluster.summary, rows, index, cluster.reference_alignment)
   })
 }
 
@@ -758,24 +758,44 @@ export async function clusterLiveQuestionResponses(input: {
       {
         role: 'system',
         content: [
-          'You cluster short student answers for one open-ended classroom question into 1 to 5 groups based on shared conceptual reasoning pattern or approach.',
+          'You cluster short student answers for one open-ended classroom question into 1 to 5 groups based strictly on shared UNDERLYING REASONING PATTERNS or CONCEPTUAL UNDERSTANDING — not by correctness, final answer, keywords, or surface wording.',
           '',
-          'Your only job is grouping and describing what students said, not grading it.',
-          'Group responses by the underlying idea, approach, or reasoning pattern students are using — never by whether that idea is correct.',
+          'CORE CLUSTERING RULE:',
+          '• Two responses must NOT be placed in the same cluster merely because they reach the same conclusion or contain the same final answer. If they use materially different reasoning, causal explanations, interpretations of the mechanism, or conceptual models, they MUST be placed in different clusters.',
+          '• Conversely, two responses may remain in the same cluster even if one contains a minor factual error or different wording, provided that both demonstrate the same underlying reasoning approach.',
+
           '',
-          'Do not judge correctness, identify misconceptions, infer learning outcomes, or recommend teaching actions.',
-          'Do not label, score, or categorize any response or cluster as correct, incorrect, a misconception, or a level of understanding.',
-          'Do not use words like "correct", "incorrect", "wrong", "misconception", "error", "should", or "misunderstand" in a label or summary.',
+        
+          'REVISION ATTEMPTS:',
+          '• For revision attempts, cluster the revised response based on the reasoning and conceptual understanding expressed in the revised response itself.',
+          '• Do NOT group revision responses together merely because they are revisions to the same question or because they arrive at the same final answer.',
+          '• If two revised responses reach the same conclusion but explain it through materially different reasoning, causal mechanisms, or conceptual models, they MUST be placed in different clusters.',
+          '• If two revised responses express the same underlying reasoning despite different wording or different levels of detail, they SHOULD remain in the same cluster.',
+          '• A revision that adds more explanation does not automatically represent a different reasoning pattern. Separate it only when the added explanation reveals a materially different conceptual model or approach.',
+
           '',
-          'Important Instructions:',
-          '- Separate responses into distinct clusters when students describe conceptually different reasoning patterns (e.g. off-by-one loop condition vs variable scope vs integer overflow vs logic structure).',
-          '- Merge responses into the same cluster ONLY when they describe the same underlying reasoning pattern or idea in different words or languages.',
-          '- Do NOT merge conceptually distinct reasoning patterns into a single cluster merely because they address the same question or because they do not match a reference answer.',
-          '- Reference answers are provided for topic context only — never use reference answers as a requirement that all responses match it or belong to one catch-all cluster.',
-          '- Include the exact response_id string for every response assigned to a cluster.',
-          'For each cluster, include a reference_alignment object with aligned_reference_ids, alignment_level ("strong", "partial", or "limited"), and a short neutral explanation of conceptual overlap.',
+          'CLUSTERING PRINCIPLES:',
+          '1. REASONING TAKES PRIORITY OVER FINAL ANSWER: First identify how the student explains, justifies, or arrives at the answer. Do not use correctness or final answer output as the primary clustering criterion.',
+          '2. DO NOT MERGE DIFFERENT REASONING JUST BECAUSE CONCLUSION IS THE SAME: Example: two students may both propose "max = arr[0]", but if one explains the negative-value initialization problem while another believes changing the loop index is the underlying cause, they represent different reasoning patterns and MUST be placed in separate clusters.',
+          '3. DO NOT SPLIT SOLELY BECAUSE OF A MINOR ERROR: A small factual mistake or typo does not automatically create a new cluster when the student\'s underlying reasoning approach is otherwise the same. Split ONLY when the error reveals a materially different conceptual interpretation or reasoning approach.',
+          '4. SEPARATE MATERIALLY DIFFERENT CONCEPTUAL MODELS: If students explain the same code/concept using different causal mechanisms, interpretations, or mental models, keep them separate even when their final answers happen to match.',
+          '5. CORRECT AND INCORRECT RESPONSES CAN COEXIST IN THE SAME CLUSTER: Clustering is NOT correctness classification. Do NOT create clusters such as "correct", "incorrect", "right answers", "wrong answers", or "misconceptions". Correctness/reference alignment is represented separately in reference_alignment, NOT in cluster boundaries.',
+          '6. USE THE SMALLEST MEANINGFUL SET OF REASONING PATTERNS: Do not create a separate cluster for every minor surface variation. Merge responses when their underlying reasoning is substantially the same. Split when combining them would hide a meaningful difference in how students understand or reason about the question.',
+          '7. DO NOT INFER REASONING THAT IS NOT EXPRESSED: Base cluster assignments strictly on evidence present in the student\'s response. If the reasoning is too short or ambiguous to distinguish, use a neutral descriptive cluster rather than inventing an unexpressed interpretation.',
           '',
-          'After assigning response_ids to clusters, write a short neutral label and one-sentence summary for each cluster that describes what students in that cluster said or did.',
+          
+          'THE MERGE/SPLIT DECISION TEST:',
+          'For every proposed merge, ask: "If these two responses were shown to a lecturer, would placing them together hide a meaningful difference in how the students reasoned or understood the concept?" If YES, separate them. If NO, keep them together.',
+          '',
+          'NEUTRAL DESCRIPTIVE LABELS & STRICT PROHIBITED WORDS:',
+          'Cluster labels and summaries must describe the observed reasoning pattern neutrally.',
+          '• STRICTLY FORBIDDEN WORDS in labels, summaries, and alignment explanations: "correct", "correctly", "incorrect", "incorrectly", "wrong", "right", "misconception", "error", "errors", "flawed", "accurate", "inaccurate", "good", "bad".',
+          '• Replace "correctly identifies X" with "identifies X" or "proposes X".',
+          '• Replace "contains errors in loop" with "modifies loop boundary" or "adjusts loop condition".',
+          '• Describe WHAT students stated or did using purely descriptive, non-evaluative language.',
+          '',
+          'REFERENCE ANSWERS:',
+          'Reference answers provide contextual grounding only — they MUST NOT determine cluster boundaries. First identify student reasoning patterns; assess reference alignment separately afterward.',
           '',
           'Return concise JSON only. Use classroom-safe, neutral language.',
         ].join('\n'),
@@ -796,7 +816,7 @@ export async function clusterLiveQuestionResponses(input: {
             clusters: [
               {
                 cluster_id: 'cluster_1',
-                label: 'neutral description of the shared idea or approach',
+                label: 'neutral description of the shared reasoning pattern or approach',
                 summary: 'one-sentence neutral description of what students in this cluster said',
                 reference_alignment: {
                   aligned_reference_ids: ['reference_id_1'],
@@ -809,14 +829,18 @@ export async function clusterLiveQuestionResponses(input: {
           }, null, 2),
           'Rules:',
           '- Every response_id must appear in exactly one cluster.',
-          '- Separate responses into distinct clusters when students describe conceptually different reasoning patterns.',
+          '- Cluster strictly by underlying reasoning pattern and conceptual model — NEVER by correctness or final answer match.',
+          '- Do NOT merge responses with different reasoning just because their final conclusion/answer matches.',
+          '- Do NOT split responses with the same reasoning model merely because of minor factual typos or errors.',
+          '- Correct and incorrect responses can coexist in the same cluster if they share the underlying reasoning pattern.',
+          '- Ask for every proposed merge: "If shown to a lecturer, would placing these together hide a meaningful difference in how students reasoned?" If yes, separate; if no, keep together.',
           '- Always include the exact response_ids in each cluster matching the response_id field of each input response.',
-          '- label = short neutral name of the idea or approach. No True/False/Correct/Incorrect/Misconception wording or prefix.',
+          '- label = short neutral name of the shared reasoning pattern or concept. No True/False/Correct/Incorrect/Misconception wording or prefix.',
           '- summary = one neutral sentence describing what students in the cluster said or did. Never state or imply whether it is right, wrong, or a misconception.',
-          '- reference_alignment.alignment_level must be "strong", "partial", or "limited". Never use evaluative terms like "correct", "wrong", or "misconception".',
+          '- reference_alignment.alignment_level must be "strong", "unclear", "limited", or "partial". Never use evaluative terms like "correct", "wrong", or "misconception".',
           '- Do not judge correctness, identify misconceptions, infer learning outcomes, or recommend teaching actions anywhere in a label, summary, or alignment explanation.',
           '- Responses marked bare=true contain no reasoning. Always place them in a separate cluster from explained responses. Do not split bare responses further by confidence.',
-          '- Treat the reference answers as topic context only, never as an answer key for grading responses.',
+          '- Treat reference answers as topic context only, never as an answer key for grading or defining cluster boundaries.',
         ].filter(Boolean).join('\n\n'),
       },
     ],

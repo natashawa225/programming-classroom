@@ -1,7 +1,32 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getTeacherSession } from '@/lib/teacher-auth'
-import { saveLecturerAnnotation } from '@/lib/services/pattern-memory-service'
+import { getLecturerAnnotationsForSession, saveLecturerAnnotation } from '@/lib/services/pattern-memory-service'
 import type { LecturerAnnotation } from '@/lib/types/database'
+
+export async function GET(request: NextRequest) {
+  try {
+    const teacherSession = await getTeacherSession()
+    if (!teacherSession) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+
+    const { searchParams } = new URL(request.url)
+    const sessionId = searchParams.get('sessionId')?.trim()
+
+    if (!sessionId) {
+      return NextResponse.json({ error: 'Missing required query parameter: sessionId' }, { status: 400 })
+    }
+
+    const annotations = await getLecturerAnnotationsForSession(sessionId)
+    return NextResponse.json({ annotations })
+  } catch (error) {
+    console.error('[teacher-annotation-api] GET error', error)
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : 'Failed to fetch annotations' },
+      { status: 500 }
+    )
+  }
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -46,3 +71,4 @@ export async function POST(request: NextRequest) {
     )
   }
 }
+

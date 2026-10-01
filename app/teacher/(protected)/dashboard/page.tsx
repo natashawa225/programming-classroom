@@ -78,10 +78,15 @@ export default function TeacherDashboard() {
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
         {/* Action Buttons */}
-        <div className="mb-12">
+        <div className="mb-12 flex items-center gap-4">
           <Link href="/teacher/create-session">
             <Button size="lg">
               Create New Session
+            </Button>
+          </Link>
+          <Link href="/teacher/monitoring-goals">
+            <Button size="lg" variant="outline" className="gap-2">
+              🎯 Monitoring Goals & Historical Evidence
             </Button>
           </Link>
         </div>

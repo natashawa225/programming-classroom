@@ -36,6 +36,10 @@ export async function createClient() {
   )
 }
 
+import type { SupabaseClient } from '@supabase/supabase-js'
+
+let cachedAdminClient: SupabaseClient | null = null
+
 export function createAdminClient() {
   const { url } = getSupabasePublicConfig()
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
@@ -44,10 +48,14 @@ export function createAdminClient() {
     throw new Error('SUPABASE_SERVICE_ROLE_KEY is missing')
   }
 
-  return createSupabaseClient(url, serviceRoleKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false,
-    },
-  })
+  if (!cachedAdminClient) {
+    cachedAdminClient = createSupabaseClient(url, serviceRoleKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    })
+  }
+
+  return cachedAdminClient
 }

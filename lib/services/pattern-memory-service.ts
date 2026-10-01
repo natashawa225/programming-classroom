@@ -22,33 +22,45 @@ export async function logAgentAction(input: {
   actionTaken: string
   humanCheckpointStatus?: 'pending' | 'accepted' | 'dismissed' | 'overridden'
 }): Promise<AgentAction | null> {
-  try {
-    const supabase = createAdminClient()
-    const { data, error } = await supabase
-      .from('agent_actions')
-      .insert({
-        session_id: input.sessionId,
-        question_id: input.questionId ?? null,
-        agent_role: input.agentRole || 'classroom_reasoning_observer',
-        trigger_type: input.triggerType,
-        observation_data: input.observationData,
-        decision_rule_executed: input.decisionRuleExecuted,
-        action_taken: input.actionTaken,
-        human_checkpoint_status: input.humanCheckpointStatus || 'pending',
-      })
-      .select()
-      .single()
+  const maxRetries = 3
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const supabase = createAdminClient()
+      const { data, error } = await supabase
+        .from('agent_actions')
+        .insert({
+          session_id: input.sessionId,
+          question_id: input.questionId ?? null,
+          agent_role: input.agentRole || 'classroom_reasoning_observer',
+          trigger_type: input.triggerType,
+          observation_data: input.observationData,
+          decision_rule_executed: input.decisionRuleExecuted,
+          action_taken: input.actionTaken,
+          human_checkpoint_status: input.humanCheckpointStatus || 'pending',
+        })
+        .select()
+        .single()
 
-    if (error) {
-      console.error('[pattern-memory-service] logAgentAction error', error)
+      if (error) {
+        if (attempt < maxRetries) {
+          await new Promise((resolve) => setTimeout(resolve, 200 * attempt))
+          continue
+        }
+        console.error('[pattern-memory-service] logAgentAction error', error)
+        return null
+      }
+
+      return data as AgentAction
+    } catch (err) {
+      if (attempt < maxRetries) {
+        await new Promise((resolve) => setTimeout(resolve, 200 * attempt))
+        continue
+      }
+      console.error('[pattern-memory-service] logAgentAction exception', err)
       return null
     }
-
-    return data as AgentAction
-  } catch (err) {
-    console.error('[pattern-memory-service] logAgentAction exception', err)
-    return null
   }
+  return null
 }
 
 export async function saveLecturerAnnotation(input: {
@@ -60,43 +72,55 @@ export async function saveLecturerAnnotation(input: {
   lecturerDecision?: string | null
   customLabel?: string | null
 }): Promise<LecturerAnnotation | null> {
-  try {
-    const supabase = createAdminClient()
-    const { data, error } = await supabase
-      .from('lecturer_annotations')
-      .insert({
-        session_id: input.sessionId,
-        question_id: input.questionId,
-        cluster_id: input.clusterId,
-        action_type: input.actionType,
-        lecturer_interpretation: input.lecturerInterpretation ? sanitizeNonEvaluativeText(input.lecturerInterpretation).sanitized : null,
-        lecturer_decision: input.lecturerDecision ? sanitizeNonEvaluativeText(input.lecturerDecision).sanitized : null,
-        custom_label: input.customLabel ? sanitizeNonEvaluativeText(input.customLabel).sanitized : null,
-      })
-      .select()
-      .single()
+  const maxRetries = 3
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const supabase = createAdminClient()
+      const { data, error } = await supabase
+        .from('lecturer_annotations')
+        .insert({
+          session_id: input.sessionId,
+          question_id: input.questionId,
+          cluster_id: input.clusterId,
+          action_type: input.actionType,
+          lecturer_interpretation: input.lecturerInterpretation ? sanitizeNonEvaluativeText(input.lecturerInterpretation).sanitized : null,
+          lecturer_decision: input.lecturerDecision ? sanitizeNonEvaluativeText(input.lecturerDecision).sanitized : null,
+          custom_label: input.customLabel ? sanitizeNonEvaluativeText(input.customLabel).sanitized : null,
+        })
+        .select()
+        .single()
 
-    if (error) {
-      console.error('[pattern-memory-service] saveLecturerAnnotation error', error)
+      if (error) {
+        if (attempt < maxRetries) {
+          await new Promise((resolve) => setTimeout(resolve, 200 * attempt))
+          continue
+        }
+        console.error('[pattern-memory-service] saveLecturerAnnotation error', error)
+        return null
+      }
+
+      // Log the corresponding human interaction step in agent_actions
+      await logAgentAction({
+        sessionId: input.sessionId,
+        questionId: input.questionId,
+        triggerType: 'lecturer_interaction',
+        observationData: { clusterId: input.clusterId, actionType: input.actionType },
+        decisionRuleExecuted: 'RECORD_HUMAN_INTERPRETATION',
+        actionTaken: `Recorded lecturer action '${input.actionType}' for cluster ${input.clusterId}`,
+        humanCheckpointStatus: 'accepted',
+      })
+
+      return data as LecturerAnnotation
+    } catch (err) {
+      if (attempt < maxRetries) {
+        await new Promise((resolve) => setTimeout(resolve, 200 * attempt))
+        continue
+      }
+      console.error('[pattern-memory-service] saveLecturerAnnotation exception', err)
       return null
     }
-
-    // Log the corresponding human interaction step in agent_actions
-    await logAgentAction({
-      sessionId: input.sessionId,
-      questionId: input.questionId,
-      triggerType: 'lecturer_interaction',
-      observationData: { clusterId: input.clusterId, actionType: input.actionType },
-      decisionRuleExecuted: 'RECORD_HUMAN_INTERPRETATION',
-      actionTaken: `Recorded lecturer action '${input.actionType}' for cluster ${input.clusterId}`,
-      humanCheckpointStatus: 'accepted',
-    })
-
-    return data as LecturerAnnotation
-  } catch (err) {
-    console.error('[pattern-memory-service] saveLecturerAnnotation exception', err)
-    return null
   }
+  return null
 }
 
 export async function getPriorSessionPatternsForQuestion(
@@ -139,6 +163,58 @@ export async function getLecturerAnnotationsForSession(sessionId: string): Promi
     return []
   }
 }
+
+export async function getAgentActionsForSession(sessionId: string): Promise<AgentAction[]> {
+  try {
+    const supabase = createAdminClient()
+    const { data, error } = await supabase
+      .from('agent_actions')
+      .select('*')
+      .eq('session_id', sessionId)
+      .order('created_at', { ascending: true })
+
+    if (error || !data) return []
+    return data as AgentAction[]
+  } catch (err) {
+    console.error('[pattern-memory-service] getAgentActionsForSession exception', err)
+    return []
+  }
+}
+
+export async function getSessionMemory(sessionId: string): Promise<SessionMemory | null> {
+  try {
+    const supabase = createAdminClient()
+    const { data, error } = await supabase
+      .from('session_memory')
+      .select('*')
+      .eq('session_id', sessionId)
+      .maybeSingle()
+
+    if (error || !data) return null
+    return data as SessionMemory
+  } catch (err) {
+    console.error('[pattern-memory-service] getSessionMemory exception', err)
+    return null
+  }
+}
+
+export async function getPatternHistoryForSession(sessionId: string): Promise<PatternHistory[]> {
+  try {
+    const supabase = createAdminClient()
+    const { data, error } = await supabase
+      .from('pattern_history')
+      .select('*')
+      .eq('session_id', sessionId)
+      .order('created_at', { ascending: true })
+
+    if (error || !data) return []
+    return data as PatternHistory[]
+  } catch (err) {
+    console.error('[pattern-memory-service] getPatternHistoryForSession exception', err)
+    return []
+  }
+}
+
 
 export async function saveSessionMemoryBridge(input: {
   sessionId: string

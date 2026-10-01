@@ -126,7 +126,25 @@ function deterministicUnit(value: string) {
 export function resolveClusterAlignment(cluster: {
   conceptual_alignment?: number
   understanding_bucket?: UnderstandingBucket
+  reference_alignment?: {
+    alignment_level?: string
+    explanation?: string
+    aligned_reference_ids?: string[]
+  }
 }) {
+  if (cluster.reference_alignment?.alignment_level) {
+    const level = String(cluster.reference_alignment.alignment_level).toLowerCase()
+    if (level === 'strong') {
+      return { resolvedAlignment: 0.82, resolvedBucket: 'strong_alignment' as UnderstandingBucket }
+    }
+    if (level === 'unclear') {
+      return { resolvedAlignment: 0, resolvedBucket: 'unclear' as UnderstandingBucket }
+    }
+    if (level === 'limited' || level === 'partial') {
+      return { resolvedAlignment: -0.6, resolvedBucket: 'needs_attention' as UnderstandingBucket }
+    }
+  }
+
   const resolvedAlignment = normalizeAlignment(cluster.conceptual_alignment)
   const resolvedBucket = normalizeBucket(cluster.understanding_bucket) ?? inferBucketFromAlignment(resolvedAlignment)
   return { resolvedAlignment, resolvedBucket }
@@ -136,6 +154,11 @@ export function getClusterBucketX(cluster: {
   cluster_id: string
   conceptual_alignment?: number
   understanding_bucket?: UnderstandingBucket
+  reference_alignment?: {
+    alignment_level?: string
+    explanation?: string
+    aligned_reference_ids?: string[]
+  }
 }) {
   const { resolvedAlignment, resolvedBucket } = resolveClusterAlignment(cluster)
   const center = BUCKET_CENTERS[resolvedBucket]
