@@ -244,7 +244,7 @@ export default function CreateSession() {
                           <div>
                             <div className="flex items-center justify-between mb-2">
                               <label className="block text-sm font-medium text-foreground">
-                                Reference Answers / Valid Reasoning Examples (minimum 1 required)
+                                Reference Answer (minimum 1 required)
                               </label>
                               <Button
                                 type="button"

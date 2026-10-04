@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { generateSessionSummary, storeSessionSummary } from '@/lib/session-summary'
 import { getTeacherSession } from '@/lib/teacher-auth'
 import {
+  closeCurrentQuestion,
   completeSession,
   getCurrentSessionQuestion,
   getSession,
@@ -87,6 +88,16 @@ export async function POST(request: NextRequest) {
         questionId: nextQuestion?.question_id ?? null,
         roundNumber: 1,
       })
+      return NextResponse.json({ session })
+    }
+
+    if (action === 'close_question') {
+      const currentSession = await getSession(sessionId)
+      const attemptType =
+        currentSession.live_phase === 'question_revision_open' || currentSession.live_phase === 'question_revision_closed'
+          ? 'revision'
+          : 'initial'
+      const session = await closeCurrentQuestion(sessionId, attemptType)
       return NextResponse.json({ session })
     }
 

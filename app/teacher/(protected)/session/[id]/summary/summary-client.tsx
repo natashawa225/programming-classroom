@@ -589,7 +589,14 @@ function QualitativeRevisionSection({
 }
 
 function LongitudinalContextSection({ items }: { items: SessionSummaryPayload['longitudinalContext'] }) {
-  if (!items || items.length === 0) return null
+  const validItems = useMemo(() => {
+    if (!items || !Array.isArray(items)) return []
+    return items.filter(
+      (item) => item && item.patternLabel && item.patternLabel.trim() && item.patternLabel.trim() !== 'Reasoning Pattern'
+    )
+  }, [items])
+
+  if (validItems.length === 0) return null
 
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm space-y-4">
@@ -604,7 +611,7 @@ function LongitudinalContextSection({ items }: { items: SessionSummaryPayload['l
       </div>
 
       <div className="space-y-3">
-        {items.map((item, idx) => (
+        {validItems.map((item, idx) => (
           <div key={idx} className="rounded-xl border border-slate-100 bg-slate-50/70 p-4">
             <div className="flex items-center justify-between gap-2">
               <h4 className="text-sm font-bold text-slate-900">{item.patternLabel}</h4>

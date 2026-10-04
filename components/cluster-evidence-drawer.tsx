@@ -31,6 +31,14 @@ type Props = {
     explanation?: string
     aligned_reference_ids?: string[]
   }
+  translations?: Record<
+    string,
+    {
+      originalText: string
+      translatedText: string
+      translationStatus: 'not_needed' | 'translated'
+    }
+  >
 }
 
 export function ClusterEvidenceDrawer({
@@ -47,12 +55,18 @@ export function ClusterEvidenceDrawer({
   evidenceQuotes = [],
   responseIds,
   referenceAlignment,
+  translations = {},
 }: Props) {
   const [interpretation, setInterpretation] = useState('')
   const [decision, setDecision] = useState('')
   const [customLabel, setCustomLabel] = useState('')
   const [savedStatus, setSavedStatus] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [showOriginalMap, setShowOriginalMap] = useState<Record<number, boolean>>({})
+
+  const toggleShowOriginal = (idx: number) => {
+    setShowOriginalMap((prev) => ({ ...prev, [idx]: !prev[idx] }))
+  }
 
   if (!isOpen) return null
 
@@ -147,14 +161,45 @@ export function ClusterEvidenceDrawer({
           <Eye className="h-4 w-4 text-primary" /> Inspectable Response Evidence ({representativeAnswers.length})
         </h3>
         <div className="space-y-2">
-          {representativeAnswers.map((answer, idx) => (
-            <div key={idx} className="rounded-md border bg-card p-3 text-sm text-card-foreground shadow-sm">
-              <p className="font-mono text-xs text-muted-foreground mb-1">
-                Evidence #{idx + 1} {responseIds[idx] ? `(ID: ${responseIds[idx].slice(0, 8)})` : ''}
-              </p>
-              <p className="italic">{`"${answer}"`}</p>
-            </div>
-          ))}
+          {representativeAnswers.map((answer, idx) => {
+            const respId = responseIds[idx]
+            const translation = respId ? translations[respId] : undefined
+            const isTranslated = translation?.translationStatus === 'translated'
+            const isShowingOriginal = Boolean(showOriginalMap[idx])
+            const displayText = isTranslated ? translation.translatedText : answer
+
+            return (
+              <div key={idx} className="rounded-md border bg-card p-3 text-sm text-card-foreground shadow-sm">
+                <div className="flex items-center justify-between font-mono text-xs text-muted-foreground mb-1">
+                  <span>
+                    Evidence #{idx + 1} {respId ? `(ID: ${respId.slice(0, 8)})` : ''}
+                  </span>
+                  {isTranslated && (
+                    <div className="flex items-center gap-1.5 font-sans">
+                      <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-normal">
+                        Translated
+                      </Badge>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => toggleShowOriginal(idx)}
+                        className="h-5 px-1.5 text-[11px] text-muted-foreground hover:text-foreground"
+                      >
+                        {isShowingOriginal ? 'Hide original' : 'Show original'}
+                      </Button>
+                    </div>
+                  )}
+                </div>
+                <p className="italic">{`"${displayText}"`}</p>
+                {isTranslated && isShowingOriginal && (
+                  <div className="mt-2 rounded bg-muted/40 p-2 text-xs text-muted-foreground border border-dashed font-sans not-italic">
+                    <span className="font-semibold">Original: </span>
+                    <span className="italic">"{translation.originalText}"</span>
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
       </div>
 

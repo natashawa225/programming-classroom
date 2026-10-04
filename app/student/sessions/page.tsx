@@ -910,7 +910,9 @@ export default function StudentSessions() {
                                 <div className="flex flex-wrap items-start justify-between gap-2">
                                   <div>
                                     <p className="text-sm font-semibold text-foreground">Question {question.position}</p>
-                                    <p className="mt-1 text-sm leading-6 text-foreground/70">{question.prompt}</p>
+                                    <div className="mt-2 rounded-xl border border-slate-200/80 bg-slate-50/70 p-3.5">
+                                      <p className="whitespace-pre-wrap font-mono text-sm leading-relaxed text-slate-800 break-words font-medium">{question.prompt}</p>
+                                    </div>
                                   </div>
                                   <div className="flex flex-wrap gap-2">
                                     <ResponseBadge tone="blue">{session.condition === 'baseline' ? 'Response' : 'Initial'}</ResponseBadge>

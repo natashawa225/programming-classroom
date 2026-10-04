@@ -145,54 +145,77 @@ export async function openaiChatJson(options: {
   const timeoutMs = options.timeoutMs ?? 45000
   const maxTokens = options.maxTokens ?? 900
 
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const maxAttempts = 2
+  let lastError: unknown
 
-  try {
-    const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || 'none'
-    console.log('[openai-json] proxy =', proxyUrl)
-    const dispatcher = getProxyDispatcher()
-    const { statusCode, body } = await request('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      dispatcher,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        response_format: { type: 'json_object' },
-        max_tokens: maxTokens,
-        messages: options.messages,
-      }),
-      signal: controller.signal,
-    })
-
-    const raw = await body.text()
-    if (statusCode < 200 || statusCode >= 300) {
-      return { ok: false, error: `OpenAI error: ${statusCode}`, rawText: raw }
-    }
-
-    const parsed = JSON.parse(raw)
-    const content = parsed?.choices?.[0]?.message?.content
-    if (typeof content !== 'string') {
-      return { ok: false, error: 'OpenAI returned no content', rawText: raw }
-    }
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
 
     try {
-      const json = parseModelJson(content)
-      if (!json) {
+      const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || 'none'
+      if (attempt === 1) {
+        console.log('[openai-json] proxy =', proxyUrl)
+      }
+      const dispatcher = getProxyDispatcher()
+      const { statusCode, body } = await request('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        dispatcher,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0.2,
+          response_format: { type: 'json_object' },
+          max_tokens: maxTokens,
+          messages: options.messages,
+        }),
+        signal: controller.signal,
+      })
+
+      const raw = await body.text()
+      if (statusCode < 200 || statusCode >= 300) {
+        return { ok: false, error: `OpenAI error: ${statusCode}`, rawText: raw }
+      }
+
+      const parsed = JSON.parse(raw)
+      const content = parsed?.choices?.[0]?.message?.content
+      if (typeof content !== 'string') {
+        return { ok: false, error: 'OpenAI returned no content', rawText: raw }
+      }
+
+      try {
+        const json = parseModelJson(content)
+        if (!json) {
+          return { ok: false, error: 'Failed to parse model JSON', rawText: content }
+        }
+        return { ok: true, json, rawText: content }
+      } catch (err) {
         return { ok: false, error: 'Failed to parse model JSON', rawText: content }
       }
-      return { ok: true, json, rawText: content }
-    } catch (err) {
-      return { ok: false, error: 'Failed to parse model JSON', rawText: content }
+    } catch (err: any) {
+      lastError = err
+      const isSocketError =
+        err?.code === 'UND_ERR_SOCKET' ||
+        err?.message?.includes('other side closed') ||
+        err?.cause?.code === 'UND_ERR_SOCKET' ||
+        err?.message?.includes('fetch failed')
+
+      if (isSocketError && attempt < maxAttempts) {
+        console.warn(`[openai-json] Socket connection reset (attempt ${attempt}/${maxAttempts}). Retrying with fresh connection...`, err?.message)
+        cachedProxyAgent = undefined
+        await new Promise((r) => setTimeout(r, 500))
+        continue
+      }
+
+      if (err?.name === 'AbortError') return { ok: false, error: 'OpenAI request timed out' }
+      return { ok: false, error: formatFetchError(err) }
+    } finally {
+      clearTimeout(timer)
     }
-  } catch (err: any) {
-    if (err?.name === 'AbortError') return { ok: false, error: 'OpenAI request timed out' }
-    return { ok: false, error: formatFetchError(err) }
-  } finally {
-    clearTimeout(timer)
   }
+
+  return { ok: false, error: formatFetchError(lastError) }
 }

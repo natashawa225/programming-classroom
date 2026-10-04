@@ -14,6 +14,7 @@ import type {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { usePostgresChanges } from '@/hooks/use-postgres-changes'
 import { TeacherLogoutButton } from '@/components/teacher-logout-button'
 import {
@@ -73,6 +74,16 @@ type LiveAnalysisPayload = {
     conceptual_alignment?: number
     understanding_bucket?: UnderstandingBucket
   }>
+  translations?: Record<
+    string,
+    {
+      translationStatus: 'translated' | 'untranslated_english'
+      originalText: string
+      translatedText: string
+      detectedLanguage: string
+      confidence: number
+    }
+  >
 }
 
 type AnalysisStatus = 'idle' | 'loading' | 'success' | 'failed'
@@ -644,7 +655,7 @@ export default function SessionDetailClient({
   }
 
   const postLiveControl = async (
-    action: 'start' | 'open_revision' | 'next_question' | 'complete_session',
+    action: 'start' | 'open_revision' | 'next_question' | 'complete_session' | 'close_question',
     timerSeconds?: number | null
   ) => {
     const response = await fetch('/api/live-session-control', {
@@ -668,7 +679,8 @@ export default function SessionDetailClient({
   }
 
   const handleAnalyzeAndClose = async (nextAttemptType: AttemptType, options?: { forceRegenerate?: boolean }) => {
-    const analysisKey = currentQuestion ? `${currentQuestion.question_id}:${nextAttemptType}` : null
+    const targetQuestion = viewedQuestion || currentQuestion
+    const analysisKey = targetQuestion ? `${targetQuestion.question_id}:${nextAttemptType}` : null
     if (analysisKey) {
       setAnalysisStatusByKey((prev) => ({
         ...prev,
@@ -681,6 +693,8 @@ export default function SessionDetailClient({
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         sessionId,
+        questionId: targetQuestion?.question_id,
+        questionPosition: targetQuestion?.position,
         attemptType: nextAttemptType,
         forceRegenerate: Boolean(options?.forceRegenerate),
       }),
@@ -875,6 +889,15 @@ export default function SessionDetailClient({
     ? `rerun-clustering-${viewedQuestion.question_id}-${viewedAttemptType}`
     : 'rerun-clustering'
   const primaryAction = (() => {
+    if (isCurrentAnalysisRunning || currentAnalysisStatus === 'loading') {
+      return {
+        key: 'analysis-loading',
+        label: 'Generating analysis...',
+        action: async () => {},
+        disabled: true,
+      }
+    }
+
     if (session.live_phase === 'not_started') {
       return {
         key: 'start-question',
@@ -1034,12 +1057,12 @@ export default function SessionDetailClient({
 
                     {primaryAction && (
                       <Button
-                      className={
-                        primaryAction.key === 'complete-session'
-                          ? 'rounded-2xl border border-red-500 bg-transparent text-red-600 hover:bg-red-50 hover:text-red-700'
-                          : 'rounded-2xl'
-                      }
-                        disabled={actionLoading !== null || isCurrentAnalysisRunning}
+                        className={
+                          primaryAction.key === 'complete-session'
+                            ? 'rounded-2xl border border-red-500 bg-transparent text-red-600 hover:bg-red-50 hover:text-red-700'
+                            : 'rounded-2xl'
+                        }
+                        disabled={actionLoading !== null || isCurrentAnalysisRunning || Boolean(primaryAction.disabled)}
                         onClick={() => runAction(primaryAction.key, primaryAction.action)}
                       >
                         {actionLoading === primaryAction.key
@@ -1056,25 +1079,41 @@ export default function SessionDetailClient({
                       </Button>
                     )}
 
-                    {canRegenerateClosedAnalysis && (
-                      <Button
-                        variant="outline"
-                        className="rounded-2xl border-[rgba(123,175,212,0.22)] bg-white"
-                        disabled={actionLoading !== null || isCurrentAnalysisRunning}
-                        onClick={() =>
-                          runAction(`analyze-${closedAttemptType}`, () =>
-                            handleAnalyzeAndClose(closedAttemptType!, { forceRegenerate: true })
-                          )
-                        }
-                      >
-                        {actionLoading === `analyze-${closedAttemptType}` ? 'Regenerating analysis...' : 'Regenerate analysis'}
-                      </Button>
-                    )}
+                    {isViewingCurrentQuestion &&
+                      (session.live_phase === 'question_initial_open' || session.live_phase === 'question_revision_open') &&
+                      currentAnalysisStatus === 'failed' && (
+                        <Button
+                          variant="outline"
+                          className="rounded-2xl border-destructive/30 text-destructive hover:bg-destructive/5"
+                          disabled={actionLoading !== null || isCurrentAnalysisRunning}
+                          onClick={() => runAction('skip-and-close', () => postLiveControl('close_question'))}
+                        >
+                          {actionLoading === 'skip-and-close' ? 'Closing question...' : 'Skip analysis & close question'}
+                        </Button>
+                      )}
                   </>
                 ) : (
-                  <div className="rounded-2xl border border-[rgba(123,175,212,0.18)] bg-[rgba(238,244,249,0.7)] px-4 py-4 text-sm text-foreground/70">
-                    {/* Switch back to the live question to run analysis or advance the session. */}
+                  <div className="rounded-2xl border border-[rgba(123,175,212,0.18)] bg-[rgba(238,244,249,0.7)] px-4 py-3 text-sm text-foreground/70">
+                    <p className="font-medium text-foreground">Viewing Question {viewedQuestion?.position || 1}</p>
+                    <p className="text-xs text-foreground/50 mt-0.5">Switch back to Q{currentQuestion?.position || 1} for live session controls.</p>
                   </div>
+                )}
+
+                {Boolean(viewedQuestion && (activeAnalysis || viewedResponses.length > 0)) && (
+                  <Button
+                    variant="outline"
+                    className="rounded-2xl border-[rgba(123,175,212,0.22)] bg-white w-full"
+                    disabled={actionLoading !== null || isCurrentAnalysisRunning || isViewedAnalysisLoading}
+                    onClick={() =>
+                      runAction(`analyze-${viewedQuestion!.question_id}-${viewedAttemptType}`, () =>
+                        handleAnalyzeAndClose(viewedAttemptType, { forceRegenerate: true })
+                      )
+                    }
+                  >
+                    {actionLoading === `analyze-${viewedQuestion!.question_id}-${viewedAttemptType}`
+                      ? 'Regenerating analysis...'
+                      : 'Regenerate analysis'}
+                  </Button>
                 )}
 
                 {isViewingCurrentQuestion && currentAnalysisStatus === 'loading' && (
@@ -1525,25 +1564,52 @@ export default function SessionDetailClient({
                   {showSelectedGroupResponses && (
                     <div className="mt-3 max-h-[230px] space-y-2 overflow-y-auto pr-1">
                       {selectedClusterResponses.length > 0 ? (
-                        selectedClusterResponses.map((response) => (
-                          <div key={response.response_id} className="rounded-xl bg-[rgba(238,244,249,0.92)] px-3 py-2.5">
-                            <div className="flex items-center justify-between gap-3">
-                              <p className="text-sm font-medium text-foreground">
-                                {formatParticipantDisplay(response.session_participants)}
+                        selectedClusterResponses.map((response) => {
+                          const transObj = (activeAnalysis?.translations as any)?.[response.response_id]
+                          const isTranslated = transObj?.translationStatus === 'translated'
+                          return (
+                            <div key={response.response_id} className="rounded-xl border border-[rgba(123,175,212,0.22)] bg-[rgba(242,246,251,0.75)] p-4 shadow-2xs">
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-2">
+                                  <p className="text-sm font-semibold text-foreground">
+                                    {formatParticipantDisplay(response.session_participants)}
+                                  </p>
+                                  {isTranslated && (
+                                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0.5 font-normal bg-sky-100/80 text-sky-800 border-sky-200">
+                                      Translated
+                                    </Badge>
+                                  )}
+                                </div>
+                                <p className="text-sm font-medium text-foreground/60">{response.confidence}/5</p>
+                              </div>
+                              <p className="mt-2.5 text-base leading-7 text-foreground/90">
+                                {isTranslated ? transObj.translatedText : response.answer}
                               </p>
-                              <p className="text-sm text-foreground/55">{response.confidence}/5</p>
+                              {isTranslated && (
+                                <Accordion type="single" collapsible className="mt-3 w-full">
+                                  <AccordionItem value="original" className="border-none">
+                                    <AccordionTrigger className="flex w-full items-center justify-between rounded-lg border border-[rgba(123,175,212,0.25)] bg-white/90 px-3 py-1.5 text-xs font-medium text-foreground/75 shadow-2xs transition hover:bg-white hover:text-foreground hover:no-underline">
+                                      <span className="flex items-center gap-1.5">
+                                        See original response
+                                      </span>
+                                    </AccordionTrigger>
+                                    <AccordionContent className="mt-2 rounded-lg border border-[rgba(123,175,212,0.2)] bg-white p-3.5 text-sm leading-6 text-foreground/85 shadow-2xs">
+                                      <p className="whitespace-pre-wrap leading-relaxed">{transObj.originalText || response.answer}</p>
+                                    </AccordionContent>
+                                  </AccordionItem>
+                                </Accordion>
+                              )}
                             </div>
-                            <p className="mt-2 text-sm leading-6 text-foreground/76">{response.answer}</p>
-                          </div>
-                        ))
+                          )
+                        })
                       ) : selectedRepresentativeAnswers.length > 0 ? (
                         selectedRepresentativeAnswers.map((answer, index) => (
-                          <div key={`${selectedRenderedCluster.cluster_id}-expanded-${index}`} className="rounded-xl bg-[rgba(238,244,249,0.92)] px-3 py-2.5 text-sm leading-5 text-foreground/76">
+                          <div key={`${selectedRenderedCluster.cluster_id}-expanded-${index}`} className="rounded-xl border border-[rgba(123,175,212,0.22)] bg-[rgba(242,246,251,0.75)] p-4 text-base leading-7 text-foreground/90 shadow-2xs">
                             {answer}
                           </div>
                         ))
                       ) : (
-                        <p className="rounded-xl bg-[rgba(238,244,249,0.72)] px-3 py-2.5 text-sm text-foreground/58">
+                        <p className="rounded-xl border border-[rgba(123,175,212,0.22)] bg-[rgba(242,246,251,0.75)] p-4 text-sm text-foreground/60 shadow-2xs">
                           No responses are available for this group yet.
                         </p>
                       )}
@@ -1551,7 +1617,7 @@ export default function SessionDetailClient({
                   )}
                 </>
               ) : (
-                <div className="mt-4 rounded-xl bg-[rgba(248,251,255,0.88)] px-3 py-3 text-sm leading-5 text-foreground/62">
+                <div className="mt-4 rounded-xl border border-[rgba(123,175,212,0.18)] bg-[rgba(248,251,255,0.88)] px-3 py-3 text-sm leading-5 text-foreground/62">
                   <p className="font-medium text-foreground/72">
                     {isViewedAnalysisLoading
                       ? 'Generating reasoning groups...'
@@ -1585,17 +1651,44 @@ export default function SessionDetailClient({
                   {viewedResponses.length === 0 ? (
                     <p className="text-sm text-foreground/55">No submissions yet for this question attempt.</p>
                   ) : (
-                    viewedResponses.map((response) => (
-                      <div key={response.response_id} className="rounded-xl bg-[rgba(238,244,249,0.92)] px-3 py-2.5">
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="text-sm font-medium text-foreground">
-                            {formatParticipantDisplay(response.session_participants)}
+                    viewedResponses.map((response) => {
+                      const transObj = (activeAnalysis?.translations as any)?.[response.response_id]
+                      const isTranslated = transObj?.translationStatus === 'translated'
+                      return (
+                        <div key={response.response_id} className="rounded-xl border border-[rgba(123,175,212,0.22)] bg-[rgba(242,246,251,0.75)] p-4 shadow-2xs">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2">
+                              <p className="text-sm font-semibold text-foreground">
+                                {formatParticipantDisplay(response.session_participants)}
+                              </p>
+                              {isTranslated && (
+                                <Badge variant="secondary" className="text-[10px] px-1.5 py-0.5 font-normal bg-sky-100/80 text-sky-800 border-sky-200">
+                                  Translated
+                                </Badge>
+                              )}
+                            </div>
+                            <p className="text-sm font-medium text-foreground/60">{response.confidence}/5</p>
+                          </div>
+                          <p className="mt-2.5 text-base leading-7 text-foreground/90">
+                            {isTranslated ? transObj.translatedText : response.answer}
                           </p>
-                          <p className="text-sm text-foreground/55">{response.confidence}/5</p>
+                          {isTranslated && (
+                            <Accordion type="single" collapsible className="mt-3 w-full">
+                              <AccordionItem value="original" className="border-none">
+                                <AccordionTrigger className="flex w-full items-center justify-between rounded-lg border border-[rgba(123,175,212,0.25)] bg-white/90 px-3 py-1.5 text-xs font-medium text-foreground/75 shadow-2xs transition hover:bg-white hover:text-foreground hover:no-underline">
+                                  <span className="flex items-center gap-1.5">
+                                    <span className="text-sm">🌐</span> Original response
+                                  </span>
+                                </AccordionTrigger>
+                                <AccordionContent className="mt-2 rounded-lg border border-[rgba(123,175,212,0.2)] bg-white p-3.5 text-sm leading-6 text-foreground/85 shadow-2xs">
+                                  <p className="whitespace-pre-wrap leading-relaxed">{transObj.originalText || response.answer}</p>
+                                </AccordionContent>
+                              </AccordionItem>
+                            </Accordion>
+                          )}
                         </div>
-                        <p className="mt-2 text-sm leading-7 text-foreground/76">{response.answer}</p>
-                      </div>
-                    ))
+                      )
+                    })
                   )}
                 </div>
               </section>
@@ -1620,6 +1713,13 @@ export default function SessionDetailClient({
           evidenceQuotes={visibleClusters.find((c) => c.cluster_id === inspectingClusterId)?.evidence_spans || []}
           responseIds={visibleClusters.find((c) => c.cluster_id === inspectingClusterId)?.response_ids || []}
           referenceAlignment={(visibleClusters.find((c) => c.cluster_id === inspectingClusterId) as any)?.reference_alignment}
+          translations={
+            (
+              liveQuestionAnalyses.find(
+                (a) => a.question_id === viewedQuestion.question_id && a.attempt_type === viewedAttemptType
+              )?.analysis_json as any
+            )?.translations
+          }
         />
       )}
     </main>

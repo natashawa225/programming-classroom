@@ -2,6 +2,7 @@ import type { AttemptType } from '@/lib/types/database'
 import { openaiChatJson } from '@/lib/ai/openai-json'
 import type { UnionFindQuestionContext } from '@/lib/ai/union-find-question-config'
 import { validateClusterSet, validateNonEvaluativeCluster } from '@/lib/ai/cluster-guardrail'
+import { BoundedClusteringOrchestrator } from '@/lib/agents/orchestration/orchestrator'
 
 export type ReferenceAlignment = {
   aligned_reference_ids?: string[]
@@ -704,6 +705,55 @@ function buildFallbackClusters(
 }
 
 export async function clusterLiveQuestionResponses(input: {
+  questionId: string
+  questionPosition: number
+  questionPrompt: string
+  correctAnswer?: string | null
+  referenceAnswers?: Array<{ reference_id: string; answer_text: string }> | null
+  lessonContext?: UnionFindQuestionContext | null
+  attemptType: AttemptType
+  responses: InputResponse[]
+}): Promise<LiveQuestionClusterAnalysis> {
+  try {
+    const orchestrator = new BoundedClusteringOrchestrator({
+      legacyFallbackFn: clusterLiveQuestionResponsesLegacy,
+    })
+
+    return await orchestrator.run({
+      question: {
+        questionId: input.questionId,
+        questionPosition: input.questionPosition,
+        questionPrompt: input.questionPrompt,
+        correctAnswer: input.correctAnswer,
+        referenceAnswers: input.referenceAnswers,
+        lessonContext: input.lessonContext,
+        attemptType: input.attemptType,
+      },
+      responses: input.responses.map((r) => {
+        const bareClassification = classifyBareAnswer(String(r.answer || '').trim())
+        return {
+          responseId: String(r.response_id),
+          answer: String(r.answer || '').trim(),
+          confidence: Math.max(1, Math.min(5, Math.round(Number(r.confidence) || 0))),
+          bare: bareClassification.bare,
+          bareAnswerKind: bareClassification.bare_answer_kind,
+        }
+      }),
+    })
+  } catch (err: any) {
+    console.error('[live-clustering] Multi-agent orchestrator error; producing graceful fallback analysis', err)
+    const fallback = buildFallbackClusters(
+      input.responses,
+      err instanceof Error ? err.message : 'Clustering execution error',
+      err instanceof Error ? err.stack : String(err)
+    )
+    fallback.question_prompt = input.questionPrompt
+    fallback.attempt_type = input.attemptType
+    return fallback
+  }
+}
+
+export async function clusterLiveQuestionResponsesLegacy(input: {
   questionId: string
   questionPosition: number
   questionPrompt: string

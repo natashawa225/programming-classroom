@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getTeacherSession } from '@/lib/teacher-auth'
 import { clusterLiveQuestionResponses, LiveClusteringError } from '@/lib/ai/live-question-clustering'
+import { ENABLE_REALTIME_MONITORING } from '@/lib/agents/orchestration/feature-flags'
 import { getUnionFindQuestionContext } from '@/lib/ai/union-find-question-config'
 import {
   carryForwardMissingRevisionResponses,
@@ -147,27 +148,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'No question attempt is active or selected.' }, { status: 400 })
     }
 
-    let closedInThisRequest = false
-    if (
-      !hasExplicitQuestionTarget &&
-      (
-        (attemptType === 'initial' && session.live_phase === 'question_initial_open') ||
-        (attemptType === 'revision' && session.live_phase === 'question_revision_open')
-      )
-    ) {
-      await retryOperation(() => closeCurrentQuestion(sessionId, attemptType))
-      closedInThisRequest = true
-    }
-
-    const sessionAfterPotentialClose = closedInThisRequest
-      ? await retryOperation(() => getSession(sessionId))
-      : session
-
     if (
       session.condition === 'treatment' &&
       attemptType === 'revision' &&
-      (sessionAfterPotentialClose.live_phase === 'question_revision_closed' ||
-        sessionAfterPotentialClose.live_phase === 'session_completed')
+      (session.live_phase === 'question_revision_closed' ||
+        session.live_phase === 'session_completed')
     ) {
       const carryForwardResult = await retryOperation(() =>
         carryForwardMissingRevisionResponses(sessionId, question.question_id)
@@ -179,11 +164,28 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const responses = (await retryOperation(() => getSessionResponses(sessionId))).filter((response) => {
+    let responses = (await retryOperation(() => getSessionResponses(sessionId))).filter((response) => {
       return response.question_id === question.question_id && response.attempt_type === attemptType
     })
+
+    // Defensive Fallback: If 0 responses found for revision attempt, check if initial responses exist
+    if (responses.length === 0 && attemptType === 'revision') {
+      const initialResponses = (await retryOperation(() => getSessionResponses(sessionId))).filter((response) => {
+        return response.question_id === question.question_id && response.attempt_type === 'initial'
+      })
+      if (initialResponses.length > 0) {
+        console.warn(
+          `[live-analysis] 0 revision responses found for question_id=${question.question_id}; using ${initialResponses.length} initial responses as fallback`
+        )
+        responses = initialResponses
+      }
+    }
+
     if (responses.length === 0) {
-      return NextResponse.json({ error: 'No responses found for this question attempt.' }, { status: 400 })
+      return NextResponse.json(
+        { error: `No responses found for Question ${question.position} (${attemptType} attempt).` },
+        { status: 400 }
+      )
     }
 
     const roundNumber = getRoundNumberForAttemptType(attemptType)
@@ -268,17 +270,31 @@ export async function POST(request: NextRequest) {
       })),
     })
 
+    let closedInThisRequest = false
+    if (
+      !hasExplicitQuestionTarget &&
+      (
+        (attemptType === 'initial' && session.live_phase === 'question_initial_open') ||
+        (attemptType === 'revision' && session.live_phase === 'question_revision_open')
+      )
+    ) {
+      await retryOperation(() => closeCurrentQuestion(sessionId, attemptType))
+      closedInThisRequest = true
+    }
+
     // Computational Autonomy: Evaluate bounded agent observation triggers immediately upon analysis completion
-    try {
-      const { evaluateBoundedAgentObservations } = await import('@/lib/services/bounded-agency-service')
-      await evaluateBoundedAgentObservations({
-        sessionId,
-        questionId: question.question_id,
-        questionPrompt: question.prompt,
-        analysis,
-      })
-    } catch (agentErr) {
-      console.error('[live-analysis] bounded agent evaluation warning', agentErr)
+    if (ENABLE_REALTIME_MONITORING) {
+      try {
+        const { evaluateBoundedAgentObservations } = await import('@/lib/services/bounded-agency-service')
+        await evaluateBoundedAgentObservations({
+          sessionId,
+          questionId: question.question_id,
+          questionPrompt: question.prompt,
+          analysis,
+        })
+      } catch (agentErr) {
+        console.error('[live-analysis] bounded agent evaluation warning', agentErr)
+      }
     }
 
     let saved = null

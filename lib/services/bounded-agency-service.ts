@@ -440,6 +440,8 @@ export async function evaluateBoundedAgentObservations(input: {
         triggerType: 'longitudinal_lecturer_focus_match',
         observationData: {
           clusterId: cluster.cluster_id,
+          clusterLabel: sanitizeNonEvaluativeText(cluster.label).sanitized,
+          patternLabel: match.priorPatternLabel ? sanitizeNonEvaluativeText(match.priorPatternLabel).sanitized : sanitizeNonEvaluativeText(cluster.label).sanitized,
           currentPrevalence: prevalence,
           priorSessionId: match.priorSessionId,
           priorLecturerAction: match.priorLecturerAction,
@@ -510,8 +512,11 @@ export async function evaluateBoundedAgentObservations(input: {
         triggerType: 'longitudinal_prevalence_shift',
         observationData: {
           clusterId: cluster.cluster_id,
+          clusterLabel: sanitizeNonEvaluativeText(cluster.label).sanitized,
+          patternLabel: match.priorPatternLabel ? sanitizeNonEvaluativeText(match.priorPatternLabel).sanitized : sanitizeNonEvaluativeText(cluster.label).sanitized,
           currentPrevalence: prevalence,
           priorPrevalence: match.priorPrevalence,
+          prevalenceDelta: match.prevalenceDelta,
         },
         decisionRuleExecuted: decisionRule,
         actionTaken: actionTakenText,

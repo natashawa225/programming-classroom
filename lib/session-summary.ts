@@ -805,9 +805,29 @@ function buildDeterministicLecturerAnnotations(annotations: LecturerAnnotation[]
 
 function buildDeterministicLongitudinalContext(
   agentActions: AgentAction[],
-  patternHistory: PatternHistory[]
+  patternHistory: PatternHistory[],
+  questionSummaries?: SessionQuestionSummary[]
 ): DeterministicLongitudinalContextItem[] {
   const items: DeterministicLongitudinalContextItem[] = []
+
+  // Create a lookup for cluster labels from current questionSummaries in case legacy agentActions omitted clusterLabel
+  const clusterLabelMap = new Map<string, string>()
+  if (questionSummaries) {
+    for (const q of questionSummaries) {
+      for (const p of q.initial.patterns) {
+        if (p.clusterId && p.label) {
+          clusterLabelMap.set(p.clusterId, p.label)
+        }
+      }
+      if (q.revision) {
+        for (const p of q.revision.patterns) {
+          if (p.clusterId && p.label) {
+            clusterLabelMap.set(p.clusterId, p.label)
+          }
+        }
+      }
+    }
+  }
 
   for (const action of agentActions) {
     const obs = action.observation_data || {}
@@ -815,32 +835,50 @@ function buildDeterministicLongitudinalContext(
       const priorSessionId = String(obs.priorSessionId || '')
       const priorPrevalence = Number(obs.priorPrevalence || 0)
       const currentPrevalence = Number(obs.currentPrevalence || 0)
+      const clusterId = String(obs.clusterId || '')
+
+      const rawLabel = String(obs.clusterLabel || obs.patternLabel || obs.priorPatternLabel || '').trim()
+      const resolvedLabel =
+        rawLabel && rawLabel !== 'Reasoning Pattern'
+          ? rawLabel
+          : clusterId && clusterLabelMap.has(clusterId) && clusterLabelMap.get(clusterId) !== 'Reasoning Pattern'
+          ? clusterLabelMap.get(clusterId)!
+          : null
+
+      // Do NOT emit placeholder / ungrounded cards if pattern label cannot be resolved
+      if (!resolvedLabel) {
+        continue
+      }
+
       items.push({
-        clusterId: String(obs.clusterId || ''),
-        patternLabel: String(obs.clusterLabel || 'Reasoning Pattern'),
+        clusterId,
+        patternLabel: resolvedLabel,
         priorSessionId,
         priorPrevalence,
         priorLecturerAction: obs.priorLecturerAction ? String(obs.priorLecturerAction) : null,
         currentPrevalence,
         prevalenceDelta: currentPrevalence - priorPrevalence,
-        descriptiveNote: action.action_taken || 'Reappeared reasoning pattern matched from a prior session.',
+        descriptiveNote: action.action_taken || `Reasoning pattern "${resolvedLabel}" matched from prior session history.`,
       })
     }
   }
 
   for (const ph of patternHistory) {
     if (ph.longitudinal_status === 'reappeared' || ph.longitudinal_status === 'changed_prevalence') {
-      const exists = items.some((item) => item.patternLabel.toLowerCase() === ph.pattern_label.toLowerCase())
+      const label = String(ph.pattern_label || '').trim()
+      if (!label || label === 'Reasoning Pattern') continue
+
+      const exists = items.some((item) => item.patternLabel.toLowerCase() === label.toLowerCase())
       if (!exists) {
         items.push({
           clusterId: ph.pattern_key,
-          patternLabel: ph.pattern_label,
+          patternLabel: label,
           priorSessionId: ph.first_observed_session_id || ph.session_id,
           priorPrevalence: Number(ph.prevalence_percentage || 0),
           priorLecturerAction: null,
           currentPrevalence: Number(ph.prevalence_percentage || 0),
           prevalenceDelta: 0,
-          descriptiveNote: `Pattern "${ph.pattern_label}" was previously observed in session history.`,
+          descriptiveNote: `Pattern "${label}" was previously observed in session history.`,
         })
       }
     }
@@ -1283,7 +1321,7 @@ export async function generateSessionSummary(options: {
   const agentActivity = buildDeterministicAgentActivity(agentActions || [], monitoringGoals || [])
   const deterministicMonitoringGoals = buildDeterministicMonitoringGoals(monitoringGoals || [])
   const deterministicAnnotations = buildDeterministicLecturerAnnotations(annotations || [])
-  const longitudinalContext = buildDeterministicLongitudinalContext(agentActions || [], patternHistory || [])
+  const longitudinalContext = buildDeterministicLongitudinalContext(agentActions || [], patternHistory || [], questionSummaries)
   const carriesForward = buildDeterministicCarriesForward(monitoringGoals || [], sessionMemory, annotations || [])
   const qualitativeRevision = buildQualitativeRevisionAnalysis(questionSummaries, responses || [])
 

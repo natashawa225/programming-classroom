@@ -94,18 +94,8 @@ function parseLiveAnalysis(value: LiveQuestionAnalysis | null | undefined): Live
   return raw as unknown as LiveAnalysisPayload
 }
 
-function getUnderstandingLabel(bucket: UnderstandingBucket) {
-  switch (bucket) {
-    case 'strong_alignment':
-      return 'Strong understanding'
-    case 'mixed_reasoning':
-      return 'Partly developed reasoning'
-    case 'needs_attention':
-      return 'Needs review'
-    case 'unclear':
-    default:
-      return 'Unclear reasoning pattern'
-  }
+function getUnderstandingLabel(_bucket: UnderstandingBucket) {
+  return 'Reasoning pattern'
 }
 
 function getFinalAnalysisForQuestion(questionId: string, analyses: LiveQuestionAnalysis[]) {

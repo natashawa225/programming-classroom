@@ -52,6 +52,7 @@ export default function StudentRespondPage() {
   const [session, setSession] = useState<Session | null>(null)
   const [questions, setQuestions] = useState<SessionQuestion[]>([])
   const [anonymizedLabel, setAnonymizedLabel] = useState<string | null>(null)
+  const [studentName, setStudentName] = useState<string | null>(null)
   const [answer, setAnswer] = useState('')
   const [confidence, setConfidence] = useState<number | null>(null)
   const [submitted, setSubmitted] = useState(false)
@@ -117,6 +118,7 @@ export default function StudentRespondPage() {
         setSession(sessionData)
         setQuestions(sessionQuestions || [])
         setAnonymizedLabel(participation.anonymized_label)
+        setStudentName(participation.student_name || null)
       } catch (err) {
         console.error(err)
         setError('Failed to load this session.')
@@ -154,6 +156,7 @@ export default function StudentRespondPage() {
         setSession(updated)
         setQuestions(sessionQuestions || [])
         setAnonymizedLabel(participation.anonymized_label)
+        setStudentName(participation.student_name || null)
         if (process.env.NODE_ENV !== 'production') {
           // eslint-disable-next-line no-console
           console.debug('[student-live] refreshed', {
@@ -452,7 +455,9 @@ export default function StudentRespondPage() {
       <div className="mx-auto max-w-3xl px-4 py-10">
         <div className="mb-8 flex items-center justify-between gap-3">
           <div>
-            <h1 className="text-3xl font-bold text-foreground">Student View</h1>
+            <h1 className="text-3xl font-bold text-foreground">
+              {studentName?.trim() ? `Hi ${studentName.trim()}!` : 'Student View'}
+            </h1>
             <p className="mt-1 text-sm text-foreground/60">Session {session?.session_code}</p>
           </div>
           <div className="flex items-center gap-2">
