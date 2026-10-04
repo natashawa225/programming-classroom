@@ -131,14 +131,16 @@ export async function setTeacherSessionCookie(teacher: TeacherAccount) {
 
 export async function clearTeacherSessionCookie() {
   const store = await cookies()
-  // Clear both current and legacy paths.
-  for (const path of ['/', '/teacher']) {
+  // Clear both current and legacy paths. Primary path ('/') must come last
+  // so Next.js ResponseCookies doesn't overwrite it in its internal name-keyed map.
+  for (const path of ['/teacher', '/']) {
     store.set(TEACHER_COOKIE_NAME, '', {
       httpOnly: true,
       sameSite: 'lax',
       secure: process.env.NODE_ENV === 'production',
       path,
       maxAge: 0,
+      expires: new Date(0),
     })
   }
 }

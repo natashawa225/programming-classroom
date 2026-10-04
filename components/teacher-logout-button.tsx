@@ -27,8 +27,7 @@ export function TeacherLogoutButton({
         throw new Error(payload?.error || 'Failed to log out.')
       }
 
-      router.replace('/teacher/login')
-      router.refresh()
+      window.location.href = '/teacher/login'
     } catch (error) {
       console.error('teacher logout error', error)
       setPending(false)
