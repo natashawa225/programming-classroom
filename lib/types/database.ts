@@ -179,7 +179,7 @@ export interface ResponseAiLabel {
 export interface TeacherAction {
   id: string
   session_id: string
-  action_type: 'session_created' | 'session_started' | 'session_closed' | 'ai_analysis_triggered'
+  action_type: 'session_created' | 'session_started' | 'session_closed' | 'ai_analysis_triggered' | 'skip_revision'
   action_data: Record<string, unknown>
   created_at: string
 }

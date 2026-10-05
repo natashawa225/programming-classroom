@@ -643,7 +643,11 @@ export async function carryForwardMissingRevisionResponses(sessionId: string, qu
   }
 }
 
-export async function moveToNextQuestion(sessionId: string, timerSeconds?: number | null) {
+export async function moveToNextQuestion(
+  sessionId: string,
+  timerSeconds?: number | null,
+  options?: { allowSkipRevision?: boolean }
+) {
   let session = await getSession(sessionId)
   if (session.live_phase === 'question_initial_open' || session.live_phase === 'question_revision_open') {
     const attemptType = session.live_phase === 'question_revision_open' ? 'revision' : 'initial'
@@ -653,7 +657,7 @@ export async function moveToNextQuestion(sessionId: string, timerSeconds?: numbe
   if (session.live_phase !== 'question_initial_closed' && session.live_phase !== 'question_revision_closed') {
     throw new Error('You can only move to the next question after the current step has been closed.')
   }
-  if (session.condition === 'treatment' && session.live_phase !== 'question_revision_closed') {
+  if (session.condition === 'treatment' && session.live_phase !== 'question_revision_closed' && !options?.allowSkipRevision) {
     throw new Error('Open and close revision before moving to the next question.')
   }
   const questions = await getSessionQuestions(sessionId)
@@ -671,6 +675,13 @@ export async function moveToNextQuestion(sessionId: string, timerSeconds?: numbe
         ? null
         : Math.max(0, Math.floor(Number(timerSeconds)))
 
+  if (options?.allowSkipRevision) {
+    await logTeacherAction(sessionId, 'skip_revision', {
+      from_position: session.current_question_position,
+      to_position: nextPosition,
+    }).catch((err) => console.error('Failed to log skip_revision action', err))
+  }
+
   return updateSessionLiveFields(sessionId, {
     status: 'live',
     live_phase: 'question_initial_open',
@@ -680,7 +691,7 @@ export async function moveToNextQuestion(sessionId: string, timerSeconds?: numbe
   })
 }
 
-export async function completeSession(sessionId: string) {
+export async function completeSession(sessionId: string, options?: { allowSkipRevision?: boolean }) {
   let session = await getSession(sessionId)
   if (session.live_phase === 'question_initial_open' || session.live_phase === 'question_revision_open') {
     const attemptType = session.live_phase === 'question_revision_open' ? 'revision' : 'initial'
@@ -693,11 +704,18 @@ export async function completeSession(sessionId: string) {
   if (questions.length > 0 && session.current_question_position !== lastPosition) {
     throw new Error('Move through all questions before ending the session.')
   }
-  if (session.condition === 'treatment' && session.live_phase !== 'question_revision_closed') {
+  if (session.condition === 'treatment' && session.live_phase !== 'question_revision_closed' && !options?.allowSkipRevision) {
     throw new Error('Open and close revision for the last question before ending the session.')
   }
   if (session.condition === 'baseline' && session.live_phase !== 'question_initial_closed') {
     throw new Error('Close the last question before ending the session.')
+  }
+
+  if (options?.allowSkipRevision) {
+    await logTeacherAction(sessionId, 'skip_revision', {
+      from_position: session.current_question_position,
+      to_position: 'session_completed',
+    }).catch((err) => console.error('Failed to log skip_revision action', err))
   }
 
   return updateSessionLiveFields(sessionId, {

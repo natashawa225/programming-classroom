@@ -28,6 +28,8 @@ const PROHIBITED_EVALUATIVE_TERMS = [
   /\bdeficit(s)?\b/gi,
   /\bremediation\b/gi,
   /\bproblematic\b/gi,
+  /\breference answer(s)?\b/gi,
+  /\bexpected answer(s)?\b/gi,
 ]
 
 export type GuardrailValidationResult = {

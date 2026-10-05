@@ -71,6 +71,7 @@ export async function runClusterSummaryReviewAgent(
     '- Describe WHAT students stated or did using purely neutral, descriptive classroom language.',
     '- STRICTLY FORBIDDEN WORDS: "correct", "correctly", "incorrect", "incorrectly", "wrong", "right", "misconception", "error", "flawed", "accurate", "inaccurate".',
     '- Never judge correctness, diagnose misunderstandings, or claim learning deficits.',
+    '- REFERENCE ANSWER CONFIDENTIALITY: Do NOT quote, reveal, or state reference answer text, expected correct answer statements, or correctness comparisons in cluster summaries. Summaries must describe student reasoning patterns only.',
     '',
     'STRICT REVIEW TICKET RULES:',
     '- You do NOT directly move students or modify clusters.',

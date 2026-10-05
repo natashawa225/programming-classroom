@@ -655,8 +655,9 @@ export default function SessionDetailClient({
   }
 
   const postLiveControl = async (
-    action: 'start' | 'open_revision' | 'next_question' | 'complete_session' | 'close_question',
-    timerSeconds?: number | null
+    action: 'start' | 'open_revision' | 'next_question' | 'skip_revision_and_next_question' | 'complete_session' | 'close_question',
+    timerSeconds?: number | null,
+    options?: { allowSkipRevision?: boolean }
   ) => {
     const response = await fetch('/api/live-session-control', {
       method: 'POST',
@@ -665,6 +666,7 @@ export default function SessionDetailClient({
         sessionId,
         action,
         timerSeconds: timerSeconds ?? null,
+        allowSkipRevision: options?.allowSkipRevision ?? false,
       }),
     })
 
@@ -975,7 +977,7 @@ export default function SessionDetailClient({
               <MiniStat label="Phase" value={getPhaseLabel(session)} />
               <MiniStat label="Joined" value={String(joinedParticipantCount)} />
               <MiniStat
-                label="Responses"
+                label="Live Submissions"
                 value={String(isViewingCurrentQuestion ? currentQuestionRespondentCount : visibleResponseCount)}
               />
               <MiniStat label="Timer" value={secondsRemaining === null ? '—' : `${secondsRemaining}s`} />
@@ -999,9 +1001,20 @@ export default function SessionDetailClient({
         <section className="mb-4 rounded-3xl bg-white px-6 py-5 shadow-[0_12px_30px_rgba(28,26,36,0.05)]">
           <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
             <div className="min-w-0">
-              <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">
-                Question {viewedQuestion?.position || 1} of {questions.length}
-              </p>
+              <div className="flex items-center gap-2">
+                <p className="text-[12px] uppercase tracking-[0.18em] text-foreground/45">
+                  Question {viewedQuestion?.position || 1} of {questions.length}
+                </p>
+                {isViewingCurrentQuestion ? (
+                  <Badge variant="outline" className="rounded-full border-emerald-300 bg-emerald-50 px-2.5 py-0.5 text-[11px] font-medium text-emerald-800 shadow-none">
+                    Live for students: Question {currentQuestion?.position || 1}
+                  </Badge>
+                ) : (
+                  <Badge variant="outline" className="rounded-full border-amber-300 bg-amber-50 px-2.5 py-0.5 text-[11px] font-medium text-amber-800 shadow-none">
+                    Viewing analysis: Question {viewedQuestion?.position || 1} (Live for students: Question {currentQuestion?.position || 1})
+                  </Badge>
+                )}
+              </div>
               <h2 className="mt-3 max-w-5xl text-[28px] font-semibold leading-[1.45] tracking-tight text-foreground">
                 {viewedQuestion?.prompt || 'No question configured.'}
               </h2>
@@ -1022,7 +1035,7 @@ export default function SessionDetailClient({
                       ].join(' ')}
                     >
                       Q{question.position}
-                      {isCurrent ? ' • Live' : ''}
+                      {isCurrent ? ' • Live for students' : isViewed ? ' • Viewing analysis' : ''}
                     </button>
                   )
                 })}
@@ -1078,6 +1091,29 @@ export default function SessionDetailClient({
                           : primaryAction.label}
                       </Button>
                     )}
+
+                    {isViewingCurrentQuestion &&
+                      session.live_phase === 'question_initial_closed' &&
+                      session.condition === 'treatment' && (
+                        <Button
+                          variant="outline"
+                          className="rounded-2xl border-[rgba(123,175,212,0.25)] bg-white hover:bg-slate-50 text-foreground/80"
+                          disabled={actionLoading !== null || isCurrentAnalysisRunning}
+                          onClick={() =>
+                            runAction('skip-revision-next-question', () =>
+                              isLastQuestion
+                                ? postLiveControl('complete_session', null, { allowSkipRevision: true })
+                                : postLiveControl('skip_revision_and_next_question', getTimerValue())
+                            )
+                          }
+                        >
+                          {actionLoading === 'skip-revision-next-question'
+                            ? 'Skipping revision...'
+                            : isLastQuestion
+                              ? 'Skip Revision & End Session'
+                              : 'Skip Revision & Next Question'}
+                        </Button>
+                      )}
 
                     {isViewingCurrentQuestion &&
                       (session.live_phase === 'question_initial_open' || session.live_phase === 'question_revision_open') &&
@@ -1222,7 +1258,7 @@ export default function SessionDetailClient({
               </div>
 
               <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-                <MiniStat label="Responses" value={String(classSnapshot.totalResponses)} />
+                <MiniStat label="Analysed Responses" value={String(classSnapshot.totalResponses)} />
                 <MiniStat
                   label="Avg confidence"
                   value={classSnapshot.totalResponses > 0 ? `${classSnapshot.averageConfidence.toFixed(1)}/5` : '—'}
@@ -1263,7 +1299,9 @@ export default function SessionDetailClient({
                             : isViewedAnalysisFailed
                               ? 'Please try again by clicking Retry analysis or Regenerate analysis.'
                               : isViewingCurrentQuestion
-                                ? 'End the question to generate reasoning groups.'
+                                ? currentQuestionRespondentCount > 0
+                                  ? `${currentQuestionRespondentCount} live ${currentQuestionRespondentCount === 1 ? 'submission' : 'submissions'} received. Click End question to cluster responses.`
+                                  : 'End the question to generate reasoning groups.'
                                 : 'No analysis was generated for this question.'}
                         </p>
                       </div>

@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getTeacherSession } from '@/lib/teacher-auth'
-import { getLiveQuestionAnalyses, getSessionQuestions } from '@/lib/supabase/queries'
-import { evaluateBoundedAgentObservations } from '@/lib/services/bounded-agency-service'
-import type { LiveQuestionClusterAnalysis } from '@/lib/ai/live-question-clustering'
+import { getAgentActionsForSession } from '@/lib/services/pattern-memory-service'
+import type { BoundedAgentObservation } from '@/lib/services/bounded-agency-service'
+
+const OBSERVATION_TRIGGER_TYPES = new Set([
+  'active_monitoring_goal_match',
+  'longitudinal_lecturer_focus_match',
+  'longitudinal_prevalence_shift',
+])
 
 export async function POST(request: NextRequest) {
   try {
@@ -19,37 +24,54 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing sessionId' }, { status: 400 })
     }
 
-    const [questions, analyses] = await Promise.all([
-      getSessionQuestions(sessionId),
-      getLiveQuestionAnalyses(sessionId),
-    ])
+    const actions = await getAgentActionsForSession(sessionId)
 
-    const targetQuestion = questionId
-      ? questions.find((q) => q.question_id === questionId)
-      : questions[0]
+    const filteredActions = actions.filter((action) => {
+      if (!OBSERVATION_TRIGGER_TYPES.has(action.trigger_type)) return false
+      if (questionId && action.question_id && action.question_id !== questionId) return false
+      return true
+    })
 
-    if (!targetQuestion) {
-      return NextResponse.json({ observations: [] })
-    }
+    const observations: BoundedAgentObservation[] = filteredActions.map((action) => {
+      const data = (action.observation_data || {}) as Record<string, any>
+      if (data.observationId) {
+        return {
+          ...data,
+          humanCheckpointStatus: action.human_checkpoint_status || data.humanCheckpointStatus || 'pending',
+          timestamp: action.created_at || data.timestamp,
+        } as BoundedAgentObservation
+      }
 
-    const latestAnalysisRow = analyses.find((a) => a.question_id === targetQuestion.question_id)
-    if (!latestAnalysisRow?.analysis_json) {
-      return NextResponse.json({ observations: [] })
-    }
-
-    const analysis = latestAnalysisRow.analysis_json as unknown as LiveQuestionClusterAnalysis
-    const observations = await evaluateBoundedAgentObservations({
-      sessionId,
-      questionId: targetQuestion.question_id,
-      questionPrompt: targetQuestion.prompt,
-      analysis,
+      return {
+        observationId: data.observationId || `obs-${action.action_id}`,
+        sessionId: action.session_id,
+        questionId: action.question_id || questionId || '',
+        type:
+          data.type ||
+          (action.trigger_type === 'active_monitoring_goal_match'
+            ? 'goal_conditioned_focus'
+            : action.trigger_type === 'longitudinal_lecturer_focus_match'
+            ? 'prior_discussion_focus'
+            : 'prevalence_shift'),
+        triggerType: action.trigger_type,
+        decisionRuleExecuted: action.decision_rule_executed,
+        actionTaken: action.action_taken,
+        humanCheckpointStatus: action.human_checkpoint_status || 'pending',
+        title: String(data.title || data.goalTitle || 'Observed Reasoning Pattern'),
+        description: String(data.description || action.action_taken),
+        clusterId: String(data.clusterId || ''),
+        prevalencePercentage: Number(data.prevalencePercentage || data.prevalence || 0),
+        evidenceResponseIds: Array.isArray(data.evidenceResponseIds) ? data.evidenceResponseIds : [],
+        evidenceQuotes: Array.isArray(data.evidenceQuotes) ? data.evidenceQuotes : [],
+        timestamp: action.created_at,
+      } as BoundedAgentObservation
     })
 
     return NextResponse.json({ observations })
   } catch (error) {
     console.error('[agent-surfacing-api] error', error)
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to evaluate observations' },
+      { error: error instanceof Error ? error.message : 'Failed to retrieve observations' },
       { status: 500 }
     )
   }

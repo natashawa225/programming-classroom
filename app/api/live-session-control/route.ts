@@ -79,8 +79,9 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ session })
     }
 
-    if (action === 'next_question') {
-      const session = await moveToNextQuestion(sessionId, timerSeconds)
+    if (action === 'next_question' || action === 'skip_revision_and_next_question') {
+      const allowSkipRevision = action === 'skip_revision_and_next_question' || Boolean(body?.allowSkipRevision)
+      const session = await moveToNextQuestion(sessionId, timerSeconds, { allowSkipRevision })
       const nextQuestion = await getCurrentSessionQuestion(sessionId)
       await logEventSafely({
         sessionId,
@@ -102,7 +103,8 @@ export async function POST(request: NextRequest) {
     }
 
     if (action === 'complete_session') {
-      const session = await completeSession(sessionId)
+      const allowSkipRevision = Boolean(body?.allowSkipRevision)
+      const session = await completeSession(sessionId, { allowSkipRevision })
       void (async () => {
         try {
           const summary = await generateSessionSummary({ sessionId, force: true })

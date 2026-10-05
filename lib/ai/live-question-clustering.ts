@@ -843,6 +843,7 @@ export async function clusterLiveQuestionResponsesLegacy(input: {
           '• Replace "correctly identifies X" with "identifies X" or "proposes X".',
           '• Replace "contains errors in loop" with "modifies loop boundary" or "adjusts loop condition".',
           '• Describe WHAT students stated or did using purely descriptive, non-evaluative language.',
+          '• REFERENCE ANSWER CONFIDENTIALITY: Do NOT quote, reveal, or mention the reference answer text, expected correct answer statements, or correctness comparisons in cluster labels or summaries. Summaries must describe student reasoning neutrally without comparing student statements to reference answer keys.',
           '',
           'REFERENCE ANSWERS:',
           'Reference answers provide contextual grounding only — they MUST NOT determine cluster boundaries. First identify student reasoning patterns; assess reference alignment separately afterward.',

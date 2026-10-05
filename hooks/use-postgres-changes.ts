@@ -31,6 +31,7 @@ export function usePostgresChanges({
   const callbackRef = useRef(onChange)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const inFlightRef = useRef(false)
+  const pendingRefreshRef = useRef(false)
 
   useEffect(() => {
     callbackRef.current = onChange
@@ -45,9 +46,10 @@ export function usePostgresChanges({
 
     const runRefresh = async () => {
       if (inFlightRef.current) {
+        pendingRefreshRef.current = true
         if (debugLabel) {
           // eslint-disable-next-line no-console
-          console.debug(`[realtime:${debugLabel}] skipped refresh while previous refresh is still running`)
+          console.debug(`[realtime:${debugLabel}] queued pending refresh while previous refresh is still running`)
         }
         return
       }
@@ -57,6 +59,10 @@ export function usePostgresChanges({
         await callbackRef.current()
       } finally {
         inFlightRef.current = false
+        if (pendingRefreshRef.current) {
+          pendingRefreshRef.current = false
+          void runRefresh()
+        }
       }
     }
 
