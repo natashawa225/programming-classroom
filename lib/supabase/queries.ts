@@ -644,7 +644,12 @@ export async function carryForwardMissingRevisionResponses(sessionId: string, qu
 }
 
 export async function moveToNextQuestion(sessionId: string, timerSeconds?: number | null) {
-  const session = await getSession(sessionId)
+  let session = await getSession(sessionId)
+  if (session.live_phase === 'question_initial_open' || session.live_phase === 'question_revision_open') {
+    const attemptType = session.live_phase === 'question_revision_open' ? 'revision' : 'initial'
+    session = await closeCurrentQuestion(sessionId, attemptType)
+  }
+
   if (session.live_phase !== 'question_initial_closed' && session.live_phase !== 'question_revision_closed') {
     throw new Error('You can only move to the next question after the current step has been closed.')
   }
@@ -676,7 +681,12 @@ export async function moveToNextQuestion(sessionId: string, timerSeconds?: numbe
 }
 
 export async function completeSession(sessionId: string) {
-  const session = await getSession(sessionId)
+  let session = await getSession(sessionId)
+  if (session.live_phase === 'question_initial_open' || session.live_phase === 'question_revision_open') {
+    const attemptType = session.live_phase === 'question_revision_open' ? 'revision' : 'initial'
+    session = await closeCurrentQuestion(sessionId, attemptType)
+  }
+
   const questions = await getSessionQuestions(sessionId)
   const lastPosition = Math.max(...questions.map((question) => question.position))
 

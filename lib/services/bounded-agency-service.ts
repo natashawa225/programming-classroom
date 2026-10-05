@@ -143,7 +143,8 @@ CRITICAL INSTRUCTIONS:
 2. Evaluate whether each response provides evidence for each active goal.
 3. For relational goals like "Confidence and reasoning variation", consider the relationship between expressed self-reported confidence (1-5) and contrasting reasoning patterns across the whole set of responses.
 4. Allowed match values: "match", "no_match", "unclear". Assign "match" ONLY if clear evidence exists in the response.
-5. Return strict JSON matching the schema:
+5. CRITICAL OUTPUT CONSTRAINTS: For "no_match" responses, ALWAYS set "evidence": "" (empty string) to keep output compact. Provide a concise explanation (max 15 words) ONLY when match is "match" or "unclear".
+6. Return strict JSON matching the schema:
 {
   "evaluations": [
     {
@@ -152,7 +153,7 @@ CRITICAL INSTRUCTIONS:
         {
           "response_id": "<response_id>",
           "match": "match" | "no_match" | "unclear",
-          "evidence": "<short non-evaluative explanation of evidence if match>"
+          "evidence": "<empty string for no_match; short explanation for match/unclear>"
         }
       ]
     }
@@ -188,6 +189,7 @@ Evaluate all active monitoring goals for each student response and output the JS
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
     ],
+    maxTokens: 6000,
   })
 
   if (!result.ok || !result.json?.evaluations) {
