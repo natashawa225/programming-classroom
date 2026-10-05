@@ -459,7 +459,7 @@ All output (summary, labels, hints, explanations) must be in English, regardless
     { role: 'user', content: user },
   ]
 
-  const result = await openaiChatJson({ messages, maxTokens: 1100 })
+  const result = await openaiChatJson({ messages, maxTokens: 3000 })
 
   if (!result.ok) return { ok: false, error: result.error, promptMessages: messages }
 
@@ -1035,7 +1035,7 @@ async function analyzeGroupedQuestionWithAI(options: {
   const { promptJson, messages } = buildPerQuestionPrompt(options)
   const result = await openaiChatJson({
     messages,
-    maxTokens: options.session.condition === 'baseline' ? 800 : 900,
+    maxTokens: options.session.condition === 'baseline' ? 2000 : 3000,
     timeoutMs: 100000,
   })
 

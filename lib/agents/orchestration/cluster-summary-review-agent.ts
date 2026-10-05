@@ -105,7 +105,7 @@ export async function runClusterSummaryReviewAgent(
 
   try {
     const aiResult = await openaiChatJson({
-      maxTokens: 1600,
+      maxTokens: 4000,
       timeoutMs: 45000,
       messages: [
         { role: 'system', content: systemPrompt },

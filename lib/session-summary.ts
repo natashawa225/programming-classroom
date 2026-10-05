@@ -1157,8 +1157,8 @@ async function generateOpenAISummary(
   }))
 
   const result = await openaiChatJson({
-    timeoutMs: 22000,
-    maxTokens: 850,
+    timeoutMs: 35000,
+    maxTokens: 3000,
     messages: [
       {
         role: 'system',

@@ -116,8 +116,8 @@ export async function runTranslationAgent(input: {
 
   try {
     const aiResult = await openaiChatJson({
-      maxTokens: 1200,
-      timeoutMs: 30000,
+      maxTokens: 4000,
+      timeoutMs: 45000,
       messages: [
         {
           role: 'system',

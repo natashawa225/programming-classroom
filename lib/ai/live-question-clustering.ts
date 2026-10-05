@@ -802,7 +802,7 @@ export async function clusterLiveQuestionResponsesLegacy(input: {
     : ''
 
   const result = await openaiChatJson({
-    maxTokens: 1600,
+    maxTokens: 5000,
     timeoutMs: 100000,
     messages: [
       {
@@ -937,7 +937,7 @@ export async function clusterLiveQuestionResponsesLegacy(input: {
     })
 
     const retryResult = await openaiChatJson({
-      maxTokens: 1600,
+      maxTokens: 5000,
       timeoutMs: 100000,
       messages: [
         {

@@ -143,7 +143,7 @@ export async function openaiChatJson(options: {
 
   const model = options.model || config.model
   const timeoutMs = options.timeoutMs ?? 45000
-  const maxTokens = options.maxTokens ?? 900
+  const maxTokens = options.maxTokens ?? 4000
 
   const maxAttempts = 2
   let lastError: unknown

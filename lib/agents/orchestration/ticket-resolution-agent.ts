@@ -63,8 +63,8 @@ export async function runTargetedTicketResolutionAgent(
 
   try {
     const aiResult = await openaiChatJson({
-      maxTokens: 600,
-      timeoutMs: 25000,
+      maxTokens: 2000,
+      timeoutMs: 35000,
       messages: [
         { role: 'system', content: systemPrompt },
         {

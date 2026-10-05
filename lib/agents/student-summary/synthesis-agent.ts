@@ -325,7 +325,7 @@ export async function getOrCreateStudentSummary(input: {
     ]
     const result = await retryOpenAIJson(
       () => openaiChatJson({
-        maxTokens: 800,
+        maxTokens: 3000,
         timeoutMs: 60000,
         messages,
       }),

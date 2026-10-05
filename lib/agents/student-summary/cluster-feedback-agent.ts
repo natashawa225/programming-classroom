@@ -161,7 +161,7 @@ export async function generateClusterFeedbackCard(input: {
 
   const result = await retryOpenAIJson(
     () => openaiChatJson({
-      maxTokens: 650,
+      maxTokens: 2000,
       timeoutMs: 60000,
       messages,
     }),

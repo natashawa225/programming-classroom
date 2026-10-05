@@ -112,8 +112,9 @@ export async function runReferenceAlignmentAgent(
     '3. "partial" = response demonstrates partial overlap with key concepts in reference reasoning examples.',
     '4. "limited" = response exhibits minimal conceptual overlap with reference reasoning examples.',
     '5. "unclear" = response is ambiguous or lacks sufficient reasoning to determine overlap.',
-    '6. STRICTLY NON-EVALUATIVE EXPLANATIONS: Neutral classroom descriptions ONLY. Never use forbidden evaluative terms like "correct", "wrong", "incorrect", "misconception", or "flawed".',
+    '6. STRICTLY NON-EVALUATIVE EXPLANATIONS: Neutral classroom descriptions ONLY (max 10 words). Never use forbidden evaluative terms like "correct", "wrong", "incorrect", "misconception", or "flawed".',
     '7. Output alignment at the RESPONSE LEVEL for every input responseId.',
+    '8. ALWAYS include alignedReferenceIds array containing the matching referenceId strings (e.g. ["ref_1"]) whenever alignment is "strong" or "partial".',
     '',
     'Output JSON matching this exact structure:',
     JSON.stringify(
@@ -122,7 +123,7 @@ export async function runReferenceAlignmentAgent(
           {
             responseId: 'S001',
             alignment: 'strong',
-            explanation: 'neutral 1-sentence description of conceptual overlap with reference reasoning example',
+            explanation: 'neutral concise description of conceptual overlap',
             alignedReferenceIds: ['ref_1'],
           },
         ],
@@ -134,8 +135,8 @@ export async function runReferenceAlignmentAgent(
 
   try {
     const aiResult = await openaiChatJson({
-      maxTokens: 1400,
-      timeoutMs: 35000,
+      maxTokens: 4000,
+      timeoutMs: 45000,
       messages: [
         { role: 'system', content: systemPrompt },
         {
@@ -160,9 +161,14 @@ export async function runReferenceAlignmentAgent(
             summary: rawExplanation || 'Conceptual overlap with reference reasoning examples.',
           })
 
-          const alignedIds = Array.isArray(item.alignedReferenceIds)
+          let alignedIds = Array.isArray(item.alignedReferenceIds)
             ? item.alignedReferenceIds.map((id: unknown) => String(id || '')).filter(Boolean)
             : []
+
+          // If alignment is strong/partial but alignedReferenceIds was omitted by model, default to first reference answer
+          if (alignedIds.length === 0 && (level === 'strong' || level === 'partial') && refAnswers.length > 0) {
+            alignedIds = [refAnswers[0].reference_id]
+          }
 
           alignments.set(String(item.responseId), {
             responseId: String(item.responseId),
@@ -172,18 +178,22 @@ export async function runReferenceAlignmentAgent(
           })
         }
       }
+    } else {
+      console.warn('[reference-alignment-agent] AI call failed or returned invalid format:', aiResult)
     }
   } catch (err) {
     console.error('[reference-alignment-agent] Error during semantic alignment evaluation', err)
   }
 
   // Fallback for any unassigned response
+  const defaultRefId = refAnswers.length > 0 ? [refAnswers[0].reference_id] : []
   for (const item of toEvaluateViaLLM) {
     if (!alignments.has(item.responseId)) {
       alignments.set(item.responseId, {
         responseId: item.responseId,
         alignment: 'partial',
         evidence: 'Response shows partial conceptual overlap with topic reasoning context.',
+        alignedReferenceIds: defaultRefId,
       })
     }
   }
