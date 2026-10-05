@@ -1169,7 +1169,27 @@ For each question, you are given neutral clusters of student responses ("pattern
 Return JSON only with these exact fields:
 - recurringPatterns: array of 2-3 strings, each in format "Short neutral label. Descriptive sentence outlining prevalence and context."
 - sessionTakeaway: 1-2 neutral sentences (max 40 words) describing overall reasoning pattern distribution across student responses and rounds.
-- nextTeachingRecommendation: 1-2 neutral, evidence-grounded sentences (max 40 words) framed as "Possible next-session considerations" (e.g. suggesting class discussion of key pattern differences without diagnosing learning deficits or prescribing reteaching).
+-nextTeachingRecommendation: 1-2 neutral, evidence-grounded sentences (max 40 words) framed as "Possible next-session considerations".
+
+The recommendation must be derived from specific observed reasoning patterns, contrasts between patterns, or changes across rounds in the provided data. Suggest possible classroom activities that allow students to compare, explain, or reflect on these observed approaches.
+
+Recommendation evidence priority:
+1. Current question reasoning patterns and cluster differences.
+2. Revision movements between rounds.
+3. Teacher observations and notes.
+4. Longitudinal patterns.
+
+Do not provide generic teaching advice. Do not diagnose deficits, prescribe remediation, judge responses, or imply that students require correction.
+
+Avoid:
+- "Reviewing key concepts"
+- "Re-teaching..."
+- "Students need to..."
+- "The teacher should..."
+
+Prefer:
+"Discussing differences between [observed reasoning pattern A] and [observed reasoning pattern B] may provide an opportunity for students to compare how [conceptual distinction] shaped their approaches."
+
 - qualitativeRevisionNote: 1-2 neutral sentences (max 40 words) describing how student reasoning patterns evolved between initial and revision rounds without judging correctness or claiming learning gains.
 
 Strict rules:

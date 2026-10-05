@@ -1,28 +1,28 @@
-# Scripts
+# Scripts & Database Management
 
-This folder contains SQL migration/seed scripts for the Supabase database.
+This folder contains database setup scripts, consolidated schema baselines, archived migration history, and seed generator tools for Supabase.
 
-## Migration order
+## Database Setup
 
-Run numbered SQL files in ascending order when setting up or upgrading a database:
+To set up a fresh Supabase database or reset your environment to the canonical final schema state:
 
-1. `001_create_tables.sql`
-2. `002_seed_participants.sql`
-3. `003_migrate_to_session_participants.sql`
-4. Continue through the latest numbered migration.
+1. Execute **`scripts/schema/01_complete_schema.sql`** in the Supabase SQL Editor. This file contains the complete, reconstructed final schema (all tables, columns, indexes, functions, triggers, and realtime publications).
+2. Execute **`scripts/schema/02_initial_seeds.sql`** to load default sample experiment sessions and open-ended question prompts.
 
-The numbered files are kept as deployment/history artifacts. Do not delete or reorder them unless you are intentionally creating a new consolidated schema baseline.
+## Seed Generators (`scripts/tools/`)
 
-## Generated files
-
-`generate-participant-seed.mjs` writes generated seed outputs to `scripts/generated/`.
-
-That directory is ignored by git because it may contain generated participant credentials. Regenerate it when needed:
+Generator tools create private credential seeds in `scripts/generated/` (which is git-ignored for security):
 
 ```bash
-node scripts/generate-participant-seed.mjs
+# Generate participant seeds
+node scripts/tools/generate-participant-seed.mjs
+
+# Generate teacher seeds
+node scripts/tools/generate-teacher-seed.mjs
 ```
 
-## Local clutter
+Apply generated outputs from `scripts/generated/` to Supabase as an admin user.
 
-macOS `.DS_Store` files should not be committed.
+## Migration History (`scripts/archive/`)
+
+Incremental SQL migration files (`001_` through `024_`) are archived in `scripts/archive/` as historical records. The single source of truth for fresh database provisioning is `scripts/schema/01_complete_schema.sql`.

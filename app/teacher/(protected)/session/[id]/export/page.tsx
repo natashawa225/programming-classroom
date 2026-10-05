@@ -87,7 +87,7 @@ export default function SessionExport() {
       setError(null)
 
       if (exportFormat === 'csv') {
-        const response = await fetch(`/teacher/api/export-session?sessionId=${sessionId}`)
+        const response = await fetch(`/api/export-session?sessionId=${sessionId}`)
         if (!response.ok) {
           let message = 'Export failed'
           try {
@@ -108,7 +108,7 @@ export default function SessionExport() {
         document.body.removeChild(a)
       } else {
         // JSON export
-        const response = await fetch(`/teacher/api/export-session?sessionId=${sessionId}&format=json`)
+        const response = await fetch(`/api/export-session?sessionId=${sessionId}&format=json`)
         if (!response.ok) {
           let message = 'Export failed'
           try {

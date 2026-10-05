@@ -551,7 +551,7 @@ export default function SessionAnalysis() {
         }
       }
 
-      const response = await fetch('/teacher/api/analyze-session', {
+      const response = await fetch('/api/analyze-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

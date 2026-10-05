@@ -61,7 +61,7 @@ export function StudentSessionSummary({ sessionId }: { sessionId: string }) {
         setLoading(true)
         setError(null)
 
-        const response = await fetch('/student/api/student-session-summary', {
+        const response = await fetch('/api/student-session-summary', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

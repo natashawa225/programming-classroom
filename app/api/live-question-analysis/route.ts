@@ -270,9 +270,10 @@ export async function POST(request: NextRequest) {
       })),
     })
 
+    const isTargetingCurrentQuestion = question.position === session.current_question_position
     let closedInThisRequest = false
     if (
-      !hasExplicitQuestionTarget &&
+      isTargetingCurrentQuestion &&
       (
         (attemptType === 'initial' && session.live_phase === 'question_initial_open') ||
         (attemptType === 'revision' && session.live_phase === 'question_revision_open')
